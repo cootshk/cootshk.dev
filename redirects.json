@@ -1,6 +1,6 @@
 {
-    "index": "https://www.youtube.com/watch?v=pX7nsPPWYy0",
     "discord": "https://discord.gg/qBtkZQCtHu",
     "nohello": "https://nohello.net/en",
-    "vibecode": "https://www.justfuckingcode.com/"
+    "vibecode": "https://www.justfuckingcode.com/",
+    ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }

@@ -30,8 +30,8 @@
                         return;
                     }
                 }
-                console.warn("No redirect found!")
-                // open("/", "_self")
+                console.error("No redirect found!") // this should never happen as long as we match .* in redirects.json
+                open("/", "_self")
             })
     </script>
 </body>
