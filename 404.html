@@ -13,7 +13,11 @@
                 return str.substring(prefix.length)
             return str
         }
-        (()=>{
+    </script>
+</head>
+<body>
+    <p>Redirecting...</p>
+    <script>
         // redirects.json is regex-matched in order, first match redirects
         fetch("/redirects.json")
             .then(resp => resp.json())
@@ -21,17 +25,14 @@
                 const path = removePrefix(window.location.href.trim(), "https://cootshk.dev/")
                 for (const [key, value] of Object.entries(json)) {
                     if (new RegExp("^"+key, "gmi").test(path)) {
+                        console.log(`Matched ${key} to ${path}, redirecting to ${value}!`)
                         open(value, "_self")
+                        return;
                     }
-                    return;
                 }
                 console.warn("No redirect found!")
                 // open("/", "_self")
             })
-        })()
     </script>
-</head>
-<body>
-    <p>Redirecting...</p>
 </body>
 </html>
