@@ -4,5 +4,6 @@
     "nohello": "https://nohello.net/en",
     "vibecode": "https://www.justfuckingcode.com/",
     "xy": "https://xyproblem.info/",
+    "redirects": "/redirects.json",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
