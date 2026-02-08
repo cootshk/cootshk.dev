@@ -3,5 +3,6 @@
     "github": "https://github.com/cootshk",
     "nohello": "https://nohello.net/en",
     "vibecode": "https://www.justfuckingcode.com/",
+    "xy": "https://xyproblem.info/",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
