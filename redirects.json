@@ -8,5 +8,6 @@
     "xy": "https://xyproblem.info/",
     "source": "https://github.com/cootshk/cootshk.dev",
     "redirects": "/redirects.json",
+    "(mod)?rinth": "https://modrinth.com/user/Cootshk",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
