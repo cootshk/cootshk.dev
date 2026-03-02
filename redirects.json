@@ -11,5 +11,7 @@
     "source": "https://github.com/cootshk/cootshk.dev",
     "redirects": "/redirects.json",
     "(mod)?rinth": "https://modrinth.com/user/Cootshk",
+    "cdn": "https://github.com/cootshk/cootshk.dev/tree/master/cdn",
+    "source": "https://github.com/cootshk/cootshk.dev",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
