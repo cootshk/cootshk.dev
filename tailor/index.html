@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tailor — Fabric Mod Analyzer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-content">
+      <a class="nav-brand" href="#" onclick="resetView(); return false;">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        <span class="nav-title">Tailor</span>
+        <span class="nav-subtitle">Fabric Mod Analyzer</span>
+      </a>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    <!-- Upload/Search Section -->
+    <section id="input-section" class="card input-card">
+      <div class="tabs">
+        <button class="tab active" data-tab="upload">Upload .jar</button>
+        <button class="tab" data-tab="modrinth">Search Modrinth</button>
+      </div>
+
+      <div id="tab-upload" class="tab-content active">
+        <div id="drop-zone" class="drop-zone">
+          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <p class="drop-text">Drag & drop a <strong>.jar</strong> file here</p>
+          <p class="drop-subtext">or click to browse</p>
+          <input type="file" id="file-input" accept=".jar" hidden>
+        </div>
+      </div>
+
+      <div id="tab-modrinth" class="tab-content">
+        <div class="search-row">
+          <div class="search-bar">
+            <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="modrinth-search" placeholder="Search for Fabric mods on Modrinth..." autocomplete="off">
+          </div>
+          <select id="mc-version-filter" class="mc-version-select">
+            <option value="">All versions</option>
+          </select>
+        </div>
+        <div id="search-results" class="search-results"></div>
+        <div id="version-picker" class="version-picker hidden"></div>
+      </div>
+    </section>
+
+    <!-- Loading -->
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <p>Analyzing mod...</p>
+    </div>
+
+    <!-- Results Section -->
+    <section id="results-section" class="hidden">
+      <div id="mod-header" class="card mod-header"></div>
+      <div id="mod-details" class="details-grid"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
