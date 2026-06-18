@@ -887,52 +887,122 @@ function renderJavaMeta(meta) {
 }
 
 function renderDecompilerPanel(mod) {
-  const options = mod.classEntries
-    .map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`)
-    .join('');
-
   return `
     <div class="decompiler-panel" data-mod-sha1="${mod.sha1}">
       <div class="decompiler-controls">
-        <label class="decompiler-label">Class</label>
-        <select class="decompiler-select">${options}</select>
-        <button class="btn btn-secondary btn-decompile" data-mod-sha1="${mod.sha1}">${iconSvg('play')} Decompile</button>
+        <button class="btn btn-secondary btn-explore-classes" data-mod-sha1="${mod.sha1}">${iconSvg('file-code')} explore classes</button>
       </div>
-      <div class="decompiler-status">Select a class and click Decompile.</div>
+      <div class="decompiler-status">Click "explore classes" to browse .class files.</div>
+      <div class="class-tree hidden">${renderClassTree(mod.classEntries)}</div>
       <pre class="decompiler-output hidden"></pre>
     </div>
   `;
 }
 
+function renderClassTree(classEntries) {
+  const root = { dirs: {}, files: [] };
+  const sorted = [...classEntries].sort((a, b) => a.entry.localeCompare(b.entry));
+
+  for (const item of sorted) {
+    const parts = item.entry.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.dirs[part]) {
+        node.dirs[part] = { dirs: {}, files: [] };
+      }
+      node = node.dirs[part];
+    }
+    node.files.push(item);
+  }
+
+  const renderNode = node => {
+    const dirNames = Object.keys(node.dirs).sort((a, b) => a.localeCompare(b));
+    const folders = dirNames.map(name => `
+      <details class="class-tree-folder" open>
+        <summary>${esc(name)}</summary>
+        ${renderNode(node.dirs[name])}
+      </details>
+    `).join('');
+    const files = node.files.map(file => `
+      <button class="class-tree-file" type="button" data-class-name="${esc(file.name)}" data-class-entry="${esc(file.entry)}">${esc(file.entry.split('/').pop())}</button>
+    `).join('');
+    return `<div class="class-tree-children">${folders}${files}</div>`;
+  };
+
+  return renderNode(root);
+}
+
+function getClassCacheKey(modSha1, classEntry) {
+  return `${classEntry}-${modSha1}:text`;
+}
+
+function readClassCache(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeClassCache(key, source) {
+  try {
+    localStorage.setItem(key, source);
+  } catch (_) { /* ignore localStorage quota/privacy errors */ }
+}
+
 function setupDecompilerButtons() {
-  $$('.btn-decompile').forEach(btn => {
-    if (btn.dataset.bound) return;
-    btn.dataset.bound = '1';
-    btn.addEventListener('click', async () => {
-      const mod = findModInStackBySha1(btn.dataset.modSha1);
+  $$('.decompiler-panel').forEach(panel => {
+    if (panel.dataset.bound) return;
+    panel.dataset.bound = '1';
+
+    const exploreBtn = $('.btn-explore-classes', panel);
+    const tree = $('.class-tree', panel);
+    const status = $('.decompiler-status', panel);
+    const output = $('.decompiler-output', panel);
+
+    exploreBtn.addEventListener('click', () => {
+      tree.classList.toggle('hidden');
+    });
+
+    tree.addEventListener('click', async e => {
+      const classBtn = e.target.closest('.class-tree-file');
+      if (!classBtn) return;
+
+      const mod = findModInStackBySha1(exploreBtn.dataset.modSha1);
       if (!mod) return;
 
-      const panel = btn.closest('.decompiler-panel');
-      const select = $('.decompiler-select', panel);
-      const status = $('.decompiler-status', panel);
-      const output = $('.decompiler-output', panel);
-      const className = select.value;
-      if (!className) return;
+      $$('.class-tree-file.active', tree).forEach(el => el.classList.remove('active'));
+      classBtn.classList.add('active');
 
-      btn.disabled = true;
-      status.textContent = `Decompiling ${className}...`;
+      const className = classBtn.dataset.className;
+      const classEntry = classBtn.dataset.classEntry;
+      const cacheKey = getClassCacheKey(mod.sha1, classEntry);
+
       output.classList.add('hidden');
       output.textContent = '';
 
+      const cached = readClassCache(cacheKey);
+      if (cached) {
+        output.textContent = cached;
+        output.classList.remove('hidden');
+        status.textContent = `Loaded ${className} from cache.`;
+        return;
+      }
+
+      status.textContent = `Decompiling ${className}...`;
+      classBtn.disabled = true;
+
       try {
         const source = await decompileClassInMod(mod, className);
+        writeClassCache(cacheKey, source);
         output.textContent = source;
         output.classList.remove('hidden');
         status.textContent = `Decompiled ${className}.`;
-      } catch (e) {
-        status.textContent = `Decompilation failed: ${e.message}`;
+      } catch (err) {
+        status.textContent = `Decompilation failed: ${err.message}`;
       } finally {
-        btn.disabled = false;
+        classBtn.disabled = false;
       }
     });
   });

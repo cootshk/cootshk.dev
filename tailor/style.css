@@ -494,7 +494,7 @@ body {
 
 @media (max-width: 768px) {
   .details-grid { grid-template-columns: 1fr; }
-  .decompiler-controls { grid-template-columns: 1fr; }
+  .decompiler-controls { flex-direction: column; align-items: stretch; }
 }
 
 .detail-card {
@@ -690,9 +690,8 @@ body {
 }
 
 .decompiler-controls {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
+  display: flex;
+  gap: 8px;
   align-items: center;
 }
 
@@ -733,6 +732,67 @@ body {
   overflow: auto;
   white-space: pre;
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.class-tree {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--bg-input);
+}
+
+.class-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.class-tree-folder {
+  margin-left: 12px;
+}
+
+.class-tree-folder > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.class-tree-folder > summary::-webkit-details-marker {
+  display: none;
+}
+
+.class-tree-folder > summary:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.class-tree-file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.class-tree-file:hover {
+  background: var(--bg-raised);
+}
+
+.class-tree-file.active {
+  background: rgba(27, 217, 106, 0.14);
+  color: var(--accent);
 }
 
 /* Tags */
