@@ -465,7 +465,7 @@ async function decompileClassInMod(mod, className) {
   });
 
   const source = result[className];
-  if (!source) throw new Error('Decompiler did not return source for the selected class.');
+  if (!source) throw new Error(`Decompiler did not return source for class: ${className}`);
   return source;
 }
 
@@ -750,6 +750,14 @@ function findModBySha1(mod, sha1) {
   return null;
 }
 
+function findModInStackBySha1(sha1) {
+  for (let i = modStack.length - 1; i >= 0; i--) {
+    const found = findModBySha1(modStack[i], sha1);
+    if (found) return found;
+  }
+  return null;
+}
+
 function setupViewFullButtons() {
   $$('.btn-view-full').forEach(btn => {
     if (btn.dataset.bound) return;
@@ -877,7 +885,7 @@ function setupDecompilerButtons() {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
     btn.addEventListener('click', async () => {
-      const mod = findModBySha1(modStack[0], btn.dataset.modSha1);
+      const mod = findModInStackBySha1(btn.dataset.modSha1);
       if (!mod) return;
 
       const panel = btn.closest('.decompiler-panel');
