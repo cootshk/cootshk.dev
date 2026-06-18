@@ -494,6 +494,7 @@ body {
 
 @media (max-width: 768px) {
   .details-grid { grid-template-columns: 1fr; }
+  .decompiler-controls { flex-direction: column; align-items: stretch; }
 }
 
 .detail-card {
@@ -680,6 +681,235 @@ body {
   color: var(--text-muted);
   font-style: italic;
   padding: 8px 0;
+}
+
+.decompiler-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decompiler-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.decompiler-mc-version {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--bg-raised);
+}
+
+.decompiler-mc-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.decompiler-mc-select,
+.decompiler-mapping-select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  font-family: inherit;
+  padding: 6px 10px;
+}
+
+.decompiler-mapping-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.decompiler-status {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.decompiler-output {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-height: 560px;
+  overflow: auto;
+  white-space: pre;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.decompiler-code {
+  display: block;
+}
+
+.class-tree {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--bg-input);
+}
+
+.class-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.class-tree-folder {
+  margin-left: 12px;
+}
+
+.class-tree-folder > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.class-tree-folder > summary::-webkit-details-marker {
+  display: none;
+}
+
+.class-tree-folder > summary:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.class-tree-file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.class-tree-file:hover {
+  background: var(--bg-raised);
+}
+
+.class-tree-file.active {
+  background: rgba(27, 217, 106, 0.14);
+  color: var(--accent);
+}
+
+.class-tree-minecraft {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.class-tree-minecraft-title {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
+}
+
+.class-tree-minecraft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.class-tree-minecraft-empty {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.minecraft-tree-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--blue);
+  text-decoration: none;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.minecraft-tree-link:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.minecraft-tree-link.active {
+  background: rgba(126, 184, 218, 0.16);
+  color: var(--blue);
+}
+
+.code-line {
+  min-height: 1.2em;
+}
+
+.code-kw {
+  color: #ff9e64;
+}
+
+.code-comment {
+  color: var(--text-muted);
+}
+
+.code-string {
+  color: #9ece6a;
+}
+
+.code-number {
+  color: #e0af68;
+}
+
+.code-class-target,
+.code-method-target {
+  color: #7dcfff;
+}
+
+.code-annotation {
+  color: #e0af68;
+}
+
+.code-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.code-link:hover {
+  color: #7aa2f7;
+  text-decoration: underline;
 }
 
 /* Tags */
