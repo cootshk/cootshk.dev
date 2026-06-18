@@ -7,6 +7,8 @@ const $$ = (s, p = document) => [...p.querySelectorAll(s)];
 let modStack = []; // stack of parsed mod objects
 let modrinthLookup = {}; // sha1 -> { projectId, slug, versionId }
 let mcVersions = []; // cached list of Minecraft versions from Modrinth
+const VF_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@run-slicer/vf@0.6.3-1.12.0/vf.js';
+let vfDecompilePromise = null;
 
 // ── Load Minecraft versions from Modrinth on startup ──
 (async function loadMcVersions() {
@@ -309,6 +311,12 @@ async function parseJar(buffer, filename) {
 
   // ── Java metadata ──
   const allFiles = Object.keys(zip.files);
+  const classEntries = allFiles
+    .filter(n => n.endsWith('.class'))
+    .map(entry => ({
+      entry,
+      name: entry.slice(0, -6)
+    }));
 
   // 1) Java bytecode version: read first .class file header
   let javaBytecodeVersion = null;
@@ -370,7 +378,7 @@ async function parseJar(buffer, filename) {
     assetCounts: { total: assetFiles.length, textures: textureCount, models: modelCount, sounds: soundCount, shaders: shaderCount },
     hasDataPack,
     dataCounts: { total: dataFiles.length, recipes: recipeCount, lootTables: lootTableCount, tags: tagCount, advancements: advancementCount, worldgen: worldgenCount, structures: structureCount },
-    classFileCount: allFiles.filter(n => n.endsWith('.class')).length,
+    classFileCount: classEntries.length,
     totalFileCount: allFiles.filter(n => !n.endsWith('/')).length,
   };
 
@@ -408,8 +416,55 @@ async function parseJar(buffer, filename) {
     fmj,
     icon: iconDataUrl,
     meta,
-    jars
+    jars,
+    classEntries,
+    zip
   };
+}
+
+async function getVineflowerDecompiler() {
+  if (!vfDecompilePromise) {
+    vfDecompilePromise = import(VF_MODULE_URL).then(mod => mod.decompile);
+  }
+  return vfDecompilePromise;
+}
+
+async function getClassBytes(mod, className) {
+  if (!mod.zip || !mod.classEntries?.length) return null;
+  if (!mod.classLookup) {
+    mod.classLookup = Object.fromEntries(mod.classEntries.map(item => [item.name, item.entry]));
+  }
+  if (!mod.classBytesCache) {
+    mod.classBytesCache = new Map();
+  }
+
+  if (mod.classBytesCache.has(className)) {
+    return mod.classBytesCache.get(className);
+  }
+
+  const entry = mod.classLookup[className];
+  if (!entry) return null;
+  const file = mod.zip.file(entry);
+  if (!file) return null;
+  const bytes = await file.async('uint8array');
+  mod.classBytesCache.set(className, bytes);
+  return bytes;
+}
+
+async function decompileClassInMod(mod, className) {
+  const decompile = await getVineflowerDecompiler();
+  const resources = mod.classEntries.map(item => item.name);
+  const result = await decompile([className], {
+    resources,
+    source: name => getClassBytes(mod, name),
+    options: {
+      banner: '// Decompiled with Tailor using Vineflower\\n'
+    }
+  });
+
+  const source = result[className];
+  if (!source) throw new Error('Decompiler did not return source for the selected class.');
+  return source;
 }
 
 // ── Modrinth hash lookup ──
@@ -539,6 +594,11 @@ function renderMod(mod) {
     grid.innerHTML += detailCard('Metadata', iconSvg('cpu'), metaContent, 'full-width', 'row-1');
   }
 
+  // ── Row 1.5: Class Decompiler ──
+  if (mod.classEntries?.length) {
+    grid.innerHTML += detailCard('Class Decompiler', iconSvg('file-code'), renderDecompilerPanel(mod), 'full-width', 'row-1b');
+  }
+
   // ── Row 2: Dependencies / Breaks ──
   if (fmj.depends && Object.keys(fmj.depends).length) {
     grid.innerHTML += detailCard('Dependencies', iconSvg('link'), renderDepList(fmj.depends), '', 'row-2');
@@ -571,6 +631,7 @@ function renderMod(mod) {
   // Setup expand toggles and buttons
   setupJarToggles();
   setupViewFullButtons();
+  setupDecompilerButtons();
   setupCollapsibles();
   updateModrinthButtons();
 }
@@ -789,6 +850,58 @@ function renderJavaMeta(meta) {
   }
 
   return `<div class="meta-pills">${pills.join('')}</div>${mixinDetail}`;
+}
+
+function renderDecompilerPanel(mod) {
+  const options = mod.classEntries
+    .map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`)
+    .join('');
+
+  return `
+    <div class="decompiler-panel" data-mod-sha1="${mod.sha1}">
+      <div class="decompiler-controls">
+        <label class="decompiler-label">Class</label>
+        <select class="decompiler-select">${options}</select>
+        <button class="btn btn-secondary btn-decompile" data-mod-sha1="${mod.sha1}">${iconSvg('play')} Decompile</button>
+      </div>
+      <div class="decompiler-status">Select a class and click Decompile.</div>
+      <pre class="decompiler-output hidden"></pre>
+    </div>
+  `;
+}
+
+function setupDecompilerButtons() {
+  $$('.btn-decompile').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = '1';
+    btn.addEventListener('click', async () => {
+      const mod = findModBySha1(modStack[0], btn.dataset.modSha1);
+      if (!mod) return;
+
+      const panel = btn.closest('.decompiler-panel');
+      const select = $('.decompiler-select', panel);
+      const status = $('.decompiler-status', panel);
+      const output = $('.decompiler-output', panel);
+      const className = select.value;
+      if (!className) return;
+
+      btn.disabled = true;
+      status.textContent = `Decompiling ${className}...`;
+      output.classList.add('hidden');
+      output.textContent = '';
+
+      try {
+        const source = await decompileClassInMod(mod, className);
+        output.textContent = source;
+        output.classList.remove('hidden');
+        status.textContent = `Decompiled ${className}.`;
+      } catch (e) {
+        status.textContent = `Decompilation failed: ${e.message}`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function formatVer(ver) {

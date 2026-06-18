@@ -494,6 +494,7 @@ body {
 
 @media (max-width: 768px) {
   .details-grid { grid-template-columns: 1fr; }
+  .decompiler-controls { grid-template-columns: 1fr; }
 }
 
 .detail-card {
@@ -680,6 +681,58 @@ body {
   color: var(--text-muted);
   font-style: italic;
   padding: 8px 0;
+}
+
+.decompiler-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decompiler-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.decompiler-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.decompiler-select {
+  min-width: 0;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.decompiler-status {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.decompiler-output {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-height: 560px;
+  overflow: auto;
+  white-space: pre;
+  font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
 /* Tags */
