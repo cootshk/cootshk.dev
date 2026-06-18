@@ -693,25 +693,34 @@ body {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
-.decompiler-label {
-  font-size: 0.8rem;
+.decompiler-mc-version {
+  font-size: 0.78rem;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: var(--bg-raised);
 }
 
-.decompiler-select {
-  min-width: 0;
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 8px;
+.decompiler-mc-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.decompiler-mc-select {
   border: 1px solid var(--border);
+  border-radius: 8px;
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 0.85rem;
-  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.82rem;
+  font-family: inherit;
+  padding: 6px 10px;
 }
 
 .decompiler-status {
@@ -732,6 +741,10 @@ body {
   overflow: auto;
   white-space: pre;
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.decompiler-code {
+  display: block;
 }
 
 .class-tree {
@@ -793,6 +806,85 @@ body {
 .class-tree-file.active {
   background: rgba(27, 217, 106, 0.14);
   color: var(--accent);
+}
+
+.class-tree-minecraft {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.class-tree-minecraft-title {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 6px;
+}
+
+.class-tree-minecraft-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.class-tree-minecraft-empty {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.minecraft-tree-link {
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--blue);
+  text-decoration: none;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+
+.minecraft-tree-link:hover {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+
+.code-line {
+  min-height: 1.2em;
+}
+
+.code-kw {
+  color: #ff9e64;
+}
+
+.code-comment {
+  color: var(--text-muted);
+}
+
+.code-string {
+  color: #9ece6a;
+}
+
+.code-number {
+  color: #e0af68;
+}
+
+.code-class-target,
+.code-method-target {
+  color: #7dcfff;
+}
+
+.code-link {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: #7aa2f7;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.code-link:hover {
+  color: #bb9af7;
 }
 
 /* Tags */

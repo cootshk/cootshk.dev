@@ -887,19 +887,33 @@ function renderJavaMeta(meta) {
 }
 
 function renderDecompilerPanel(mod) {
+  const detectedMinecraftVersion = detectMinecraftVersion(mod.fmj);
+  const fallbackMinecraftVersion = mcVersions[0]?.version || '';
+  const activeMinecraftVersion = detectedMinecraftVersion || fallbackMinecraftVersion;
+  const versionOptions = mcVersions.map(v =>
+    `<option value="${esc(v.version)}"${v.version === activeMinecraftVersion ? ' selected' : ''}>${esc(v.version)}</option>`
+  ).join('');
+
   return `
-    <div class="decompiler-panel" data-mod-sha1="${mod.sha1}">
+    <div class="decompiler-panel" data-mod-sha1="${mod.sha1}" data-mc-version="${esc(activeMinecraftVersion)}">
       <div class="decompiler-controls">
         <button class="btn btn-secondary btn-explore-classes" data-mod-sha1="${mod.sha1}">${iconSvg('file-code')} explore classes</button>
+        ${detectedMinecraftVersion
+          ? `<span class="decompiler-mc-version">Minecraft ${esc(detectedMinecraftVersion)}</span>`
+          : `<label class="decompiler-mc-picker">Minecraft
+              <select class="decompiler-mc-select">
+                ${versionOptions}
+              </select>
+            </label>`}
       </div>
       <div class="decompiler-status">Click "explore classes" to browse .class files.</div>
-      <div class="class-tree hidden">${renderClassTree(mod.classEntries)}</div>
-      <pre class="decompiler-output hidden"></pre>
+      <div class="class-tree hidden">${renderClassTree(mod.classEntries, activeMinecraftVersion)}</div>
+      <pre class="decompiler-output hidden"><code class="decompiler-code"></code></pre>
     </div>
   `;
 }
 
-function renderClassTree(classEntries) {
+function renderClassTree(classEntries, minecraftVersion) {
   const root = { dirs: {}, files: [] };
   const sorted = [...classEntries].sort((a, b) => a.entry.localeCompare(b.entry));
 
@@ -930,7 +944,17 @@ function renderClassTree(classEntries) {
     return `<div class="class-tree-children">${folders}${files}</div>`;
   };
 
-  return renderNode(root);
+  return `
+    ${renderNode(root)}
+    <div class="class-tree-minecraft">
+      <div class="class-tree-minecraft-title">
+        Minecraft sources (${esc(minecraftVersion || 'select version')})
+      </div>
+      <div class="class-tree-minecraft-list">
+        <div class="class-tree-minecraft-empty">Click any net.minecraft symbol in source to add it here.</div>
+      </div>
+    </div>
+  `;
 }
 
 function getClassCacheKey(modSha1, classEntry) {
@@ -951,6 +975,338 @@ function writeClassCache(key, source) {
   } catch (_) { /* ignore localStorage quota/privacy errors */ }
 }
 
+function detectMinecraftVersion(fmj) {
+  const dep = fmj?.depends?.minecraft;
+  if (!dep) return null;
+  const parts = Array.isArray(dep) ? dep : [dep];
+  for (const part of parts) {
+    if (typeof part !== 'string') continue;
+    if (part.trim() === '*') continue;
+    const match = part.match(/\d+\.\d+(?:\.\d+)?/);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+function ensureModClassIndexes(mod) {
+  if (mod.classBySlash && mod.classByDotted && mod.classBySimple) return;
+
+  mod.classBySlash = new Map();
+  mod.classByDotted = new Map();
+  mod.classBySimple = new Map();
+
+  for (const entry of mod.classEntries || []) {
+    const slash = entry.name;
+    const dotted = slash.replace(/\//g, '.');
+    const simple = dotted.split('.').pop();
+    mod.classBySlash.set(slash, entry);
+    mod.classByDotted.set(dotted, entry);
+    if (!mod.classBySimple.has(simple)) mod.classBySimple.set(simple, []);
+    mod.classBySimple.get(simple).push(entry);
+  }
+}
+
+function parseSourceContext(source) {
+  const imports = new Map();
+  let packageName = '';
+
+  for (const line of source.split('\n')) {
+    const pkg = line.match(/^\s*package\s+([\w.]+)\s*;/);
+    if (pkg) packageName = pkg[1];
+    const imp = line.match(/^\s*import\s+([\w.]+)\s*;/);
+    if (imp) {
+      const full = imp[1];
+      imports.set(full.split('.').pop(), full);
+    }
+  }
+
+  return { packageName, imports };
+}
+
+function resolveClassEntry(mod, classRef, sourceContext = null) {
+  ensureModClassIndexes(mod);
+
+  if (!classRef) return null;
+  const normalized = classRef.replace(/\$/g, '$');
+  if (mod.classByDotted.has(normalized)) return mod.classByDotted.get(normalized);
+  const slashName = normalized.replace(/\./g, '/');
+  if (mod.classBySlash.has(slashName)) return mod.classBySlash.get(slashName);
+
+  if (!normalized.includes('.') && sourceContext) {
+    const imported = sourceContext.imports.get(normalized);
+    if (imported && mod.classByDotted.has(imported)) return mod.classByDotted.get(imported);
+    if (sourceContext.packageName) {
+      const inPackage = `${sourceContext.packageName}.${normalized}`;
+      if (mod.classByDotted.has(inPackage)) return mod.classByDotted.get(inPackage);
+    }
+  }
+
+  if (!normalized.includes('.')) {
+    const matches = mod.classBySimple.get(normalized);
+    if (matches && matches.length === 1) return matches[0];
+  }
+
+  return null;
+}
+
+function analyzeDeclarations(source) {
+  const byLine = { classes: new Map(), methods: new Map() };
+  const methodTargets = new Set();
+  const methodPattern = /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|static|final|abstract|synchronized|native|strictfp|default|\s)+[\w<>\[\],?.@ ]+\s+([A-Za-z_$][\w$]*)\s*\([^;{)]*\)\s*(?:throws[^{]+)?\{/;
+  const classPattern = /\b(class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b/;
+  const blockedMethods = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'throw']);
+
+  source.split('\n').forEach((line, index) => {
+    const classMatch = line.match(classPattern);
+    if (classMatch) byLine.classes.set(index, classMatch[2]);
+
+    const methodMatch = line.match(methodPattern);
+    if (methodMatch && !blockedMethods.has(methodMatch[1])) {
+      byLine.methods.set(index, methodMatch[1]);
+      methodTargets.add(methodMatch[1]);
+    }
+  });
+
+  return { byLine, methodTargets };
+}
+
+function escHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const JAVA_KEYWORDS = new Set([
+  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class',
+  'const', 'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final',
+  'finally', 'float', 'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int',
+  'interface', 'long', 'native', 'new', 'package', 'private', 'protected', 'public',
+  'record', 'return', 'short', 'static', 'strictfp', 'super', 'switch', 'synchronized',
+  'this', 'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var'
+]);
+
+function buildMinecraftSourceUrl(version, className) {
+  if (!version || !className) return null;
+  const path = className.replace(/\./g, '/');
+  return `https://mappings.dev/${encodeURIComponent(version)}/${path}.html`;
+}
+
+function addMinecraftTreeLink(panel, className) {
+  if (!className.startsWith('net.minecraft.')) return;
+  const version = panel.dataset.mcVersion || '';
+  const url = buildMinecraftSourceUrl(version, className);
+  if (!url) return;
+
+  const list = $('.class-tree-minecraft-list', panel);
+  if (!list) return;
+  $('.class-tree-minecraft-empty', list)?.remove();
+
+  if ($(`.minecraft-tree-link[data-minecraft-class="${CSS.escape(className)}"]`, list)) return;
+
+  const link = document.createElement('a');
+  link.className = 'minecraft-tree-link';
+  link.dataset.minecraftClass = className;
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = className;
+  list.appendChild(link);
+}
+
+function updateMinecraftTreeVersion(panel) {
+  const version = panel.dataset.mcVersion || '';
+  const title = $('.class-tree-minecraft-title', panel);
+  if (title) {
+    title.textContent = `Minecraft sources (${version || 'select version'})`;
+  }
+  $$('.minecraft-tree-link', panel).forEach(link => {
+    const cls = link.dataset.minecraftClass;
+    const url = buildMinecraftSourceUrl(version, cls);
+    if (url) link.href = url;
+  });
+}
+
+function renderHighlightedSource(source, mod, className, panel) {
+  const { byLine, methodTargets } = analyzeDeclarations(source);
+  const sourceContext = parseSourceContext(source);
+  panel._sourceContext = sourceContext;
+
+  const lines = source.split('\n');
+  let inBlockComment = false;
+
+  const renderIdentifier = (token, lineIndex, nextChar, isDeclarationToken) => {
+    if (JAVA_KEYWORDS.has(token)) {
+      return `<span class="code-kw">${token}</span>`;
+    }
+
+    if (isDeclarationToken?.type === 'class') {
+      return `<span id="class-target-${escHtml(token)}" class="code-class-target">${escHtml(token)}</span>`;
+    }
+    if (isDeclarationToken?.type === 'method') {
+      return `<span id="method-target-${escHtml(token)}" class="code-method-target">${escHtml(token)}</span>`;
+    }
+
+    if (nextChar === '(' && methodTargets.has(token)) {
+      return `<button class="code-link code-method-link" type="button" data-jump-type="method" data-jump-target="${escHtml(token)}">${escHtml(token)}</button>`;
+    }
+
+    const classEntry = resolveClassEntry(mod, token, sourceContext);
+    if (classEntry) {
+      return `<button class="code-link code-class-link" type="button" data-jump-type="class" data-class-name="${escHtml(classEntry.name)}">${escHtml(token)}</button>`;
+    }
+
+    if (token.startsWith('net.minecraft.')) {
+      return `<button class="code-link code-minecraft-link" type="button" data-jump-type="minecraft" data-minecraft-class="${escHtml(token)}">${escHtml(token)}</button>`;
+    }
+
+    if (!token.includes('.') && sourceContext.imports.has(token)) {
+      const imported = sourceContext.imports.get(token);
+      if (imported.startsWith('net.minecraft.')) {
+        return `<button class="code-link code-minecraft-link" type="button" data-jump-type="minecraft" data-minecraft-class="${escHtml(imported)}">${escHtml(token)}</button>`;
+      }
+    }
+
+    if (/^[A-Z][A-Za-z0-9_$]*$/.test(token)) {
+      const unresolved = resolveClassEntry(mod, token, sourceContext);
+      if (unresolved) {
+        return `<button class="code-link code-class-link" type="button" data-jump-type="class" data-class-name="${escHtml(unresolved.name)}">${escHtml(token)}</button>`;
+      }
+    }
+
+    return escHtml(token);
+  };
+
+  const renderedLines = lines.map((line, lineIndex) => {
+    const classDecl = byLine.classes.get(lineIndex);
+    const methodDecl = byLine.methods.get(lineIndex);
+    let i = 0;
+    let out = '';
+
+    while (i < line.length) {
+      if (inBlockComment) {
+        const end = line.indexOf('*/', i);
+        if (end === -1) {
+          out += `<span class="code-comment">${escHtml(line.slice(i))}</span>`;
+          i = line.length;
+          continue;
+        }
+        out += `<span class="code-comment">${escHtml(line.slice(i, end + 2))}</span>`;
+        i = end + 2;
+        inBlockComment = false;
+        continue;
+      }
+
+      if (line.startsWith('//', i)) {
+        out += `<span class="code-comment">${escHtml(line.slice(i))}</span>`;
+        break;
+      }
+
+      if (line.startsWith('/*', i)) {
+        const end = line.indexOf('*/', i + 2);
+        if (end === -1) {
+          out += `<span class="code-comment">${escHtml(line.slice(i))}</span>`;
+          inBlockComment = true;
+          break;
+        }
+        out += `<span class="code-comment">${escHtml(line.slice(i, end + 2))}</span>`;
+        i = end + 2;
+        continue;
+      }
+
+      const ch = line[i];
+      if (ch === '"' || ch === '\'') {
+        const quote = ch;
+        let j = i + 1;
+        while (j < line.length) {
+          if (line[j] === '\\') {
+            j += 2;
+            continue;
+          }
+          if (line[j] === quote) {
+            j += 1;
+            break;
+          }
+          j += 1;
+        }
+        out += `<span class="code-string">${escHtml(line.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
+      if (/\d/.test(ch)) {
+        let j = i + 1;
+        while (j < line.length && /[\d_\.xXa-fA-FLlFfDd]/.test(line[j])) j += 1;
+        out += `<span class="code-number">${escHtml(line.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
+      if (/[A-Za-z_$]/.test(ch)) {
+        let j = i + 1;
+        while (j < line.length && /[A-Za-z0-9_$\.]/.test(line[j])) j += 1;
+        const token = line.slice(i, j);
+        let k = j;
+        while (k < line.length && /\s/.test(line[k])) k += 1;
+        const nextChar = line[k] || '';
+        let declarationToken = null;
+        if (classDecl && token === classDecl) declarationToken = { type: 'class' };
+        if (methodDecl && token === methodDecl) declarationToken = { type: 'method' };
+        out += renderIdentifier(token, lineIndex, nextChar, declarationToken);
+        i = j;
+        continue;
+      }
+
+      out += escHtml(ch);
+      i += 1;
+    }
+
+    return `<div class="code-line">${out || '&nbsp;'}</div>`;
+  });
+
+  panel.dataset.currentClass = className;
+  return renderedLines.join('');
+}
+
+async function openClassInPanel(panel, mod, className, status) {
+  const classEntry = resolveClassEntry(mod, className, panel._sourceContext);
+  if (!classEntry) {
+    status.textContent = `Class not found in this jar: ${className}`;
+    return;
+  }
+
+  const classBtn = $(`.class-tree-file[data-class-name="${CSS.escape(classEntry.name)}"]`, panel);
+  if (classBtn) {
+    $$('.class-tree-file.active', panel).forEach(el => el.classList.remove('active'));
+    classBtn.classList.add('active');
+  }
+
+  const output = $('.decompiler-output', panel);
+  const code = $('.decompiler-code', panel);
+  const cacheKey = getClassCacheKey(mod.sha1, classEntry.entry);
+  const cached = readClassCache(cacheKey);
+
+  status.textContent = `Decompiling ${classEntry.name}...`;
+  if (cached) {
+    code.innerHTML = renderHighlightedSource(cached, mod, classEntry.name, panel);
+    output.classList.remove('hidden');
+    status.textContent = `Loaded ${classEntry.name} from cache.`;
+    return;
+  }
+
+  try {
+    const source = await decompileClassInMod(mod, classEntry.name);
+    writeClassCache(cacheKey, source);
+    code.innerHTML = renderHighlightedSource(source, mod, classEntry.name, panel);
+    output.classList.remove('hidden');
+    status.textContent = `Decompiled ${classEntry.name}.`;
+  } catch (err) {
+    status.textContent = `Decompilation failed: ${err.message}`;
+  }
+}
+
 function setupDecompilerButtons() {
   $$('.decompiler-panel').forEach(panel => {
     if (panel.dataset.bound) return;
@@ -960,9 +1316,16 @@ function setupDecompilerButtons() {
     const tree = $('.class-tree', panel);
     const status = $('.decompiler-status', panel);
     const output = $('.decompiler-output', panel);
+    const code = $('.decompiler-code', panel);
+    const mcSelect = $('.decompiler-mc-select', panel);
 
     exploreBtn.addEventListener('click', () => {
       tree.classList.toggle('hidden');
+    });
+
+    mcSelect?.addEventListener('change', () => {
+      panel.dataset.mcVersion = mcSelect.value;
+      updateMinecraftTreeVersion(panel);
     });
 
     tree.addEventListener('click', async e => {
@@ -976,33 +1339,39 @@ function setupDecompilerButtons() {
       classBtn.classList.add('active');
 
       const className = classBtn.dataset.className;
-      const classEntry = classBtn.dataset.classEntry;
-      const cacheKey = getClassCacheKey(mod.sha1, classEntry);
+      classBtn.disabled = true;
+      try {
+        await openClassInPanel(panel, mod, className, status);
+      } finally {
+        classBtn.disabled = false;
+      }
+    });
 
-      output.classList.add('hidden');
-      output.textContent = '';
+    code.addEventListener('click', async e => {
+      const target = e.target.closest('.code-link');
+      if (!target) return;
+      const mod = findModInStackBySha1(exploreBtn.dataset.modSha1);
+      if (!mod) return;
 
-      const cached = readClassCache(cacheKey);
-      if (cached) {
-        output.textContent = cached;
-        output.classList.remove('hidden');
-        status.textContent = `Loaded ${className} from cache.`;
+      const jumpType = target.dataset.jumpType;
+      if (jumpType === 'method') {
+        const method = target.dataset.jumpTarget;
+        const methodTarget = $(`#method-target-${CSS.escape(method)}`, code);
+        methodTarget?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         return;
       }
 
-      status.textContent = `Decompiling ${className}...`;
-      classBtn.disabled = true;
+      if (jumpType === 'class') {
+        await openClassInPanel(panel, mod, target.dataset.className, status);
+        return;
+      }
 
-      try {
-        const source = await decompileClassInMod(mod, className);
-        writeClassCache(cacheKey, source);
-        output.textContent = source;
-        output.classList.remove('hidden');
-        status.textContent = `Decompiled ${className}.`;
-      } catch (err) {
-        status.textContent = `Decompilation failed: ${err.message}`;
-      } finally {
-        classBtn.disabled = false;
+      if (jumpType === 'minecraft') {
+        const className = target.dataset.minecraftClass;
+        addMinecraftTreeLink(panel, className);
+        const version = panel.dataset.mcVersion || '';
+        const url = buildMinecraftSourceUrl(version, className);
+        if (url) window.open(url, '_blank', 'noopener');
       }
     });
   });
