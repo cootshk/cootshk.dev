@@ -453,12 +453,14 @@ async function getClassBytes(mod, className) {
 
 async function decompileClassInMod(mod, className) {
   const decompile = await getVineflowerDecompiler();
-  const resources = mod.classEntries.map(item => item.name);
+  if (!mod.classResources) {
+    mod.classResources = mod.classEntries.map(item => item.name);
+  }
   const result = await decompile([className], {
-    resources,
+    resources: mod.classResources,
     source: name => getClassBytes(mod, name),
     options: {
-      banner: '// Decompiled with Tailor using Vineflower\\n'
+      banner: '// Decompiled with Tailor using Vineflower\n'
     }
   });
 
