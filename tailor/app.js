@@ -8,6 +8,7 @@ let modStack = []; // stack of parsed mod objects
 let modrinthLookup = {}; // sha1 -> { projectId, slug, versionId }
 let mcVersions = []; // cached list of Minecraft versions from Modrinth
 const VF_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@run-slicer/vf@0.6.3-1.12.0/vf.js';
+const MAX_CLASS_CACHE_SIZE = 32;
 let vfDecompilePromise = null;
 
 // ── Load Minecraft versions from Modrinth on startup ──
@@ -442,10 +443,7 @@ async function getClassBytes(mod, className) {
   }
 
   if (mod.classBytesCache.has(className)) {
-    const cached = mod.classBytesCache.get(className);
-    mod.classBytesCache.delete(className);
-    mod.classBytesCache.set(className, cached);
-    return cached;
+    return mod.classBytesCache.get(className);
   }
 
   const entry = mod.classLookup[className];
@@ -454,7 +452,7 @@ async function getClassBytes(mod, className) {
   if (!file) return null;
   const bytes = await file.async('uint8array');
   mod.classBytesCache.set(className, bytes);
-  if (mod.classBytesCache.size > 32) {
+  if (mod.classBytesCache.size > MAX_CLASS_CACHE_SIZE) {
     const oldest = mod.classBytesCache.keys().next().value;
     mod.classBytesCache.delete(oldest);
   }
@@ -475,7 +473,10 @@ async function decompileClassInMod(mod, className) {
   });
 
   const source = result[className];
-  if (!source) throw new Error(`Decompiler did not return source for class: ${className}`);
+  if (!source) {
+    const modLabel = mod.fmj?.id || mod.filename || mod.sha1;
+    throw new Error(`Decompiler did not return source for class: ${className} in ${modLabel}`);
+  }
   return source;
 }
 
@@ -775,7 +776,7 @@ function clearModResources(mod) {
   mod.classLookup = null;
   mod.classResources = null;
   mod.zip = null;
-  mod.classEntries = [];
+  mod.classEntries = null;
   if (mod.jars?.length) {
     mod.jars.forEach(clearModResources);
   }
