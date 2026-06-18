@@ -442,7 +442,10 @@ async function getClassBytes(mod, className) {
   }
 
   if (mod.classBytesCache.has(className)) {
-    return mod.classBytesCache.get(className);
+    const cached = mod.classBytesCache.get(className);
+    mod.classBytesCache.delete(className);
+    mod.classBytesCache.set(className, cached);
+    return cached;
   }
 
   const entry = mod.classLookup[className];
@@ -767,7 +770,7 @@ function findModInStackBySha1(sha1) {
 
 function clearModResources(mod) {
   if (!mod) return;
-  mod.classBytesCache?.clear?.();
+  mod.classBytesCache?.clear();
   mod.classBytesCache = null;
   mod.classLookup = null;
   mod.classResources = null;
