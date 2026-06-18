@@ -252,6 +252,9 @@ async function downloadAndAnalyze(url, filename) {
 async function analyzeFile(file) {
   showLoading('Analyzing mod...');
   try {
+    if (modStack.length) {
+      modStack.forEach(clearModResources);
+    }
     const buf = await file.arrayBuffer();
     const mod = await parseJar(buf, file.name);
     modStack = [mod];
@@ -448,6 +451,10 @@ async function getClassBytes(mod, className) {
   if (!file) return null;
   const bytes = await file.async('uint8array');
   mod.classBytesCache.set(className, bytes);
+  if (mod.classBytesCache.size > 32) {
+    const oldest = mod.classBytesCache.keys().next().value;
+    mod.classBytesCache.delete(oldest);
+  }
   return bytes;
 }
 
@@ -460,7 +467,7 @@ async function decompileClassInMod(mod, className) {
     resources: mod.classResources,
     source: name => getClassBytes(mod, name),
     options: {
-      banner: '// Decompiled with Tailor using Vineflower\n'
+      banner: '// Decompiled with Tailor using Vineflower\n\n'
     }
   });
 
@@ -758,6 +765,19 @@ function findModInStackBySha1(sha1) {
   return null;
 }
 
+function clearModResources(mod) {
+  if (!mod) return;
+  mod.classBytesCache?.clear?.();
+  mod.classBytesCache = null;
+  mod.classLookup = null;
+  mod.classResources = null;
+  mod.zip = null;
+  mod.classEntries = [];
+  if (mod.jars?.length) {
+    mod.jars.forEach(clearModResources);
+  }
+}
+
 function setupViewFullButtons() {
   $$('.btn-view-full').forEach(btn => {
     if (btn.dataset.bound) return;
@@ -1022,6 +1042,9 @@ function hideLoading() {
 }
 
 function resetView() {
+  if (modStack.length) {
+    modStack.forEach(clearModResources);
+  }
   $('#results-section').classList.add('hidden');
   $('#input-section').style.display = '';
   fileInput.value = '';
