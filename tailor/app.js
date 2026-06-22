@@ -11,6 +11,13 @@ const VF_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@run-slicer/vf@0.6.3-1.12.0/
 const MAX_CLASS_CACHE_SIZE = 32;
 let vfDecompilePromise = null;
 
+// ── Minecraft / mappings constants (the heavy pipeline lives in mc.js) ──
+// Versions at or before this are obfuscated and require mappings; newer ship deobfuscated.
+const MC_LAST_OBFUSCATED_VERSION = '1.21.11';
+const MC_NAMESPACES = ['loom', 'mojang', 'intermediary'];
+const MC_NAMESPACE_LABELS = { loom: 'Yarn (Loom)', mojang: 'Mojang', intermediary: 'Intermediary' };
+const MC_NS_STORAGE_KEY = 'tailor-mc-namespace';
+
 // ── Load Minecraft versions from Modrinth on startup ──
 (async function loadMcVersions() {
   try {
@@ -432,6 +439,7 @@ async function getVineflowerDecompiler() {
   }
   return vfDecompilePromise;
 }
+
 
 async function getClassBytes(mod, className) {
   if (!mod.zip || !mod.classEntries?.length) return null;
@@ -894,8 +902,17 @@ function renderDecompilerPanel(mod) {
     `<option value="${esc(v.version)}"${v.version === activeMinecraftVersion ? ' selected' : ''}>${esc(v.version)}</option>`
   ).join('');
 
+  const env = mcEnvironmentFor(mod.fmj);
+  // The mappings dropdown is always available; for deobfuscated builds the
+  // loader simply falls back to decompiling the (already readable) jar.
+  const namespace = mcPickNamespace(activeMinecraftVersion);
+  const mappingOptions = MC_NAMESPACES.map(ns =>
+    `<option value="${ns}"${ns === namespace ? ' selected' : ''}>${esc(MC_NAMESPACE_LABELS[ns])}</option>`
+  ).join('');
+
   return `
-    <div class="decompiler-panel" data-mod-sha1="${mod.sha1}" data-mc-version="${esc(activeMinecraftVersion)}">
+    <div class="decompiler-panel" data-mod-sha1="${mod.sha1}" data-mc-version="${esc(activeMinecraftVersion)}"
+         data-mc-env="${esc(env.join(','))}" data-mc-namespace="${esc(namespace)}" data-view-kind="mod">
       <div class="decompiler-controls">
         <button class="btn btn-secondary btn-explore-classes" data-mod-sha1="${mod.sha1}">${iconSvg('file-code')} explore classes</button>
         ${detectedMinecraftVersion
@@ -905,6 +922,12 @@ function renderDecompilerPanel(mod) {
                 ${versionOptions}
               </select>
             </label>`}
+        <label class="decompiler-mapping-picker">Mappings
+          <select class="decompiler-mapping-select">
+            ${mappingOptions}
+          </select>
+        </label>
+        <button class="btn btn-secondary btn-export-sources" data-mod-sha1="${mod.sha1}">${iconSvg('archive')} export sources (.zip)</button>
       </div>
       <div class="decompiler-status">Click "explore classes" to browse .class files.</div>
       <div class="class-tree hidden">${renderClassTree(mod.classEntries, activeMinecraftVersion)}</div>
@@ -951,7 +974,7 @@ function renderClassTree(classEntries, minecraftVersion) {
         Minecraft sources (${esc(minecraftVersion || 'select version')})
       </div>
       <div class="class-tree-minecraft-list">
-        <div class="class-tree-minecraft-empty">Click any net.minecraft symbol in source to add it here.</div>
+        <div class="class-tree-minecraft-empty">Click any net.minecraft symbol in the code to view its decompiled source here.</div>
       </div>
     </div>
   `;
@@ -1024,6 +1047,7 @@ function parseSourceContext(source) {
 }
 
 function resolveClassEntry(mod, classRef, sourceContext = null) {
+  if (!mod) return null; // Minecraft source has no owning mod jar
   ensureModClassIndexes(mod);
 
   if (!classRef) return null;
@@ -1088,31 +1112,27 @@ const JAVA_KEYWORDS = new Set([
   'this', 'throw', 'throws', 'transient', 'try', 'void', 'volatile', 'while', 'var'
 ]);
 
-function buildMinecraftSourceUrl(version, className) {
-  if (!version || !className) return null;
-  const path = className.replace(/\./g, '/');
-  return `https://mappings.dev/${encodeURIComponent(version)}/${path}.html`;
-}
-
-function addMinecraftTreeLink(panel, className) {
-  if (!className.startsWith('net.minecraft.')) return;
-  const version = panel.dataset.mcVersion || '';
-  const url = buildMinecraftSourceUrl(version, className);
-  if (!url) return;
-
+// History list of Minecraft classes opened in this panel. Each entry stores the
+// canonical (intermediary) name so it can be reopened in any mapping namespace.
+function addMinecraftTreeEntry(panel, canonicalInterm, displayName) {
   const list = $('.class-tree-minecraft-list', panel);
   if (!list) return;
   $('.class-tree-minecraft-empty', list)?.remove();
 
-  if ($(`.minecraft-tree-link[data-minecraft-class="${CSS.escape(className)}"]`, list)) return;
+  const existing = $(`.minecraft-tree-link[data-canonical="${CSS.escape(canonicalInterm)}"]`, list);
+  if (existing) {
+    existing.textContent = displayName;
+    $$('.minecraft-tree-link.active', list).forEach(el => el.classList.remove('active'));
+    existing.classList.add('active');
+    return;
+  }
 
-  const link = document.createElement('a');
-  link.className = 'minecraft-tree-link';
-  link.dataset.minecraftClass = className;
-  link.href = url;
-  link.target = '_blank';
-  link.rel = 'noopener';
-  link.textContent = className;
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.className = 'minecraft-tree-link active';
+  link.dataset.canonical = canonicalInterm;
+  link.textContent = displayName;
+  $$('.minecraft-tree-link.active', list).forEach(el => el.classList.remove('active'));
   list.appendChild(link);
 }
 
@@ -1122,11 +1142,6 @@ function updateMinecraftTreeVersion(panel) {
   if (title) {
     title.textContent = `Minecraft sources (${version || 'select version'})`;
   }
-  $$('.minecraft-tree-link', panel).forEach(link => {
-    const cls = link.dataset.minecraftClass;
-    const url = buildMinecraftSourceUrl(version, cls);
-    if (url) link.href = url;
-  });
 }
 
 function renderHighlightedSource(source, mod, className, panel) {
@@ -1244,6 +1259,14 @@ function renderHighlightedSource(source, mod, className, panel) {
         continue;
       }
 
+      if (ch === '@' && /[A-Za-z_$]/.test(line[i + 1] || '')) {
+        let j = i + 1;
+        while (j < line.length && /[A-Za-z0-9_$.]/.test(line[j])) j += 1;
+        out += `<span class="code-annotation">${escHtml(line.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
       if (/[A-Za-z_$]/.test(ch)) {
         let j = i + 1;
         while (j < line.length && /[A-Za-z0-9_$\.]/.test(line[j])) j += 1;
@@ -1288,9 +1311,10 @@ async function openClassInPanel(panel, mod, className, status) {
   const cacheKey = getClassCacheKey(mod.sha1, classEntry.entry);
   const cached = readClassCache(cacheKey);
 
+  panel.dataset.viewKind = 'mod';
   status.textContent = `Decompiling ${classEntry.name}...`;
   if (cached) {
-    code.innerHTML = renderHighlightedSource(cached, mod, classEntry.name, panel);
+    code.innerHTML = renderHighlightedSource(await applyModMappings(panel, cached), mod, classEntry.name, panel);
     output.classList.remove('hidden');
     status.textContent = `Loaded ${classEntry.name} from cache.`;
     return;
@@ -1299,11 +1323,103 @@ async function openClassInPanel(panel, mod, className, status) {
   try {
     const source = await decompileClassInMod(mod, classEntry.name);
     writeClassCache(cacheKey, source);
-    code.innerHTML = renderHighlightedSource(source, mod, classEntry.name, panel);
+    code.innerHTML = renderHighlightedSource(await applyModMappings(panel, source), mod, classEntry.name, panel);
     output.classList.remove('hidden');
     status.textContent = `Decompiled ${classEntry.name}.`;
   } catch (err) {
     status.textContent = `Decompilation failed: ${err.message}`;
+  }
+}
+
+// Rewrites a mod's intermediary net.minecraft references to the namespace
+// chosen in the mappings dropdown, so mod source matches the rest of the UI.
+async function applyModMappings(panel, source) {
+  const version = panel.dataset.mcVersion;
+  const namespace = panel.dataset.mcNamespace;
+  if (!version || !namespace || namespace === 'intermediary') return source;
+  try {
+    const mc = await getMcModule();
+    return await mc.remapModSource(version, namespace, source);
+  } catch (_) {
+    return source;
+  }
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+// Decompile every top-level class in the mod jar, remap net.minecraft references
+// to the selected mappings, and download the sources as a .zip.
+async function exportAllSources(mod, panel, status, btn) {
+  // Top-level classes only — Vineflower nests inner classes into their outer file.
+  const entries = (mod.classEntries || []).filter(e => !e.name.split('/').pop().includes('$'));
+  if (!entries.length) { status.textContent = 'No classes to export.'; return; }
+
+  const version = panel.dataset.mcVersion;
+  const namespace = panel.dataset.mcNamespace;
+  const remap = namespace && namespace !== 'intermediary';
+  const total = entries.length;
+
+  btn.disabled = true;
+  status.textContent = `Preparing to decompile ${total} classes…`;
+  try {
+    const decompile = await getVineflowerDecompiler();
+    const mc = remap ? await getMcModule().catch(() => null) : null;
+    if (!mod.classResources) mod.classResources = mod.classEntries.map(i => i.name);
+
+    const zip = new JSZip();
+    let done = 0, failed = 0;
+    const BATCH = 100;
+    for (let i = 0; i < entries.length; i += BATCH) {
+      const batch = entries.slice(i, i + BATCH);
+      status.textContent = `Decompiling ${Math.min(i + BATCH, total)}/${total}…`;
+      // Yield so the status text repaints before the heavy synchronous decompile.
+      await new Promise(r => setTimeout(r, 0));
+
+      let result;
+      try {
+        result = await decompile(batch.map(e => e.name), {
+          resources: mod.classResources,
+          source: n => getClassBytes(mod, n),
+          options: { banner: '// Decompiled with Tailor using Vineflower\n\n' },
+        });
+      } catch (_) {
+        result = {};
+      }
+
+      for (const e of batch) {
+        let src = result[e.name];
+        if (!src) { failed++; continue; }
+        if (mc) {
+          try { src = await mc.remapModSource(version, namespace, src); } catch (_) { /* keep raw */ }
+        }
+        zip.file(`${e.name}.java`, src);
+        done++;
+      }
+    }
+
+    status.textContent = `Packaging ${done} files…`;
+    const blob = await zip.generateAsync(
+      { type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } },
+      meta => { status.textContent = `Packaging ${done} files… ${meta.percent.toFixed(0)}%`; }
+    );
+    const nsTag = remap ? `-${namespace}` : '';
+    const base = String(mod.fmj?.id || mod.filename || 'sources').replace(/[^\w.-]+/g, '_');
+    triggerDownload(blob, `${base}-sources${nsTag}.zip`);
+    status.textContent = `Exported ${done} classes${failed ? ` (${failed} failed)` : ''} to ${base}-sources${nsTag}.zip.`;
+  } catch (err) {
+    status.textContent = `Export failed: ${err.message}`;
+    console.error(err);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1318,17 +1434,45 @@ function setupDecompilerButtons() {
     const output = $('.decompiler-output', panel);
     const code = $('.decompiler-code', panel);
     const mcSelect = $('.decompiler-mc-select', panel);
+    const mappingSelect = $('.decompiler-mapping-select', panel);
+    const exportBtn = $('.btn-export-sources', panel);
 
     exploreBtn.addEventListener('click', () => {
       tree.classList.toggle('hidden');
     });
 
+    exportBtn?.addEventListener('click', async () => {
+      const mod = findModInStackBySha1(exportBtn.dataset.modSha1);
+      if (mod) await exportAllSources(mod, panel, status, exportBtn);
+    });
+
     mcSelect?.addEventListener('change', () => {
       panel.dataset.mcVersion = mcSelect.value;
+      panel.dataset.mcNamespace = mcPickNamespace(mcSelect.value);
+      if (mappingSelect) mappingSelect.value = panel.dataset.mcNamespace;
       updateMinecraftTreeVersion(panel);
     });
 
+    mappingSelect?.addEventListener('change', async () => {
+      panel.dataset.mcNamespace = mappingSelect.value;
+      mcStoreNamespace(mappingSelect.value);
+      // Re-render whatever is currently shown under the new mappings.
+      if (panel.dataset.viewKind === 'mc' && panel.dataset.mcCanonical) {
+        await loadMcClass(panel, panel.dataset.mcCanonical, status);
+      } else if (panel.dataset.viewKind === 'mod' && panel.dataset.currentClass) {
+        const mod = findModInStackBySha1(exploreBtn.dataset.modSha1);
+        if (mod) await openClassInPanel(panel, mod, panel.dataset.currentClass, status);
+      }
+    });
+
     tree.addEventListener('click', async e => {
+      // Reopen a previously visited Minecraft class.
+      const mcEntry = e.target.closest('.minecraft-tree-link');
+      if (mcEntry) {
+        await loadMcClass(panel, mcEntry.dataset.canonical, status);
+        return;
+      }
+
       const classBtn = e.target.closest('.class-tree-file');
       if (!classBtn) return;
 
@@ -1338,6 +1482,7 @@ function setupDecompilerButtons() {
       $$('.class-tree-file.active', tree).forEach(el => el.classList.remove('active'));
       classBtn.classList.add('active');
 
+      panel.dataset.viewKind = 'mod';
       const className = classBtn.dataset.className;
       classBtn.disabled = true;
       try {
@@ -1350,8 +1495,6 @@ function setupDecompilerButtons() {
     code.addEventListener('click', async e => {
       const target = e.target.closest('.code-link');
       if (!target) return;
-      const mod = findModInStackBySha1(exploreBtn.dataset.modSha1);
-      if (!mod) return;
 
       const jumpType = target.dataset.jumpType;
       if (jumpType === 'method') {
@@ -1361,20 +1504,122 @@ function setupDecompilerButtons() {
         return;
       }
 
-      if (jumpType === 'class') {
-        await openClassInPanel(panel, mod, target.dataset.className, status);
+      if (jumpType === 'minecraft') {
+        // The clicked symbol may be in any namespace; loadMcClass resolves it.
+        await loadMcClass(panel, target.dataset.minecraftClass, status);
         return;
       }
 
-      if (jumpType === 'minecraft') {
-        const className = target.dataset.minecraftClass;
-        addMinecraftTreeLink(panel, className);
-        const version = panel.dataset.mcVersion || '';
-        const url = buildMinecraftSourceUrl(version, className);
-        if (url) window.open(url, '_blank', 'noopener');
+      if (jumpType === 'class') {
+        // Class links only exist for mod source (Minecraft source has no mod).
+        const mod = findModInStackBySha1(exploreBtn.dataset.modSha1);
+        if (!mod) return;
+        panel.dataset.viewKind = 'mod';
+        await openClassInPanel(panel, mod, target.dataset.className, status);
       }
     });
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  Minecraft source viewing — version/namespace selection (DOM glue lives here;
+//  the fetch/remap/decompile pipeline lives in the mc.js module).
+// ══════════════════════════════════════════════════════════════════════════
+
+const MC_MODULE_URL = './mc.js';
+let mcModulePromise = null;
+const getMcModule = () => (mcModulePromise ??= import(MC_MODULE_URL));
+
+// ── Version comparison ──
+function mcParseVersionParts(version) {
+  // Returns numeric [major, minor, patch] for plain releases, or null for
+  // snapshots / new date-based ids (treated as newest / deobfuscated).
+  const m = /^(\d+)\.(\d+)(?:\.(\d+))?$/.exec(String(version || '').trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3] || 0)];
+}
+
+function compareMcVersions(a, b) {
+  const pa = mcParseVersionParts(a);
+  const pb = mcParseVersionParts(b);
+  if (!pa && !pb) return 0;
+  if (!pa) return 1;   // non-release id sorts newest
+  if (!pb) return -1;
+  for (let i = 0; i < 3; i++) {
+    if (pa[i] !== pb[i]) return pa[i] - pb[i];
+  }
+  return 0;
+}
+
+function mcVersionNeedsMappings(version) {
+  // Releases up to and including 1.21.11 are obfuscated; anything newer
+  // (or non-release ids like "26.2") ships deobfuscated.
+  const parts = mcParseVersionParts(version);
+  if (!parts) return false;
+  return compareMcVersions(version, MC_LAST_OBFUSCATED_VERSION) <= 0;
+}
+
+function mcDefaultNamespace(version) {
+  // Yarn for < 1.21.11, Mojang for >= 1.21.11 (per project decision).
+  return compareMcVersions(version, MC_LAST_OBFUSCATED_VERSION) < 0 ? 'loom' : 'mojang';
+}
+
+function mcStoredNamespace() {
+  try { return localStorage.getItem(MC_NS_STORAGE_KEY); } catch (_) { return null; }
+}
+
+function mcStoreNamespace(ns) {
+  try { localStorage.setItem(MC_NS_STORAGE_KEY, ns); } catch (_) { /* ignore */ }
+}
+
+function mcPickNamespace(version) {
+  const stored = mcStoredNamespace();
+  if (stored && MC_NAMESPACES.includes(stored)) return stored;
+  return mcDefaultNamespace(version);
+}
+
+// ── Environment → which jar to load ──
+// Fabric mappings (Yarn/Intermediary) are built against the client obfuscation,
+// and the client jar already bundles the integrated server — so it covers almost
+// all net.minecraft classes. The server jar is obfuscated independently, so
+// merging it would both corrupt the name lookup and double the download. Only a
+// server-exclusive mod uses the server jar.
+function mcEnvironmentFor(fmj) {
+  return fmj?.environment === 'server' ? ['server'] : ['client'];
+}
+
+// ── Per-version Minecraft source loader (DOM glue around the mc.js module) ──
+async function loadMcClass(panel, className, status) {
+  const version = panel.dataset.mcVersion;
+  if (!version) { status.textContent = 'No Minecraft version selected.'; return; }
+
+  const environment = (panel.dataset.mcEnv || 'client,server').split(',').filter(Boolean);
+  // Always honour the selected namespace; the module falls back to a raw
+  // decompile when no mappings are published for the version (deobfuscated).
+  const namespace = panel.dataset.mcNamespace || mcPickNamespace(version);
+
+  const dotted = className.replace(/\//g, '.');
+  status.textContent = `Loading Minecraft ${version} source for ${dotted}… (first load downloads the game jar)`;
+
+  try {
+    const mc = await getMcModule();
+    const { source, targetName, canonicalInterm, namespace: usedNs } =
+      await mc.decompileMinecraftClass({ version, namespace, environment, name: className });
+
+    const output = $('.decompiler-output', panel);
+    const code = $('.decompiler-code', panel);
+    const display = targetName.replace(/\//g, '.');
+    panel.dataset.viewKind = 'mc';
+    panel.dataset.mcCanonical = canonicalInterm;
+    code.innerHTML = renderHighlightedSource(source, null, display, panel);
+    output.classList.remove('hidden');
+    addMinecraftTreeEntry(panel, canonicalInterm, display);
+    const nsLabel = usedNs ? MC_NAMESPACE_LABELS[usedNs] : 'no mappings';
+    status.textContent = `Loaded Minecraft ${display} (${nsLabel}).`;
+  } catch (err) {
+    status.textContent = `Minecraft source failed: ${err.message}`;
+    console.error(err);
+  }
 }
 
 function formatVer(ver) {

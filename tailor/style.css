@@ -713,7 +713,8 @@ body {
   color: var(--text-muted);
 }
 
-.decompiler-mc-select {
+.decompiler-mc-select,
+.decompiler-mapping-select {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-input);
@@ -721,6 +722,14 @@ body {
   font-size: 0.82rem;
   font-family: inherit;
   padding: 6px 10px;
+}
+
+.decompiler-mapping-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
 }
 
 .decompiler-status {
@@ -834,6 +843,12 @@ body {
 }
 
 .minecraft-tree-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
   font-size: 0.8rem;
   font-family: 'SF Mono', 'Fira Code', monospace;
   color: var(--blue);
@@ -845,6 +860,11 @@ body {
 .minecraft-tree-link:hover {
   background: var(--bg-raised);
   color: var(--text-primary);
+}
+
+.minecraft-tree-link.active {
+  background: rgba(126, 184, 218, 0.16);
+  color: var(--blue);
 }
 
 .code-line {
@@ -872,19 +892,24 @@ body {
   color: #7dcfff;
 }
 
+.code-annotation {
+  color: #e0af68;
+}
+
 .code-link {
   border: none;
   background: transparent;
   padding: 0;
   margin: 0;
   font: inherit;
-  color: #7aa2f7;
+  color: inherit;
   cursor: pointer;
-  text-decoration: underline;
+  text-decoration: none;
 }
 
 .code-link:hover {
-  color: #bb9af7;
+  color: #7aa2f7;
+  text-decoration: underline;
 }
 
 /* Tags */
