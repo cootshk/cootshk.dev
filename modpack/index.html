@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Modpack Builder</title>
+  <meta name="description" content="Build, edit and export Minecraft modpacks from Modrinth — entirely in your browser.">
+  <meta name="theme-color" content="#1bd96a">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../cdn/shared/styles/tokens.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-content">
+      <a class="nav-brand" href="#" onclick="goHome(); return false;">
+        <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2"><line x1="16.5" y1="9.4" x2="7.5" y2="4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        <span class="nav-title">Modpack Builder</span>
+      </a>
+      <div class="nav-spacer"></div>
+      <span id="nav-pack-label" class="nav-subtitle hidden"></span>
+    </div>
+  </nav>
+
+  <!-- ── Home view: list of saved modpacks ── -->
+  <main id="home-view" class="main-content">
+    <div class="home-header">
+      <h1 class="home-title">Your Modpacks</h1>
+      <div class="home-actions">
+        <button class="btn btn-primary" id="btn-new">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New modpack
+        </button>
+        <button class="btn btn-secondary" id="btn-import">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Import .mrpack
+        </button>
+        <input type="file" id="import-input" accept=".mrpack,.zip" hidden>
+      </div>
+    </div>
+    <div id="pack-list" class="pack-list"></div>
+  </main>
+
+  <!-- ── Editor view: search (left) + installed (right) ── -->
+  <main id="editor-view" class="editor-view hidden">
+    <div class="editor-topbar">
+      <button class="btn btn-secondary" id="btn-back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        Back
+      </button>
+      <div class="editor-title">
+        <h2 id="editor-pack-name">Modpack</h2>
+        <span id="editor-pack-meta" class="editor-pack-meta"></span>
+      </div>
+    </div>
+
+    <div class="editor-grid">
+      <!-- Search pane -->
+      <section class="editor-pane search-pane card">
+        <div class="search-row">
+          <div class="search-bar">
+            <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="mod-search" placeholder="Search mods on Modrinth…" autocomplete="off">
+          </div>
+          <select id="sort-select" class="mc-version-select" title="Sort order">
+            <option value="relevance">Relevance</option>
+            <option value="downloads">Downloads</option>
+            <option value="follows">Follows</option>
+            <option value="newest">Newest</option>
+            <option value="updated">Updated</option>
+          </select>
+        </div>
+        <div id="search-results" class="search-results-pane">
+          <p class="no-data">Search for mods to add to your pack.</p>
+        </div>
+      </section>
+
+      <!-- Installed pane -->
+      <section class="editor-pane installed-pane card">
+        <div class="installed-header">
+          <h3>Installed <span id="installed-count" class="count-badge">0</span></h3>
+        </div>
+        <div id="installed-list" class="installed-list"></div>
+        <div class="download-bar">
+          <button class="btn btn-primary" id="btn-export-mrpack">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export .mrpack
+          </button>
+          <button class="btn btn-secondary" id="btn-export-zip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+            Download .zip of jars
+          </button>
+          <button class="btn btn-secondary" id="btn-export-each">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download each .jar
+          </button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- ── New / edit pack modal ── -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal card">
+      <h2 id="modal-title">New modpack</h2>
+      <label class="modal-field">
+        <span>Name</span>
+        <input type="text" id="pack-name-input" placeholder="My Awesome Pack" autocomplete="off">
+      </label>
+      <label class="modal-field">
+        <span>Loader</span>
+        <div class="loader-row">
+          <span id="loader-icon" class="loader-icon"></span>
+          <select id="loader-select">
+            <option value="fabric">Fabric</option>
+            <option value="neoforge">NeoForge</option>
+            <option value="forge">Forge</option>
+            <option value="quilt">Quilt</option>
+          </select>
+        </div>
+      </label>
+      <label class="modal-field">
+        <span>Minecraft version</span>
+        <select id="mc-version-input"><option value="">Loading…</option></select>
+      </label>
+      <p id="modal-error" class="error-msg hidden"></p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
+        <button class="btn btn-primary" id="modal-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Global loading overlay ── -->
+  <div id="loading" class="loading-overlay hidden">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <p id="loading-text">Working…</p>
+    </div>
+  </div>
+
+  <!-- ── Toast ── -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="../cdn/shared/scripts/util.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js', { scope: './' }).catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,118 @@
+/* ──────────────────────────────────────────────────────────────────────────
+ * Shared design tokens + primitives for cootshk.dev apps (Tailor, Modpack…).
+ * Load this BEFORE an app's own stylesheet. All app CSS references these vars.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg-primary: #13111c;
+  --bg-secondary: #1b1929;
+  --bg-card: #26233a;
+  --bg-card-hover: #2d2a3e;
+  --bg-raised: #312e45;
+  --bg-input: #1e1c2e;
+  --text-primary: #e0def4;
+  --text-secondary: #908caa;
+  --text-muted: #6e6a86;
+  --accent: #1bd96a;
+  --accent-hover: #15b858;
+  --accent-dim: rgba(27, 217, 106, 0.1);
+  --border: #3a3652;
+  --border-hover: #524d6e;
+  --red: #eb6f6f;
+  --orange: #f6ad55;
+  --blue: #7eb8da;
+  --purple: #c4a7e7;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 2px 8px rgba(0,0,0,0.3);
+
+  /* Platform / loader brand colors (used to tint loader icons). */
+  --color-platform-fabric: #dbb69b;
+  --color-platform-quilt: #c796f9;
+  --color-platform-forge: #959eef;
+  --color-platform-neoforge: #f99e6b;
+  --color-platform-liteloader: #7ab0ee;
+  --color-platform-bukkit: #f6af7b;
+  --color-platform-bungeecord: #d2c080;
+  --color-platform-folia: #a5e388;
+  --color-platform-paper: #eeaaaa;
+  --color-platform-purpur: #c3abf7;
+  --color-platform-spigot: #f1cc84;
+  --color-platform-velocity: #83d5ef;
+  --color-platform-waterfall: #78a4fb;
+  --color-platform-sponge: #f9e580;
+  --color-platform-ornithe: #87c7ff;
+  --color-platform-bta-babric: #72cc4a;
+  --color-platform-nilloader: #f45e9a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn svg { width: 16px; height: 16px; }
+
+.btn-secondary {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-hover);
+}
+
+.btn-modrinth {
+  background: rgba(27, 217, 106, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(27, 217, 106, 0.25);
+}
+.btn-modrinth:hover {
+  background: rgba(27, 217, 106, 0.22);
+  border-color: rgba(27, 217, 106, 0.4);
+}
+
+/* Spinner */
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Utility */
+.hidden { display: none !important; }

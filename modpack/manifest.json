@@ -1,0 +1,13 @@
+{
+  "name": "Modpack Builder",
+  "short_name": "Modpacks",
+  "description": "Build, edit and export Minecraft modpacks from Modrinth — entirely in your browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#13111c",
+  "theme_color": "#1bd96a",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

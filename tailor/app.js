@@ -1,7 +1,6 @@
 /* ── Tailor: Fabric Mod Analyzer ── */
-
-const $ = (s, p = document) => p.querySelector(s);
-const $$ = (s, p = document) => [...p.querySelectorAll(s)];
+/* $, $$, esc, formatDownloads, titleCase, computeSha1 come from
+ * ../cdn/shared/scripts/util.js (loaded before this script). */
 
 // ── Navigation stack for drilling into JiJ mods ──
 let modStack = []; // stack of parsed mod objects
@@ -277,11 +276,6 @@ async function analyzeFile(file) {
     alert('Analysis failed: ' + err.message);
     console.error(err);
   }
-}
-
-async function computeSha1(buffer) {
-  const hash = await crypto.subtle.digest('SHA-1', buffer);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Java class file major version -> human-readable name
@@ -1700,23 +1694,6 @@ function envLabel(env, fmj) {
   if (env === 'client') return 'Client';
   if (env === 'server') return 'Server';
   return 'Both sides';
-}
-
-function titleCase(s) {
-  return String(s).replace(/\b\w/g, c => c.toUpperCase());
-}
-
-function esc(s) {
-  if (s == null) return '';
-  const div = document.createElement('div');
-  div.textContent = String(s);
-  return div.innerHTML;
-}
-
-function formatDownloads(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-  return String(n);
 }
 
 function showLoading(msg) {
