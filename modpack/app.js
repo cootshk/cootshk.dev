@@ -104,6 +104,11 @@ async function openEditor(pack) {
     hideLoading();
     if (currentPack === pack) refreshEditor();
   }
+
+  // Background: flag mods with a newer compatible version (uses caches, no overlay).
+  checkUpdates(pack).then(changed => {
+    if (changed && currentPack === pack) { savePack(pack); refreshEditor(); }
+  }).catch(() => {});
 }
 
 // ── Home / pack list ─────────────────────────────────────────────────────────
@@ -368,8 +373,9 @@ async function addModByProject(projectId, { hit = null, asDep = false, visited }
     hashes: file.hashes || {}, fileSize: file.size || 0,
     env: { client: normalizeEnv(clientSide), server: normalizeEnv(serverSide) },
     addedAsDep: asDep,
-    requiredDeps: [], // { projectId, title, icon } this mod requires
-    optionalDeps: [], // { projectId, title, icon } this mod optionally suggests
+    requiredDeps: [],     // { projectId, title, icon } this mod requires
+    optionalDeps: [],     // { projectId, title, icon } this mod optionally suggests
+    incompatibleDeps: [], // { projectId, title, icon } this mod is incompatible with
     depsV: DEPS_VERSION,
   };
   currentPack.mods.push(entry);
@@ -377,27 +383,66 @@ async function addModByProject(projectId, { hit = null, asDep = false, visited }
   // Walk dependencies, recording the graph (with metadata) so the installed
   // list can highlight relationships and list each mod's dependencies beneath it.
   for (const dep of version.dependencies || []) {
-    if (dep.dependency_type !== 'required' && dep.dependency_type !== 'optional') continue;
+    const kind = dep.dependency_type;
+    if (kind !== 'required' && kind !== 'optional' && kind !== 'incompatible') continue;
     const meta = await resolveDepMeta(dep);
     if (!meta) continue;
-    if (dep.dependency_type === 'required') {
+    if (kind === 'required') {
       entry.requiredDeps.push(meta);
       await addModByProject(meta.projectId, { asDep: true, visited });
-    } else {
+    } else if (kind === 'optional') {
       entry.optionalDeps.push(meta);
+    } else {
+      entry.incompatibleDeps.push(meta);
     }
   }
   return true;
 }
 
-async function fetchCompatibleVersion(projectId) {
-  const url = `${API}/project/${projectId}/version?loaders=${encArr([currentPack.loader])}&game_versions=${encArr([currentPack.mcVersion])}`;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  const versions = await res.json();
-  if (!versions.length) return null;
-  versions.sort((a, b) => new Date(b.date_published) - new Date(a.date_published));
+// Pick the "best" version from a compatible list: featured, else newest release,
+// else newest of anything. Expects the list already sorted newest-first.
+function pickBestVersion(versions) {
+  if (!versions || !versions.length) return null;
   return versions.find(v => v.featured) || versions.find(v => v.version_type === 'release') || versions[0];
+}
+
+// All versions of a project compatible with the current pack's loader + MC,
+// sorted newest-first. Cached per (project, loader, mc).
+const projectVersionsCache = new Map();
+async function fetchProjectVersions(projectId) {
+  const key = `${projectId}:${currentPack.loader}:${currentPack.mcVersion}`;
+  if (projectVersionsCache.has(key)) return projectVersionsCache.get(key);
+  let versions = [];
+  try {
+    const url = `${API}/project/${projectId}/version?loaders=${encArr([currentPack.loader])}&game_versions=${encArr([currentPack.mcVersion])}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      versions = await res.json();
+      versions.sort((a, b) => new Date(b.date_published) - new Date(a.date_published));
+    }
+  } catch { versions = []; }
+  projectVersionsCache.set(key, versions);
+  return versions;
+}
+
+async function fetchCompatibleVersion(projectId) {
+  return pickBestVersion(await fetchProjectVersions(projectId));
+}
+
+// Point a mod at a specific version: refresh its file fields and re-resolve its
+// dependency graph (deps can differ between versions). Reused by pinning + updates.
+async function applyVersionToMod(mod, version) {
+  const file = version.files.find(f => f.primary) || version.files[0];
+  if (!file) return;
+  mod.versionId = version.id;
+  mod.versionNumber = version.version_number;
+  mod.filename = file.filename;
+  mod.url = file.url;
+  mod.hashes = file.hashes || {};
+  mod.fileSize = file.size || 0;
+  versionCache.set(version.id, version); // so resolveModDeps reuses it
+  await resolveModDeps(mod);
+  delete mod._update;
 }
 
 // Session caches so we never refetch the same project/version (also lets us
@@ -445,18 +490,20 @@ async function resolveDepMeta(dep) {
 // packs whose mods lack (or have stale) dependency metadata — including imported
 // .mrpack packs, whose mods gain a versionId from the sha1 lookup. Cached, and
 // tagged with depsV so it only runs once per mod.
-const DEPS_VERSION = 2;
+const DEPS_VERSION = 3;
 async function resolveModDeps(mod) {
-  const req = [], opt = [];
+  const req = [], opt = [], incompat = [];
   const version = mod.versionId ? await fetchVersion(mod.versionId) : null;
   for (const dep of version?.dependencies || []) {
-    if (dep.dependency_type !== 'required' && dep.dependency_type !== 'optional') continue;
+    const kind = dep.dependency_type;
+    if (kind !== 'required' && kind !== 'optional' && kind !== 'incompatible') continue;
     const meta = await resolveDepMeta(dep);
     if (!meta) continue;
-    (dep.dependency_type === 'required' ? req : opt).push(meta);
+    (kind === 'required' ? req : kind === 'optional' ? opt : incompat).push(meta);
   }
   mod.requiredDeps = req;
   mod.optionalDeps = opt;
+  mod.incompatibleDeps = incompat;
   mod.depsV = DEPS_VERSION;
 }
 
@@ -468,21 +515,51 @@ async function ensureDepGraph(pack) {
   return true;
 }
 
-// ── Editor: installed list + optional strip ──────────────────────────────────
+// ── Editor: installed list ───────────────────────────────────────────────────
+
+// Missing required deps + incompatible-pair conflicts across the installed mods.
+function packIssues(mods) {
+  const installedIds = new Set(mods.map(m => m.projectId));
+  const missing = new Map();   // projectId -> dep meta
+  const conflicts = new Map(); // unordered-pair key -> { a, b } titles
+  for (const m of mods) {
+    for (const d of m.requiredDeps || []) if (!installedIds.has(d.projectId)) missing.set(d.projectId, d);
+    for (const d of m.incompatibleDeps || []) if (installedIds.has(d.projectId)) {
+      const key = [m.projectId, d.projectId].sort().join('|');
+      if (!conflicts.has(key)) conflicts.set(key, { a: m.title, b: d.title });
+    }
+  }
+  return { missing: [...missing.values()], conflicts: [...conflicts.values()] };
+}
+
+const removeSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+const lockSvg = '<svg class="pin-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+
 function refreshEditor() {
   const list = $('#installed-list');
   const mods = currentPack.mods;
   $('#installed-count').textContent = mods.length;
 
-  // Build the dependency graph across currently-installed mods: which projects
-  // are required (yellow) or optionally suggested (blue) by another installed mod.
+  // Which installed projects are required by another installed mod (yellow tag).
   const installedIds = new Set(mods.map(m => m.projectId));
-  const requiredBy = new Map(); // projectId -> title of a mod that requires it
-  const optionalBy = new Map(); // projectId -> title of a mod that optionally wants it
+  const requiredBy = new Map();
   for (const m of mods) {
     for (const d of m.requiredDeps || []) if (!requiredBy.has(d.projectId)) requiredBy.set(d.projectId, m.title);
-    for (const d of m.optionalDeps || []) if (!optionalBy.has(d.projectId)) optionalBy.set(d.projectId, m.title);
   }
+
+  // Normalise user "optional" flags: a mod required by a non-optional mod cannot
+  // be optional. Clear such flags to a fixpoint (clearing only adds constraints).
+  let normalized = false;
+  for (let changed = true; changed;) {
+    changed = false;
+    const reqByNonOpt = new Set();
+    for (const m of mods) if (!m.optional) for (const d of m.requiredDeps || []) reqByNonOpt.add(d.projectId);
+    for (const m of mods) if (m.optional && reqByNonOpt.has(m.projectId)) { m.optional = false; changed = normalized = true; }
+  }
+  if (normalized) savePack(currentPack);
+  // Projects required by a non-optional mod cannot themselves be marked optional.
+  const requiredByNonOptional = new Set();
+  for (const m of mods) if (!m.optional) for (const d of m.requiredDeps || []) requiredByNonOptional.add(d.projectId);
 
   // A dependency row shown beneath the mod that declares it.
   const depRow = (d, kind) => `
@@ -491,8 +568,8 @@ function refreshEditor() {
         ? `<img class="mod-dep-icon" src="${esc(d.icon)}" alt="">`
         : `<div class="mod-dep-icon placeholder">&#x1f4e6;</div>`}
       <span class="mod-dep-name">${esc(d.title)}</span>
-      <span class="mod-dep-label">${kind === 'required' ? 'missing required' : 'optional'}</span>
-      <button class="btn ${kind === 'required' ? 'btn-primary' : 'btn-secondary'} btn-sm mod-dep-add" data-add-dep="${esc(d.projectId)}">Add</button>
+      <span class="mod-dep-label">${kind === 'required' ? 'missing required' : kind === 'conflict' ? 'incompatible' : 'optional'}</span>
+      ${kind === 'conflict' ? '' : `<button class="btn ${kind === 'required' ? 'btn-primary' : 'btn-secondary'} btn-sm mod-dep-add" data-add-dep="${esc(d.projectId)}">Add</button>`}
     </div>`;
 
   if (!mods.length) {
@@ -500,47 +577,60 @@ function refreshEditor() {
   } else {
     list.innerHTML = mods.map((m, i) => {
       const reqBy = requiredBy.get(m.projectId);
-      const optBy = !reqBy ? optionalBy.get(m.projectId) : null; // required takes precedence
-      const roleClass = reqBy ? 'dep-required' : optBy ? 'dep-optional' : '';
-      const tag = reqBy
-        ? `<span class="dep-tag dep-tag-required">required by ${esc(reqBy)}</span>`
-        : optBy
-          ? `<span class="dep-tag dep-tag-optional">optional for ${esc(optBy)}</span>`
-          : '';
+      const roleClass = reqBy ? 'dep-required' : '';
+      const tag = reqBy ? `<span class="dep-tag dep-tag-required">required by ${esc(reqBy)}</span>` : '';
+      const canBeOptional = !requiredByNonOptional.has(m.projectId);
 
-      // Dependencies of this mod that aren't currently installed.
       const missingReq = (m.requiredDeps || []).filter(d => !installedIds.has(d.projectId));
       const missingOpt = (m.optionalDeps || []).filter(d => !installedIds.has(d.projectId));
-      const deps = missingReq.map(d => depRow(d, 'required')).join('') + missingOpt.map(d => depRow(d, 'optional')).join('');
+      const conflicts = (m.incompatibleDeps || []).filter(d => installedIds.has(d.projectId));
+      const deps = missingReq.map(d => depRow(d, 'required')).join('')
+        + conflicts.map(d => depRow(d, 'conflict')).join('')
+        + missingOpt.map(d => depRow(d, 'optional')).join('');
 
       return `
       <div class="installed-entry">
-        <div class="installed-item ${roleClass}">
+        <div class="installed-item ${roleClass}${m.optional ? ' is-optional' : ''}${conflicts.length ? ' conflict' : ''}">
           ${m.icon
             ? `<img class="installed-icon" src="${esc(m.icon)}" alt="">`
             : `<div class="installed-icon placeholder">&#x1f4e6;</div>`}
           <div class="installed-body">
-            <div class="installed-name">${esc(m.title)}</div>
+            <div class="installed-name">${esc(m.title)}${m.pinned ? ' ' + lockSvg : ''}${m.optional ? ' <span class="optional-badge">optional</span>' : ''}</div>
             <div class="installed-sub">
-              ${m.versionNumber ? esc(m.versionNumber) : esc(m.filename)}
+              <button class="version-btn" data-pick-version="${i}" title="Change version">${esc(m.versionNumber || m.filename)}</button>
+              ${m._update ? `<span class="update-badge">&rarr; ${esc(m._update.versionNumber)}</span>` : ''}
               ${tag ? ' · ' + tag : ''}
             </div>
           </div>
-          <button class="icon-btn danger" data-remove="${i}" title="Remove">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
+          <div class="installed-actions">
+            ${canBeOptional ? `<button class="opt-toggle${m.optional ? ' active' : ''}" data-opt-toggle="${i}" title="${m.optional ? 'Optional — click to make required' : 'Mark optional (excluded from required-only downloads)'}">optional</button>` : ''}
+            ${m._update ? `<button class="btn btn-primary btn-sm" data-update="${i}">Update</button>` : ''}
+            <button class="icon-btn danger" data-remove="${i}" title="Remove">${removeSvg}</button>
+          </div>
         </div>
         ${deps ? `<div class="mod-deps">${deps}</div>` : ''}
       </div>`;
     }).join('');
 
-    $$('[data-remove]', list).forEach(btn => {
-      btn.addEventListener('click', () => removeMod(+btn.dataset.remove));
-    });
-    $$('[data-add-dep]', list).forEach(btn => {
-      btn.addEventListener('click', () => addDependency(btn.dataset.addDep));
-    });
+    $$('[data-remove]', list).forEach(btn => btn.addEventListener('click', () => removeMod(+btn.dataset.remove)));
+    $$('[data-add-dep]', list).forEach(btn => btn.addEventListener('click', () => addDependency(btn.dataset.addDep)));
+    $$('[data-pick-version]', list).forEach(btn => btn.addEventListener('click', () => openVersionPicker(mods[+btn.dataset.pickVersion])));
+    $$('[data-update]', list).forEach(btn => btn.addEventListener('click', () => applyUpdate(mods[+btn.dataset.update])));
+    $$('[data-opt-toggle]', list).forEach(btn => btn.addEventListener('click', () => toggleOptional(+btn.dataset.optToggle)));
   }
+
+  // Warnings banner + Update-all availability.
+  const { missing, conflicts } = packIssues(mods);
+  const warn = $('#pack-warnings');
+  const parts = [];
+  if (missing.length) parts.push(`${missing.length} missing required ${missing.length === 1 ? 'dependency' : 'dependencies'}`);
+  if (conflicts.length) parts.push(`${conflicts.length} ${conflicts.length === 1 ? 'conflict' : 'conflicts'}`);
+  if (parts.length) { warn.innerHTML = `&#9888; ${esc(parts.join(' · '))}`; warn.classList.remove('hidden'); }
+  else warn.classList.add('hidden');
+
+  const updatable = mods.filter(m => m._update).length;
+  $('#btn-update-all').classList.toggle('hidden', updatable === 0);
+
   syncSearchButtons();
 }
 
@@ -562,6 +652,148 @@ function removeMod(index) {
   currentPack.mods.splice(index, 1);
   savePack(currentPack);
   refreshEditor();
+}
+
+// Toggle a mod's user "optional" flag (excluded from required-only downloads,
+// exported as optional in the .mrpack). The button is only shown for mods that
+// aren't required by a non-optional mod, so toggling on is always valid here.
+function toggleOptional(index) {
+  const m = currentPack.mods[index];
+  m.optional = !m.optional;
+  savePack(currentPack);
+  refreshEditor();
+}
+
+// ── Version picker (per-mod pinning) ─────────────────────────────────────────
+async function openVersionPicker(mod) {
+  const listEl = $('#version-list');
+  $('#version-modal-title').textContent = `${mod.title} — choose version`;
+  listEl.innerHTML = '<div class="results-loading"><div class="spinner"></div></div>';
+  $('#version-modal').classList.remove('hidden');
+  let versions = [];
+  try { versions = await fetchProjectVersions(mod.projectId); } catch { /* shown below */ }
+  if (!versions.length) { listEl.innerHTML = '<p class="no-data">No compatible versions found.</p>'; return; }
+
+  listEl.innerHTML = versions.map((v, i) => `
+    <button class="version-item ${v.id === mod.versionId ? 'current' : ''}" data-vi="${i}">
+      <span class="version-number">${esc(v.version_number)}</span>
+      <span class="version-type ${esc(v.version_type)}">${esc(v.version_type)}</span>
+      <span class="version-dl">&#x2193; ${formatDownloads(v.downloads)}</span>
+      ${v.id === mod.versionId ? '<span class="version-current-badge">current</span>' : ''}
+    </button>`).join('');
+
+  $$('[data-vi]', listEl).forEach(btn => btn.addEventListener('click', async () => {
+    const v = versions[+btn.dataset.vi];
+    closeVersionModal();
+    if (v.id === mod.versionId) return;
+    showLoading('Changing version…');
+    try {
+      await applyVersionToMod(mod, v);
+      mod.pinned = true;
+      savePack(currentPack);
+      refreshEditor();
+      toast('Version changed & pinned');
+    } catch (e) { toast('Failed: ' + e.message, true); }
+    finally { hideLoading(); }
+  }));
+}
+function closeVersionModal() { $('#version-modal').classList.add('hidden'); }
+
+// ── Update checker ───────────────────────────────────────────────────────────
+// Populates mod._update when a newer compatible version exists (skips pinned).
+async function checkUpdates(pack) {
+  let changed = false;
+  for (const mod of pack.mods) {
+    if (!mod.projectId || mod.pinned) {
+      if (mod._update) { delete mod._update; changed = true; }
+      continue;
+    }
+    const best = pickBestVersion(await fetchProjectVersions(mod.projectId));
+    let update = null;
+    if (best && best.id !== mod.versionId) {
+      const cur = await fetchVersion(mod.versionId);
+      if (!cur || new Date(best.date_published) > new Date(cur.date_published)) {
+        update = { versionId: best.id, versionNumber: best.version_number };
+      }
+    }
+    if (JSON.stringify(mod._update) !== JSON.stringify(update)) {
+      if (update) mod._update = update; else delete mod._update;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+async function applyUpdate(mod) {
+  if (!mod._update) return;
+  showLoading('Updating…');
+  try {
+    const v = await fetchVersion(mod._update.versionId);
+    if (v) await applyVersionToMod(mod, v);
+    savePack(currentPack);
+    refreshEditor();
+    toast('Updated ' + mod.title);
+  } catch (e) { toast('Update failed: ' + e.message, true); }
+  finally { hideLoading(); }
+}
+
+async function updateAll() {
+  const targets = currentPack.mods.filter(m => m._update && !m.pinned);
+  if (!targets.length) { toast('Everything is up to date'); return; }
+  showLoading(`Updating ${targets.length} mod(s)…`);
+  try {
+    for (const mod of targets) {
+      const v = await fetchVersion(mod._update.versionId);
+      if (v) await applyVersionToMod(mod, v);
+    }
+    savePack(currentPack);
+    refreshEditor();
+    toast(`Updated ${targets.length} mod(s)`);
+  } catch (e) { toast('Update failed: ' + e.message, true); }
+  finally { hideLoading(); }
+}
+
+async function runUpdateCheck() {
+  showLoading('Checking for updates…');
+  try {
+    if (await checkUpdates(currentPack)) savePack(currentPack);
+    refreshEditor();
+    const n = currentPack.mods.filter(m => m._update).length;
+    toast(n ? `${n} update${n === 1 ? '' : 's'} available` : 'Everything is up to date');
+  } catch (e) { toast('Update check failed: ' + e.message, true); }
+  finally { hideLoading(); }
+}
+
+// ── Export validation ────────────────────────────────────────────────────────
+// Generic promise-based confirm modal (native confirm() would block the page).
+function showConfirm(title, bodyHtml, confirmLabel = 'Continue') {
+  return new Promise(resolve => {
+    $('#confirm-title').textContent = title;
+    $('#confirm-body').innerHTML = bodyHtml;
+    $('#confirm-ok').textContent = confirmLabel;
+    const backdrop = $('#confirm-modal');
+    backdrop.classList.remove('hidden');
+    const done = val => {
+      backdrop.classList.add('hidden');
+      $('#confirm-ok').removeEventListener('click', ok);
+      $('#confirm-cancel').removeEventListener('click', cancel);
+      resolve(val);
+    };
+    const ok = () => done(true);
+    const cancel = () => done(false);
+    $('#confirm-ok').addEventListener('click', ok);
+    $('#confirm-cancel').addEventListener('click', cancel);
+  });
+}
+
+// Returns true if export should proceed (no issues, or the user confirmed).
+async function confirmExportIfNeeded(pack) {
+  const { missing, conflicts } = packIssues(pack.mods);
+  if (!missing.length && !conflicts.length) return true;
+  const sections = [];
+  if (missing.length) sections.push(`<div class="confirm-section"><strong>Missing required:</strong><ul>${missing.map(d => `<li>${esc(d.title)}</li>`).join('')}</ul></div>`);
+  if (conflicts.length) sections.push(`<div class="confirm-section"><strong>Conflicts:</strong><ul>${conflicts.map(c => `<li>${esc(c.a)} &harr; ${esc(c.b)}</li>`).join('')}</ul></div>`);
+  return showConfirm('Pack has issues', `<p>This pack has problems that may break in-game:</p>${sections.join('')}<p>Export anyway?</p>`, 'Export anyway');
 }
 
 // Reflect installed state onto any currently-rendered search result buttons.
@@ -629,9 +861,23 @@ function downloadBlob(blob, filename) {
 
 const safeName = name => (name || 'modpack').replace(/[^a-z0-9._-]+/gi, '_').replace(/^_+|_+$/g, '') || 'modpack';
 
+// .mrpack env for a file. A user-optional mod becomes "optional" on each side
+// that would otherwise be "required" (sides that are "unsupported" stay so), so
+// launchers present it as an optional, user-togglable mod.
+function fileEnv(m) {
+  const base = m.env || { client: 'required', server: 'required' };
+  if (!m.optional) return base;
+  const opt = s => (s === 'unsupported' ? 'unsupported' : 'optional');
+  return { client: opt(base.client), server: opt(base.server) };
+}
+
+// True if a .mrpack file's env marks it optional (togglable) on either side.
+const isOptionalEnv = env => !!env && (env.client === 'optional' || env.server === 'optional');
+
 async function exportMrpack(pack) {
   pack = pack || currentPack;
   if (!pack.mods.length) { toast('Pack is empty', true); return; }
+  if (!(await confirmExportIfNeeded(pack))) return;
   showLoading('Building .mrpack…');
   try {
     let loaderVersion = pack.loaderVersion;
@@ -650,7 +896,7 @@ async function exportMrpack(pack) {
       files: pack.mods.map(m => ({
         path: `mods/${m.filename}`,
         hashes: m.hashes,
-        env: m.env || { client: 'required', server: 'required' },
+        env: fileEnv(m),
         downloads: [m.url],
         fileSize: m.fileSize,
       })),
@@ -668,13 +914,16 @@ async function exportMrpack(pack) {
   }
 }
 
-async function exportZip() {
-  if (!currentPack.mods.length) { toast('Pack is empty', true); return; }
+// onlyRequired (Shift-click) excludes user-optional mods.
+async function exportZip(onlyRequired = false) {
+  const mods = currentPack.mods.filter(m => !onlyRequired || !m.optional);
+  if (!mods.length) { toast(onlyRequired ? 'No required mods to download' : 'Pack is empty', true); return; }
+  if (!(await confirmExportIfNeeded(currentPack))) return;
   const zip = new JSZip();
   const failed = [];
-  for (let i = 0; i < currentPack.mods.length; i++) {
-    const m = currentPack.mods[i];
-    showLoading(`Downloading jars… (${i + 1}/${currentPack.mods.length})`);
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i];
+    showLoading(`Downloading jars… (${i + 1}/${mods.length})`);
     try {
       const res = await fetch(m.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -686,7 +935,7 @@ async function exportZip() {
   showLoading('Packing .zip…');
   try {
     const blob = await zip.generateAsync({ type: 'blob' });
-    downloadBlob(blob, `${safeName(currentPack.name)}.zip`);
+    downloadBlob(blob, `${safeName(currentPack.name)}${onlyRequired ? '-required' : ''}.zip`);
     if (failed.length) toast(`${failed.length} jar(s) could not be fetched (CORS) and were skipped.`, true);
   } catch (e) {
     toast('Zip failed: ' + e.message, true);
@@ -695,9 +944,12 @@ async function exportZip() {
   }
 }
 
-async function exportEach() {
-  if (!currentPack.mods.length) { toast('Pack is empty', true); return; }
-  for (const m of currentPack.mods) {
+// onlyRequired (Shift-click) excludes user-optional mods.
+async function exportEach(onlyRequired = false) {
+  const mods = currentPack.mods.filter(m => !onlyRequired || !m.optional);
+  if (!mods.length) { toast(onlyRequired ? 'No required mods to download' : 'Pack is empty', true); return; }
+  if (!(await confirmExportIfNeeded(currentPack))) return;
+  for (const m of mods) {
     try {
       const res = await fetch(m.url);
       if (!res.ok) throw new Error();
@@ -733,6 +985,9 @@ async function importFile(file) {
         url: (f.downloads || [])[0] || '',
         hashes: f.hashes || {}, fileSize: f.fileSize || 0,
         env: f.env || { client: 'required', server: 'required' },
+        // Preserve the .mrpack's optional designation. If the mod turns out to be
+        // required by a non-optional mod, refreshEditor's normalization strips it.
+        optional: isOptionalEnv(f.env),
         addedAsDep: false,
       }));
 
@@ -781,7 +1036,12 @@ async function enrichFromHashes(mods) {
     const projById = new Map((await projRes.json()).map(p => [p.id, p]));
     for (const m of mods) {
       const p = m.projectId && projById.get(m.projectId);
-      if (p) { m.title = p.title; m.icon = p.icon_url; m.slug = p.slug; }
+      if (p) {
+        m.title = p.title; m.icon = p.icon_url; m.slug = p.slug;
+        // Use the project's true sidedness as the base env; the pack's optional
+        // designation is tracked separately by m.optional, so re-export round-trips.
+        m.env = { client: normalizeEnv(p.client_side), server: normalizeEnv(p.server_side) };
+      }
     }
   } catch (e) {
     console.warn('Hash enrichment failed:', e);
@@ -807,11 +1067,18 @@ $('#mod-search').addEventListener('input', scheduleSearch);
 $('#sort-select').addEventListener('change', () => { if ($('#mod-search').value.trim() || true) runSearch(); });
 
 $('#btn-export-mrpack').addEventListener('click', () => exportMrpack());
-$('#btn-export-zip').addEventListener('click', exportZip);
-$('#btn-export-each').addEventListener('click', exportEach);
+$('#btn-export-zip').addEventListener('click', e => exportZip(e.shiftKey));
+$('#btn-export-each').addEventListener('click', e => exportEach(e.shiftKey));
+
+$('#btn-check-updates').addEventListener('click', runUpdateCheck);
+$('#btn-update-all').addEventListener('click', updateAll);
+$('#version-modal-close').addEventListener('click', closeVersionModal);
+$('#version-modal').addEventListener('click', e => { if (e.target === $('#version-modal')) closeVersionModal(); });
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('#modal-backdrop').classList.contains('hidden')) closeModal();
+  if (e.key !== 'Escape') return;
+  if (!$('#modal-backdrop').classList.contains('hidden')) closeModal();
+  else if (!$('#version-modal').classList.contains('hidden')) closeVersionModal();
 });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────

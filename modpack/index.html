@@ -83,22 +83,31 @@
       <section class="editor-pane installed-pane card">
         <div class="installed-header">
           <h3>Installed <span id="installed-count" class="count-badge">0</span></h3>
+          <div class="installed-header-actions">
+            <button class="btn btn-secondary btn-sm" id="btn-check-updates" title="Check for newer versions">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Check updates
+            </button>
+            <button class="btn btn-primary btn-sm hidden" id="btn-update-all">Update all</button>
+          </div>
         </div>
+        <div id="pack-warnings" class="pack-warnings hidden"></div>
         <div id="installed-list" class="installed-list"></div>
         <div class="download-bar">
           <button class="btn btn-primary" id="btn-export-mrpack">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Export .mrpack
           </button>
-          <button class="btn btn-secondary" id="btn-export-zip">
+          <button class="btn btn-secondary" id="btn-export-zip" title="Hold Shift to exclude optional mods">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
             Download .zip of jars
           </button>
-          <button class="btn btn-secondary" id="btn-export-each">
+          <button class="btn btn-secondary" id="btn-export-each" title="Hold Shift to exclude optional mods">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Download each .jar
           </button>
         </div>
+        <p class="download-hint">Tip: hold <kbd>Shift</kbd> on a jar download to exclude optional mods.</p>
       </section>
     </div>
   </main>
@@ -131,6 +140,31 @@
       <div class="modal-actions">
         <button class="btn btn-secondary" id="modal-cancel">Cancel</button>
         <button class="btn btn-primary" id="modal-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Version picker modal ── -->
+  <div id="version-modal" class="modal-backdrop hidden">
+    <div class="modal card version-modal">
+      <div class="version-modal-header">
+        <h2 id="version-modal-title">Choose version</h2>
+        <button class="icon-btn" id="version-modal-close" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div id="version-list" class="version-list"></div>
+    </div>
+  </div>
+
+  <!-- ── Generic confirm modal ── -->
+  <div id="confirm-modal" class="modal-backdrop hidden">
+    <div class="modal card">
+      <h2 id="confirm-title">Confirm</h2>
+      <div id="confirm-body" class="confirm-body"></div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="confirm-cancel">Cancel</button>
+        <button class="btn btn-primary" id="confirm-ok">Continue</button>
       </div>
     </div>
   </div>
