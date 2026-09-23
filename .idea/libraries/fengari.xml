@@ -1,0 +1,18 @@
+<component name="libraryTable">
+  <library name="fengari" type="javaScript">
+    <properties>
+      <sourceFilesUrls>
+        <item url="file://$PROJECT_DIR$/libs/fengari" />
+        <item url="file://$PROJECT_DIR$/libs/fengari-interop" />
+        <item url="file://$PROJECT_DIR$/libs/fengari-web" />
+      </sourceFilesUrls>
+    </properties>
+    <CLASSES>
+      <root url="file://$PROJECT_DIR$/libs/fengari" />
+      <root url="file://$PROJECT_DIR$/libs/fengari-interop" />
+      <root url="file://$PROJECT_DIR$/libs/fengari-web" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
