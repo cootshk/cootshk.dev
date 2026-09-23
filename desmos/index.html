@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en_us">
+	<head>
+		<link rel="stylesheet" href="/desmos/styles.css">
+	</head>
+	<body>
+		<iframe id="desmos" src="https://cootshk.dev/_/desmos/calculator"></iframe>
+		<script>
+			const iframe = document.getElementById('desmos');
+			const iframeWin = iframe.contentWindow || iframe;
+			const iframeDoc = iframe.contentDocument || iframeWin.document;
+			var script = iframeDoc.createElement("script");
+			script.append(`
+				console.log("Injecting...");
+				// ==UserScript==
+				// @name        matrices (beta)
+				// @match       *://www.desmos.com/*
+				// @description e
+				// @grant       none
+				// @version     1.5
+				// @run-at      document-start
+				// @author      Cootshk
+				// ==/UserScript==
+
+				window.Worker = new Proxy(Worker, {
+					construct(t, a) {
+						if (a[0].startsWith("blob:")) {
+							let xhr = new XMLHttpRequest
+							xhr.open("GET", a[0], false)
+							xhr.send()
+							let h = xhr.responseText.replace(/\\w+\\.includes\\(\\w+\\)\\|\\|(?=.\\.restrictedFunctions)/, "")
+							a[0] = URL.createObjectURL(new Blob([h]))
+						}
+						return new t(...a)
+					}
+				});
+				const c = setInterval(_ => {
+					if (!window.Calc) return;
+					Calc._calc.graphSettings.config.matrices = true;
+					let o = Calc.controller.getMathquillConfig;
+					Calc.controller.getMathquillConfig = e => {
+						let g = o.call(Calc.controller, e);
+						g.autoOperatorNames += " rowMatrix zeroMatrix hcat vcat rows columns det trace rref matrixElement rowCount colCount submatrix";
+						return g;
+					}
+					clearInterval(c);
+				}, 999);
+				console.log("Loaded!");
+			`);
+			iframeDoc.documentElement.appendChild(script);
+		</script>
+	</body>
+</html>

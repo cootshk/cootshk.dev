@@ -1,0 +1,11 @@
+name = "desmos-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# TODO: look up routes based on a dictionary and choose the hostname
+routes = [
+  { pattern = "cootshk.dev/_/desmos/*", zone_name = "cootshk.dev" },
+  # { pattern = "www.cootshk.dev/_/desmos/*", zone_name = "cootshk.dev" },
+]
+
+workers_dev = false
