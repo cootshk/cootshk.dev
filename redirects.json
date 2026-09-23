@@ -1,4 +1,5 @@
 {
+    "_\\/|$": "https://www.youtube.com/watch?v=zR6fECxF44I",
     "discord": "https://discord.gg/qBtkZQCtHu",
     "github": "https://github.com/cootshk",
     "nohello": "https://nohello.net/en",
@@ -7,12 +8,14 @@
     "vibecode": "https://www.justfuckingcode.com/",
     "xy": "https://xyproblem.info/",
     "netetiquette": "https://mywiki.wooledge.org/NetEtiquette",
+        "netiquette": "/netetiquette",
     "dontasktoask": "https://dontasktoask.com/", 
     "source": "https://github.com/cootshk/cootshk.dev",
     "redirects": "/redirects.json",
     "(mod)?rinth": "https://modrinth.com/user/Cootshk",
     "cdn": "https://github.com/cootshk/cootshk.dev/tree/master/cdn",
     "why": "https://www.youtube.com/watch?v=VPpIjhtgGj0",
-    "_": "https://www.youtube.com/watch?v=zR6fECxF44I",
+    "y": "https://www.youtube.com/watch?v=VPpIjhtgGj0",
+    ".*\\.": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
