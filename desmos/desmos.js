@@ -22,20 +22,44 @@ const local = {
 
 const PROXY = "/_/desmos";
 
-// ?type=... -> where the app lives upstream. `key` is the name extensions.json uses.
+// ?type=... -> where the app lives upstream. `key` is the name extensions.json uses, and
+// `product` the name Desmos itself calls the calculator by - the four that share a bundle
+// hand it around as `product`, and extensions/core turns it back into one of these.
 const MODES = {
     graphing: {
         key: "graphing",
         path: "calculator",
-        title: "Graphing Calculator"
+        title: "Graphing Calculator",
+        product: "graphing"
     },
-    "3d": { key: "3d", path: "3d", title: "3D Calculator" },
-    geometry: { key: "geometry", path: "geometry", title: "Geometry" },
+    "3d": {
+        key: "3d",
+        path: "3d",
+        title: "3D Calculator",
+        product: "graphing-3d"
+    },
+    geometry: {
+        key: "geometry",
+        path: "geometry",
+        title: "Geometry",
+        product: "geometry-calculator"
+    },
+    notebook: {
+        key: "notebook",
+        path: "notebook",
+        title: "Notebook",
+        product: "notebook"
+    },
     matrix: { key: "matrix", path: "matrix", title: "Matrix Calculator" },
     scientific: {
         key: "scientific",
         path: "scientific",
         title: "Scientific Calculator"
+    },
+    fourfunction: {
+        key: "fourfunction",
+        path: "fourfunction",
+        title: "Four Function Calculator"
     }
 };
 
@@ -46,8 +70,12 @@ const ALIASES = {
     three: "3d",
     3: "3d",
     geo: "geometry",
+    note: "notebook",
     matrices: "matrix",
-    sci: "scientific"
+    sci: "scientific",
+    four: "fourfunction",
+    fourfn: "fourfunction",
+    4: "fourfunction"
 };
 
 const DEFAULT_MODE = "graphing";
@@ -80,13 +108,14 @@ function currentMode() {
     ];
 }
 
-/**
- * The #fragment, which is the graph ID (`#abcdef1234`), if there is one. Desmos reads the ID
- * out of location.pathname upstream; extensions/core patches it to read this instead, which
- * is what lets the address bar stay on /desmos.
- */
-function currentGraph() {
-    const raw = location.hash.replace(/^#\/?/, "");
+/** The mode Desmos' own name for a calculator - "graphing-3d" - belongs to, or null. */
+function modeForProduct(product) {
+    return Object.values(MODES).find((one) => one.product === product) || null;
+}
+
+/** A graph ID out of a #fragment. */
+function fragment(hash) {
+    const raw = String(hash ?? "").replace(/^#\/?/, "");
     try {
         return decodeURIComponent(raw).trim();
     } catch (_) {
@@ -94,11 +123,93 @@ function currentGraph() {
     }
 }
 
+/**
+ * The #fragment, which is the graph ID (`#abcdef1234`), if there is one. Desmos reads the ID
+ * out of location.pathname upstream; extensions/core patches it to read this instead, which
+ * is what lets the address bar stay on /desmos.
+ */
+function currentGraph() {
+    return fragment(location.hash);
+}
+
 function sourceUrl(mode, graph) {
     const path = graph
         ? PROXY + "/" + mode.path + "/" + encodeURIComponent(graph)
         : PROXY + "/" + mode.path;
     return new URL(path, location.origin).toString();
+}
+
+/**
+ * This page's own address for a calculator and a graph: the calculator in ?type= and the
+ * graph in the fragment, with whatever else was in the query (?ext=, say) left alone.
+ *
+ * The order matters - a query string written after the fragment is part of the fragment, and
+ * comes back on the next load as a graph ID with a ?type= stuck to the end of it. This is the
+ * one place any of these URLs are built, and extensions/core hands it to Desmos as getURL().
+ */
+function pageUrl(mode, graph) {
+    const query = new URLSearchParams(location.search);
+    query.set("type", mode.key);
+    return (
+        location.origin +
+        location.pathname +
+        "?" +
+        query +
+        (graph ? "#" + encodeURIComponent(graph) : "")
+    );
+}
+
+/**
+ * Where a link points, as a mode and a graph of ours - or null if it is not one of the
+ * calculators. Both this page's own address and an upstream path are understood, with or
+ * without the /_/desmos the proxy bootstrap puts back on every root-relative href.
+ */
+function linkTarget(href) {
+    let url;
+    try {
+        url = new URL(href, document.baseURI);
+    } catch (_) {
+        return null;
+    }
+    if (url.origin !== location.origin) return null;
+
+    const trim = (path) => path.replace(/\/+$/, "");
+    let path = trim(url.pathname);
+    if (path === PROXY || path.startsWith(PROXY + "/"))
+        path = path.slice(PROXY.length);
+
+    // This page. Desmos is handed these by getURL(), and the proxy's href rewriting has
+    // usually put its own prefix back on the front by the time they reach the document.
+    if (path === trim(location.pathname)) {
+        const key =
+            canonicalMode(new URLSearchParams(url.search).get("type")) ||
+            DEFAULT_MODE;
+        return { mode: MODES[key], graph: fragment(url.hash) };
+    }
+
+    // ...or an upstream one: /calculator, /3d/abcdef1234, and so on.
+    const [, first, second] = path.split("/");
+    const key = canonicalMode(first);
+    if (!key) return null;
+    return { mode: MODES[key], graph: second ? fragment(second) : "" };
+}
+
+/**
+ * Open a calculator. Always a real load: Desmos' timers, workers, blob URLs and globals live
+ * in this window, and swapping its API out in place - which is what its own buttons do - would
+ * leave the page running the extensions and bundle patches of the calculator it started as.
+ */
+function navigateTo(mode, graph) {
+    const url = pageUrl(mode, graph);
+    const page = (href) => href.split("#")[0];
+    // Assigning an address that differs from this one only after the "#" - or not at all -
+    // would leave the document where it is. Put it in the bar by hand and load it.
+    if (page(url) === page(location.href)) {
+        if (url !== location.href) history.replaceState(null, "", url);
+        location.reload();
+        return;
+    }
+    location.assign(url);
 }
 
 // Object URLs belonging to the current load, handed out through ctx.blob() and released
@@ -421,10 +532,37 @@ function onHashChange() {
     load(mode, graph).catch(fail);
 }
 
+/**
+ * Desmos links to its other calculators by upstream path - /scientific, /3d/abcdef1234 - and
+ * the proxy turns those into /_/desmos/..., which is the calculator with none of this on it.
+ * Those are also the addresses it hands its own graph tiles. Send them through the loader.
+ */
+function onClick(event) {
+    // Desmos' `ignoreRealClick` binds to the link itself, so a click it means to handle as a
+    // tap of its own has already been prevented by the time it reaches the document. Modified
+    // clicks belong to the browser - a new tab, a download - and are left alone.
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+
+    const target = event.target;
+    const link = target && target.closest && target.closest("a[href]");
+    if (!link || link.hasAttribute("download")) return;
+    if (link.target && link.target !== "_self") return;
+
+    const to = linkTarget(link.href);
+    if (!to) return;
+    event.preventDefault();
+    navigateTo(to.mode, to.graph);
+}
+
 /** Re-registered after every document.open(), which erases the lot. */
 function listen() {
-    // A named handler, so that registering it twice is the no-op it looks like.
+    // Named handlers, so that registering them twice is the no-op it looks like.
     addEventListener("hashchange", onHashChange);
+    // On the document rather than the window: Desmos' own listeners are below this one, and
+    // must get their say about a link before we decide nobody wanted it.
+    document.addEventListener("click", onClick);
 }
 
 title(mode);

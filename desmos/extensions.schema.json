@@ -83,11 +83,32 @@
             "anyOf": [
                 {
                     "title": "calculator",
-                    "enum": ["graphing", "3d", "geometry", "matrix", "scientific"]
+                    "enum": [
+                        "graphing",
+                        "3d",
+                        "geometry",
+                        "notebook",
+                        "matrix",
+                        "scientific",
+                        "fourfunction"
+                    ]
                 },
                 {
                     "title": "alias",
-                    "enum": ["calculator", "calc", "graph", "three", "3", "geo", "matrices", "sci"]
+                    "enum": [
+                        "calculator",
+                        "calc",
+                        "graph",
+                        "three",
+                        "3",
+                        "geo",
+                        "note",
+                        "matrices",
+                        "sci",
+                        "four",
+                        "fourfn",
+                        "4"
+                    ]
                 }
             ]
         }
