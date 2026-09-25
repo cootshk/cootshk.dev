@@ -60,9 +60,19 @@
             "name": "oneko",
             "description": "cat follow mouse (real)"
         },
+        "patchHelper": {
+            "name": "Patch Helper",
+            "description": "A tool to help with writing extensions."
+        },
         "settings": {
             "name": "Settings",
             "description": "Adds a settings pane to the saved graphs list.",
+            "file": [
+                "index.js",
+                "tabs/extensions.js",
+                "tabs/themes.js",
+                "tabs/patchHelper.js"
+            ],
             "css": true,
             "forceEnabled": true
         }

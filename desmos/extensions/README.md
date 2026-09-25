@@ -9,6 +9,8 @@ extensions/
     index.css     optional; injected before they run
 ```
 
+A bigger one can be several scripts - see *Splitting one across several files*.
+
 ## Adding an extension
 - make `<id>/index.js` and hand an object to `extension()`
 - add it to `../extensions.json` - nothing is loaded that isn't declared there
@@ -16,6 +18,25 @@ extensions/
 
 `"file"` overrides the script's name and `"css"` can name a stylesheet other than
 `index.css`; both are resolved inside the extension's own folder.
+
+## Splitting one across several files
+`"file"` also takes a list, for an extension that has outgrown a single script:
+
+```json
+"settings": {
+    "file": ["index.js", "tabs/extensions.js", "tabs/themes.js"]
+}
+```
+
+They run in the order they are named, so a later file may reach for whatever an
+earlier one registered - `extensions/settings` is the worked example: `index.js`
+calls `extension()` and the files in `tabs/` hand themselves to the
+`Extensions.settings.tab()` that leaves behind. One `extension()` call between
+them all: the list is one extension in several files, not several extensions.
+
+That ordering is the only thing a later file may lean on. Everything else is the
+usual race - another extension is only certainly registered once a hook is
+running, never at the top level.
 
 ## Patching the Desmos bundle
 Put a `patches` list in the object you hand to `extension()`. Each patch is
@@ -42,6 +63,15 @@ extension({
 
 `source(js, ctx)` is still there for anything this can't express, and runs after the
 patches.
+
+Writing one of these against a minified build is easier with the **Patch Helper**: turn
+that extension on and a tab of its own appears next to Examples, with a match and a replace
+box over a diff of what the patch would do to the bundle. It compiles the pattern with the
+loader's own `canonicalizeMatch`, so `\i` and the implied `/g` behave exactly as they will
+in a real patch, and it shows every match with the bundle either side of it - which is how
+a pattern that is looser than it looks gives itself away. Turn *Regex* off and the box is
+the literal string a `match` written as one would be, replaced only where it first appears
+and counted everywhere it occurs, just as `count` counts it.
 
 ## Drawing UI
 Desmos owns the whole document, so an extension that wants to show something

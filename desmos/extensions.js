@@ -1,7 +1,9 @@
 // Extension registry for the proxied Desmos page. desmos.js is the loader that runs these.
 //
 // An extension is a folder under extensions/ named after its id, holding an index.js and,
-// if it draws anything, an index.css. It is declared by hand in extensions.json:
+// if it draws anything, an index.css. One that has outgrown a single file names the rest in
+// its manifest entry, and they run in that order - see `file` below. It is declared by hand
+// in extensions.json:
 //
 //   {
 //     "extensions": {
@@ -10,7 +12,7 @@
 //         "description": "...",               // its tooltip
 //         "supports": ["graphing", "3d"],     // optional; every calculator when absent
 //         "css": true,                        // optional; load extensions/matrices/index.css
-//         "file": "index.js",                 // optional; "index.js" when absent
+//         "file": "index.js",                 // optional; "index.js" when absent, or a list
 //         "forceEnabled": false               // optional; always on, and not togglable
 //       }
 //     },
@@ -53,6 +55,12 @@
 //
 // `ownsBundle: true` means the extension executes the Desmos bundle itself and the loader
 // must not; DesModder fetches, patches and evals it.
+//
+// Every registered extension is also on the window as `Extensions.<id>`, so one that wants
+// a helper off a neighbour - extensions/core's, say - reaches for Extensions.core rather
+// than exporting it through a global of its own. See the registry below for when an id
+// is there to be read, and `$self` in the patches section for how patched-in code reaches
+// the extension that patched it in.
 
 const MANIFEST_URL = "/desmos/extensions.json";
 const EXT_DIR = "/desmos/extensions/";
@@ -63,15 +71,29 @@ const EXTENSIONS = new Map();
 // id -> what extensions.json says about it; filled in by loadManifest(), before anything else.
 const MANIFEST = new Map();
 
+/**
+ * The same defs the map holds, on the window and keyed by id: Extensions.core is whatever
+ * extensions/core/index.js handed extension().
+ *
+ * An id appears the moment its script runs, and the scripts of one load are fetched together
+ * and run in whatever order they arrive. So reading a neighbour out of here at the top level
+ * of an index.js is a race; by the time any hook runs - setup() is the first - every
+ * extension this load is running has registered, and all of them are there.
+ *
+ * The object is the registered def rather than the literal that was passed: an extension with
+ * `patches` gets a copy of its own def whose source() applies them (see extension() below),
+ * and that copy is the one the loader runs.
+ */
+const Extensions = (window.Extensions = {});
+
 function extension(def) {
     if (EXTENSIONS.has(def.id))
         throw new Error(`desmos: duplicate extension id "${def.id}"`);
     // Patches are a source() written declaratively, so make them one: everything downstream
     // looks for def.source and needs to know nothing about either form.
-    EXTENSIONS.set(
-        def.id,
-        def.patches ? { ...def, source: patchSource(def) } : def
-    );
+    const registered = def.patches ? { ...def, source: patchSource(def) } : def;
+    EXTENSIONS.set(def.id, registered);
+    Extensions[def.id] = registered;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +115,18 @@ function extension(def) {
  * \i, which expands to exactly one of them:
  *
  *   patches: [{ match: /\i\.restrictedFunctions/, replace: "$&" }]
+ *
+ * Alongside String.replace's own $ tokens there is one of ours, `$self`, which expands to
+ * this extension's entry in the Extensions global - the way for code a patch puts into the
+ * bundle to call back into the extension that put it there:
+ *
+ *   extension({ id: "core", patches: [{ match: /\i\.getURL\(\)/, replace: "$self.url($&)" }],
+ *               url(href) { ... } })
+ *
+ * becomes `window.Extensions["core"].url(...)` in the bundle. It is expanded before String.replace
+ * sees the string, so `$$self` is still the literal "$self" that a `$$` asks for, and it is
+ * only for `replace` written as a string: a function returns its replacement literally, and
+ * one that wants its own def already has it in scope.
  *
  * A patch that matches nothing is an error rather than a no-op: the extension is dropped
  * for the rest of the load and says so in the console, instead of silently half-applying
@@ -141,6 +175,19 @@ function countMatches(js, match) {
     return (js.match(new RegExp(match.source, flags)) || []).length;
 }
 
+/**
+ * `$self` in a replacement, expanded to the extension's own entry in the Extensions global.
+ *
+ * `$$` is taken first and handed back untouched, so it reaches String.replace as the escape
+ * it is: in `$$self` the `$self` belongs to that escape and is left alone. Nothing this puts
+ * in carries a `$` of its own, so what it writes is not read again.
+ */
+function expandSelf(replace, id) {
+    return replace.replace(/\$\$|\$self\b/g, (token) =>
+        token === "$$" ? token : `window.Extensions[${JSON.stringify(id)}]`
+    );
+}
+
 /** Apply `patches` to the bundle text. Throws on the first one that did not take. */
 function applyPatches(patches, js, id) {
     patches.forEach((patch, i) => {
@@ -162,7 +209,12 @@ function applyPatches(patches, js, id) {
                     (expected === undefined ? "" : `, expected ${expected}`)
             );
 
-        js = js.replace(match, patch.replace);
+        js = js.replace(
+            match,
+            typeof patch.replace === "function"
+                ? patch.replace
+                : expandSelf(patch.replace, id)
+        );
     });
     return js;
 }
@@ -207,7 +259,13 @@ async function loadManifest() {
             // The calculators it is for, named as ?type= is (aliases and upstream paths are taken
             // too). Null means all of them.
             supports: meta.supports || null,
-            src: extensionUrl(id, meta.file || "index.js"),
+            // The scripts to run, in the order they are named: one file is the usual case,
+            // and a list is for an extension split across several, whose later files may
+            // reach for what the earlier ones registered.
+            srcs: (Array.isArray(meta.file)
+                ? meta.file
+                : [meta.file || "index.js"]
+            ).map((file) => extensionUrl(id, file)),
             // An extension's own stylesheet, fetched with its script and injected before it
             // runs. `true` is the index.css beside its index.js; a string names another file in
             // the same folder.
@@ -229,26 +287,35 @@ async function loadManifest() {
     return MANIFEST;
 }
 
-// One promise per script: load() runs again on every graph change, and a second <script>
+// One promise per extension: load() runs again on every graph change, and a second <script>
 // tag for the same extension would only trip the duplicate-id check.
 const scripts = new Map();
 
+/** One script tag, resolved when it has run. */
+function loadFile(src) {
+    return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        // local.setAttribute, not script.src: by the time a graph change loads an extension
+        // for the first time, the proxy has patched that setter.
+        local.setAttribute.call(script, "src", src);
+        // Appended in manifest order and none of them async, so they run in that order however
+        // the network hands them back - which is what lets a later file of an extension reach
+        // for what an earlier one registered.
+        script.async = false;
+        script.addEventListener("load", () => resolve());
+        script.addEventListener("error", () =>
+            reject(new Error(`could not load ${src}`))
+        );
+        document.head.appendChild(script);
+    });
+}
+
+/** All of `entry`'s scripts. */
 function loadScript(entry) {
     if (!scripts.has(entry.id)) {
         scripts.set(
             entry.id,
-            new Promise((resolve, reject) => {
-                const script = document.createElement("script");
-                // local.setAttribute, not script.src: by the time a graph change loads an extension
-                // for the first time, the proxy has patched that setter.
-                local.setAttribute.call(script, "src", entry.src);
-                script.async = false;
-                script.addEventListener("load", () => resolve());
-                script.addEventListener("error", () =>
-                    reject(new Error(`could not load ${entry.src}`))
-                );
-                document.head.appendChild(script);
-            })
+            Promise.all(entry.srcs.map((src) => loadFile(src)))
         );
     }
     return scripts.get(entry.id);
@@ -300,7 +367,7 @@ async function loadExtension(entry) {
     const def = EXTENSIONS.get(entry.id);
     if (!def) {
         console.warn(
-            `desmos: ${entry.src} did not register an extension called "${entry.id}"`
+            `desmos: ${entry.srcs.join(", ")} did not register an extension called "${entry.id}"`
         );
         return null;
     }

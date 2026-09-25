@@ -38,9 +38,9 @@
 //                                      Extensions tab. The `ui` hook registers this for you.
 //   ui.hasPanel(id) / ui.renderPanel(id, root)
 //
-// The one extension that draws the Extensions tab itself is extensions/settings/: it
-// patches Desmos' my-graphs modal to call ui.mount("extensions", el), fills that slot with
-// the grid, and styles it from its own index.css.
+// The tabs in Desmos' my-graphs modal are extensions/settings/: it patches the modal to
+// call ui.mount("cde-<tab>", el) for each one, fills those slots, and styles them from its
+// own index.css.
 
 /**
  * window.__desmosExt.ui. Called by desmos.js once the document has been swapped, before any

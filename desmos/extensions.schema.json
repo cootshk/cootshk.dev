@@ -51,9 +51,16 @@
                     "uniqueItems": true
                 },
                 "file": {
-                    "type": "string",
-                    "description": "The script inside extensions/<id>/, if not index.js",
-                    "minLength": 1
+                    "description": "The script inside extensions/<id>/, if not index.js. A list for an extension split across several files, which run in the order given.",
+                    "anyOf": [
+                        { "type": "string", "minLength": 1 },
+                        {
+                            "type": "array",
+                            "items": { "type": "string", "minLength": 1 },
+                            "minItems": 1,
+                            "uniqueItems": true
+                        }
+                    ]
                 },
                 "css": {
                     "description": "A stylesheet to put into the frame before the extension runs. true is the index.css beside its index.js; a string names another file in the same folder.",
