@@ -22,16 +22,27 @@
 //                                      plus `supported` (this calculator), `forced`
 //                                      (forceEnabled) and `active` (running right now).
 //   ui.enabled(id)                     is it meant to be on? - the toggle's state.
-//   ui.setEnabled(id, on)              remember a choice. Takes effect on the next load.
-//   ui.overridden()                    is ?ext= deciding instead, making toggles read-only?
+//   ui.setEnabled(id, on)              flip a toggle. Nothing is written down until apply().
+//   ui.locked(id)                      is that toggle read-only?
+//   ui.overridden()                    is ?ext= deciding instead of the toggles?
+//   ui.unlock() / ui.unlocked()        edit the toggles anyway, while ?ext= is there.
 //   ui.dirty()                         does what is toggled on differ from what is running?
 //   ui.onDirty(fn) -> off              called when that answer may have changed.
-//   ui.reload()                        reload the page, so that it doesn't.
+//   ui.apply()                         write the toggles down and reload onto them.
+//   ui.reload()                        reload the page as it stands.
 //
-//   ui.slot(name, render)              offer a named mount point. render(root) draws into a
-//                                      fresh element and may return a teardown function.
-//   ui.mount(name, root)               fill one. Patched Desmos code calls this from a
+// Toggling is a draft: setEnabled() only moves a switch, and nothing outlives the page until
+// apply() writes the whole set down. That is what makes unlock() safe - a ?ext= address can
+// be examined, and even edited, without quietly rewriting what the next visit loads.
+//
+//   ui.slot(name, render)              offer a named mount point. render(root, data) draws
+//                                      into a fresh element and may return a teardown
+//                                      function.
+//   ui.mount(name, root, data)         fill one. Patched Desmos code calls this from a
 //                                      didMount, and a slot registered later still lands.
+//                                      `data` is whatever that call site can reach and the
+//                                      renderer cannot - the my-graphs tabs are handed the
+//                                      modal's controller this way.
 //   ui.unmount(root)                   the matching willUnmount.
 //
 //   ui.panel(id, render, data)         an extension's own settings, drawn on its card in the
@@ -122,11 +133,23 @@ function uiRuntime(config) {
         }
     }
 
+    // Switches the user has flipped this visit, id -> bool. Not written anywhere: apply() is
+    // what makes a draft real, and until then the stored set is whatever it already was.
+    var draft = {};
+
+    // Whether the toggles have been unlocked for editing despite ?ext= deciding this load.
+    var unlockedToggles = false;
+
+    function has(id) {
+        return Object.prototype.hasOwnProperty.call(draft, id);
+    }
+
     /** Whether `id` is meant to be running - what its toggle shows, not what is loaded. */
     function enabled(id) {
         var entry = byId[id];
         if (!entry || !entry.supported) return false;
         if (entry.forced) return true;
+        if (has(id)) return draft[id];
         // ?ext= is the whole answer while it is there, so the toggles report the load itself.
         if (config.overridden) return entry.active;
         var choice = stored()[id];
@@ -135,9 +158,8 @@ function uiRuntime(config) {
 
     function locked(id) {
         var entry = byId[id];
-        return (
-            !entry || !entry.supported || entry.forced || !!config.overridden
-        );
+        if (!entry || !entry.supported || entry.forced) return true;
+        return !!config.overridden && !unlockedToggles;
     }
 
     var listeners = [];
@@ -151,15 +173,7 @@ function uiRuntime(config) {
         };
     }
 
-    function setEnabled(id, on) {
-        if (locked(id)) return false;
-        var choices = stored();
-        choices[id] = !!on;
-        try {
-            g.localStorage.setItem(config.storage, JSON.stringify(choices));
-        } catch (e) {
-            /* private browsing - the choice just doesn't stick */
-        }
+    function announce() {
         listeners.slice().forEach(function (fn) {
             try {
                 fn();
@@ -167,6 +181,20 @@ function uiRuntime(config) {
                 console.error("desmos: ui listener failed", error);
             }
         });
+    }
+
+    function setEnabled(id, on) {
+        if (locked(id)) return false;
+        draft[id] = !!on;
+        announce();
+        return true;
+    }
+
+    /** Let the toggles be edited even though ?ext= is what decided this load. */
+    function unlock() {
+        if (unlockedToggles || !config.overridden) return false;
+        unlockedToggles = true;
+        announce();
         return true;
     }
 
@@ -179,6 +207,34 @@ function uiRuntime(config) {
 
     function reload() {
         g.location.reload();
+    }
+
+    /**
+     * Make the toggles the answer: write down every one of them - not just the flipped ones,
+     * since a ?ext= load may never have agreed with what was stored - and come back up on it.
+     *
+     * ?ext= goes, because it would win again and none of this would have meant anything. A
+     * graph that asks for extensions of its own still gets them; that list is added to
+     * whatever is stored, not replaced by it.
+     */
+    function apply() {
+        var choices = stored();
+        catalog.forEach(function (entry) {
+            // Forced ones have no say, and an extension this calculator cannot run must keep
+            // whatever it is set to for the calculators that can.
+            if (entry.forced || !entry.supported) return;
+            choices[entry.id] = enabled(entry.id);
+        });
+        try {
+            g.localStorage.setItem(config.storage, JSON.stringify(choices));
+        } catch (e) {
+            /* private browsing - the choice just doesn't stick */
+        }
+
+        var url = new URL(g.location.href);
+        if (!url.searchParams.has("ext")) return reload();
+        url.searchParams.delete("ext");
+        g.location.replace(url.toString());
     }
 
     // ---------------------------------------------------------------------------
@@ -196,7 +252,7 @@ function uiRuntime(config) {
         if (!render || record.teardown !== null) return;
         record.teardown = undefined;
         try {
-            var teardown = render(record.root);
+            var teardown = render(record.root, record.data);
             record.teardown =
                 typeof teardown === "function" ? teardown : undefined;
         } catch (error) {
@@ -215,8 +271,8 @@ function uiRuntime(config) {
         });
     }
 
-    function mount(name, root) {
-        var record = { name: name, root: root, teardown: null };
+    function mount(name, root, data) {
+        var record = { name: name, root: root, data: data, teardown: null };
         mounted.push(record);
         draw(record);
         return root;
@@ -284,8 +340,13 @@ function uiRuntime(config) {
         overridden: function () {
             return !!config.overridden;
         },
+        unlock: unlock,
+        unlocked: function () {
+            return unlockedToggles;
+        },
         dirty: dirty,
         onDirty: onDirty,
+        apply: apply,
         reload: reload,
 
         slot: slot,

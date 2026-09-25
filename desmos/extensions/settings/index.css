@@ -42,9 +42,26 @@
     background: var(--dcg-accent-color, #2f72dc);
     cursor: pointer;
 }
+/* The ?ext= notice, with the way out of it sitting on the same line. */
 .cde-ext__note {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
     margin: 0;
     color: var(--dcg-custom-secondary-text-color, #666);
+}
+.cde-ext__unlock {
+    flex: none;
+    padding: 0;
+    font: inherit;
+    color: var(--dcg-accent-color, #2f72dc);
+    border: 0;
+    background: none;
+    cursor: pointer;
+    text-decoration: underline;
+}
+.cde-ext__unlock[hidden] {
+    display: none;
 }
 .cde-ext__grid {
     display: grid;
@@ -331,5 +348,125 @@
     color: var(--dcg-custom-secondary-text-color, #666);
 }
 .cde-patch__status--error {
+    color: var(--dcg-error-color, #c74440);
+}
+
+/* --- the Saved Graphs tab --- */
+/* A form down the left and the thumbnail beside it, until the modal is too narrow for two
+   columns - which is most of the time on a phone, and never on a desktop. */
+.cde-tab--savedGraphs {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "fields preview"
+        "buttons buttons"
+        "status status";
+    align-items: start;
+    gap: 16px 24px;
+}
+@media (max-width: 620px) {
+    .cde-tab--savedGraphs {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "fields"
+            "preview"
+            "buttons"
+            "status";
+    }
+}
+.cde-saved__fields {
+    grid-area: fields;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+}
+.cde-saved__group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.cde-saved__title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--dcg-custom-secondary-text-color, #666);
+}
+.cde-saved__field {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    font: inherit;
+    color: inherit;
+    border: 1px solid var(--dcg-custom-border-color, #bbb);
+    border-radius: 3px;
+    background: var(--dcg-custom-background-color, #fff);
+}
+.cde-saved__field--text {
+    resize: vertical;
+}
+.cde-saved__field:focus {
+    outline: none;
+    border-color: var(--dcg-accent-color, #2f72dc);
+}
+/* Only the plugins the user turned on are here, so the list is short enough to wrap rather
+   than scroll. */
+.cde-saved__plugins {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+}
+.cde-saved__plugin {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+.cde-saved__check {
+    flex: none;
+    margin: 0;
+}
+.cde-saved__preview {
+    grid-area: preview;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+/* Desmos makes thumbnails at 200x200; the checkerboard is so that a graph on a transparent
+   background still reads as an image and not as a hole in the tab. */
+.cde-saved__thumbnail {
+    width: 200px;
+    height: 200px;
+    object-fit: contain;
+    border: 1px solid var(--dcg-custom-border-color, #bbb);
+    border-radius: 3px;
+    background-color: var(--dcg-custom-background-color, #fff);
+    background-image:
+        linear-gradient(45deg, rgba(128, 128, 128, 0.15) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(128, 128, 128, 0.15) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(128, 128, 128, 0.15) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(128, 128, 128, 0.15) 75%);
+    background-size: 16px 16px;
+    background-position:
+        0 0,
+        0 8px,
+        8px -8px,
+        -8px 0;
+}
+.cde-saved__buttons {
+    grid-area: buttons;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+.cde-saved__status {
+    grid-area: status;
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--dcg-custom-secondary-text-color, #666);
+}
+.cde-saved__status--error {
     color: var(--dcg-error-color, #c74440);
 }

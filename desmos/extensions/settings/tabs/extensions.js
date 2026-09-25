@@ -22,20 +22,47 @@
             oninput: filter
         });
 
+        // Nothing a toggle does outlives the page until this is pressed - see ui.js.
         var reload = ui.el("button", {
             class: "cde-ext__reload",
             type: "button",
             text: "Apply and Reload",
             hidden: !ui.dirty(),
-            onclick: ui.reload
+            onclick: ui.apply
         });
+
+        // ?ext= decides the load it is part of, so the toggles below are showing it rather
+        // than the stored set and are read-only. This says so, and offers the way out.
+        var unlock = ui.overridden()
+            ? ui.el("button", {
+                  class: "cde-ext__unlock",
+                  type: "button",
+                  text: "Unlock",
+                  title: "Edit these anyway. Applying drops ?ext= from the address.",
+                  onclick: function () {
+                      ui.unlock();
+                  }
+              })
+            : null;
+        var note = ui.overridden()
+            ? ui.el(
+                  "p",
+                  { class: "cde-ext__note" },
+                  ui.el("span", {
+                      text: "?ext= in the URL is overriding these."
+                  }),
+                  unlock
+              )
+            : null;
 
         var grid = ui.el("div", { class: "cde-ext__grid" });
         var empty = ui.el("p", { class: "cde-ext__empty", hidden: true });
 
         var cards = ui.list().map(function (entry) {
+            var drawn = card(entry);
             return {
-                node: card(entry),
+                node: drawn.node,
+                unlock: drawn.unlock,
                 // id included: it is what ?ext= takes, so it is worth being able to
                 // search for even though the card shows the name.
                 haystack: (
@@ -58,12 +85,7 @@
             root,
             null,
             ui.el("div", { class: "cde-ext__bar" }, search, reload),
-            ui.overridden()
-                ? ui.el("p", {
-                      class: "cde-ext__note",
-                      text: "?ext= in the URL is overriding these."
-                  })
-                : null,
+            note,
             grid,
             empty
         );
@@ -83,9 +105,17 @@
 
         return ui.onDirty(function () {
             reload.hidden = !ui.dirty();
+            // Unlocking does not redraw the tab, so the switches it frees are told directly.
+            if (unlock && ui.unlocked()) {
+                unlock.hidden = true;
+                cards.forEach(function (one) {
+                    one.unlock();
+                });
+            }
         });
     }
 
+    /** A card, and the way to free its toggle if the tab is unlocked later. */
     function card(entry) {
         var ui = window.__desmosExt.ui;
 
@@ -114,7 +144,7 @@
             ui.el("span", { class: "cde-ext-toggle__track" })
         );
 
-        return ui.el(
+        var node = ui.el(
             "div",
             {
                 class:
@@ -140,6 +170,15 @@
             // that has been switched off until the page is reloaded.
             ui.hasPanel(entry.id) ? settings(entry) : null
         );
+
+        return {
+            node: node,
+            unlock: function () {
+                if (ui.locked(entry.id)) return;
+                box.disabled = false;
+                toggle.removeAttribute("title");
+            }
+        };
     }
 
     /** The "Settings" disclosure on a card, drawn the first time it is opened. */

@@ -228,6 +228,111 @@ function releaseBlobs() {
 }
 
 // ---------------------------------------------------------------------------
+// what a graph asks for
+// ---------------------------------------------------------------------------
+//
+// A graph saved by the Saved Graphs tab carries its own list of extensions, so that opening
+// it brings along whatever it was drawn with. The tab writes that list into a hidden ".dcg"
+// folder on the expression sheet (see extensions/settings/tabs/savedGraphs.js, which owns
+// the format); this is the reading half, and it has to live out here because the answer
+// decides which extensions load - long before there is a Calc to ask.
+
+/** The folder the metadata sits in, and the key it sits under. Paired with savedGraphs.js. */
+const META_FOLDER = ".dcg";
+
+/** Desmos hands the page its graph in <body data-load-data>, as `graph`. */
+function loadData(source) {
+    const raw = source.body && source.body.getAttribute("data-load-data");
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch (error) {
+        console.warn("desmos: could not read the page's load-data", error);
+        return null;
+    }
+}
+
+/**
+ * An address out of the page, fetchable from here. The proxy rewrites the URLs it finds in
+ * what it serves, but a stray absolute one would be cross-origin and blocked, so put any
+ * that got through back on the prefix.
+ */
+function proxied(url) {
+    try {
+        const parsed = new URL(url, location.origin);
+        if (/(^|\.)desmos\.com$/i.test(parsed.hostname))
+            return PROXY + parsed.pathname + parsed.search;
+        return parsed.toString();
+    } catch (error) {
+        return null;
+    }
+}
+
+/**
+ * The graph's state. Small graphs come inline in the page; the rest arrive as a `stateUrl`
+ * that Desmos would fetch anyway, so fetching it here costs a request the browser is about
+ * to make regardless.
+ */
+async function graphState(source) {
+    const data = loadData(source);
+    const graph = data && data.graph;
+    if (!graph) return null;
+
+    if (typeof graph.state === "string") return JSON.parse(graph.state);
+    if (graph.state) return graph.state;
+    if (!graph.stateUrl) return null;
+
+    const url = proxied(graph.stateUrl);
+    if (!url) return null;
+    const res = await local.fetch(url);
+    if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
+    return res.json();
+}
+
+/** The `forcePlugins` a ".dcg" folder's metadata note names, as ?ext= would spell them. */
+function graphExtensions(state) {
+    const list = state && state.expressions && state.expressions.list;
+    if (!Array.isArray(list)) return [];
+
+    const folder = list.find(
+        (item) => item.type === "folder" && item.title === META_FOLDER
+    );
+    if (!folder) return [];
+
+    for (const item of list) {
+        if (item.type !== "text" || item.folderId !== folder.id) continue;
+        let meta;
+        try {
+            const note = JSON.parse(item.text || "");
+            // Early graphs wrote the metadata as a string of JSON rather than as an object.
+            meta =
+                note && typeof note.metadata === "string"
+                    ? JSON.parse(note.metadata)
+                    : note && note.metadata;
+        } catch (error) {
+            continue; // a note that happens to start with a brace is still just a note
+        }
+        if (meta && Array.isArray(meta.forcePlugins))
+            return meta.forcePlugins.filter((one) => typeof one === "string");
+    }
+    return [];
+}
+
+/** What the graph at this address asks for. Never fatal: a graph is worth more than a list. */
+async function wantedByGraph(source, graph) {
+    if (!graph) return [];
+    try {
+        return graphExtensions(await graphState(source));
+    } catch (error) {
+        console.warn(
+            "desmos: could not read the graph's extension list",
+            error
+        );
+        return [];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // window patches
 // ---------------------------------------------------------------------------
 
@@ -407,7 +512,20 @@ async function load(mode, graph) {
     releaseBlobs();
 
     const url = sourceUrl(mode, graph);
-    const active = await enabledExtensions(mode);
+
+    // The page comes first now: a saved graph names the extensions it wants to be opened
+    // with, and that answer is part of deciding which ones to load.
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
+    const source = new DOMParser().parseFromString(
+        await res.text(),
+        "text/html"
+    );
+
+    const active = await enabledExtensions(
+        mode,
+        await wantedByGraph(source, graph)
+    );
     const context = (entry) => ({
         mode,
         graph,
@@ -416,13 +534,6 @@ async function load(mode, graph) {
         blob: makeBlob,
         fetch: local.fetch
     });
-
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
-    const source = new DOMParser().parseFromString(
-        await res.text(),
-        "text/html"
-    );
 
     // Hold Desmos' bundle back without taking the tag out of the document.
     const build = [...source.querySelectorAll("script[src]")].filter((s) =>

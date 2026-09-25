@@ -109,19 +109,46 @@ extension has a panel - there is nothing to configure about one that is switched
 off.
 
 For anything that isn't a settings panel, patch Desmos to call
-`window.__desmosExt.ui.mount("<name>", el)` wherever you want the UI, and fill
-that slot from `main()`:
+`window.__desmosExt.ui.mount("<name>", el, data)` wherever you want the UI, and
+fill that slot from `main()`:
 
 ```js
-window.__desmosExt.ui.slot("my-panel", (root) => {
+window.__desmosExt.ui.slot("my-panel", (root, data) => {
   root.textContent = "hello";
   return () => {}; // optional teardown, run when Desmos unmounts the element
 });
 ```
 
+`data` is optional, and carries whatever the patched call site can reach and the
+renderer cannot - a component's props, say. The tabs below are handed the
+my-graphs modal's controller that way.
+
 The rest of `ui` - `el`, `css` (for styling that has to be computed), the
 extension list, the toggles, `dirty`/`reload` - is documented at the top of
 `../ui.js`.
+
+## Tabs in the saved-graphs modal
+`extensions/settings` owns the tabs next to "Examples", and anything its manifest
+entry lists after `index.js` can add one:
+
+```js
+Extensions.settings.tab({
+  key: "myTab",         // the tab id, CSS class and translation key are built from this
+  label: "My Tab",      // the heading
+  render: (root, controller) => {},  // the body; may return a teardown, like any other slot
+  when: () => true,     // optional - leave the tab out when this is false
+  main: () => {},       // optional - work that has to happen whether the tab is opened or not
+});
+```
+
+Call it at the top level of the file: the manifest's `file` order is the tab
+order, and the registry is read once, when the bundle is patched.
+
+`id` in place of `label` takes over a tab Desmos already has, by naming the id
+Desmos itself uses - the heading and the label are already there, so only the
+body is ours. That is what `settings/tabs/savedGraphs.js` does with
+`"my-graphs"`, which logged out is a pitch for an account this site has no way
+of giving anyone.
 
 ## Fetching your own files
 Desmos runs in this document, which means the proxy's bootstrap has patched
@@ -134,6 +161,39 @@ Requests that *should* be rewritten - a third-party host that needs the proxy fo
 CORS, say - want the ordinary `fetch`; `extensions/oneko` and
 `extensions/desmodder` both rely on that.
 
-## Manifest flags
-`forceEnabled: true` pins an extension on: its toggle is locked, and `?ext=`
-cannot leave it out. It is for extensions that the UI itself depends on.
+## What decides which extensions load
+Two lists, added together:
+
+- a **base** - `?ext=` when the address has one, otherwise the toggles in the
+  Extensions tab over the manifest's `defaultExtensions`
+- whatever the **open graph** asks for, from the `forcePlugins` its Saved Graphs
+  metadata names
+
+So opening a graph brings along what it was drawn with, and a graph can add an
+extension but never take one away. An id in both lists is loaded once. The base
+wins where the two disagree - a version pinned in the address bar (`?ext=`
+takes `id@arg`, and so does `forcePlugins`) is not overruled by a graph that
+names the same extension plainly - but a base entry with no argument still
+takes the graph's.
+
+Reading that list has to happen before anything loads, so it does not go
+through `Calc`: `desmos.js` reads the graph out of the page it already fetched
+(`<body data-load-data>`, or the `stateUrl` it points at) and finds the hidden
+`.dcg` folder there. `settings/tabs/savedGraphs.js` writes that folder and owns
+the format; the two are a pair.
+
+`forceEnabled: true` pins an extension on regardless: its toggle is locked, and
+neither `?ext=` nor a graph gets a say. It is for extensions that the UI itself
+depends on.
+
+## Toggles are a draft
+`ui.setEnabled()` only moves a switch. Nothing is written down until
+`ui.apply()` - "Apply and Reload" - which saves *every* toggle, not just the
+flipped ones, and reloads onto them. `?ext=` is dropped from the address as it
+goes, since it would otherwise win again and the toggles would not have meant
+anything.
+
+That is what makes `ui.unlock()` safe. While `?ext=` is deciding, the toggles
+show what is running and are read-only; the "Unlock" link next to that notice
+makes them editable, so an address can be examined and adjusted without quietly
+rewriting what the next visit loads.

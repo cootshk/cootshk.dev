@@ -21,6 +21,11 @@
     // own main() hook, shared out: a tab whose work outlives the modal - the saved theme,
     // which is applied whether or not anyone opens the tab - does it from there.
     //
+    // `id` takes over a tab Desmos already has rather than adding one: it is the id Desmos
+    // itself uses, so the heading and the label are already there and only the body is ours.
+    // That is how Saved Graphs works - "my-graphs" is a tab nobody can use logged out, and
+    // there is no logging in here.
+    //
     // Filled by the files in tabs/, which extensions.json lists after this one, so the tabs
     // come out in the order the manifest names them.
     var TABS = [];
@@ -38,7 +43,17 @@
 
     /** The id Desmos' controller is given for a tab. Also the name of its ui slot. */
     function tabId(tab) {
-        return "cde-" + tab.key;
+        return tab.id || "cde-" + tab.key;
+    }
+
+    /**
+     * The tabs that need a heading of their own - the ones we are adding. A tab with an `id`
+     * is one Desmos already draws a heading for, and a second one would be a duplicate.
+     */
+    function added() {
+        return tabs().filter(function (tab) {
+            return !tab.id;
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -83,6 +98,10 @@
      * A tab's body: an empty container that hands itself to the ui runtime, which is where
      * the render functions below take over. `otherwise` is what to draw when this tab is not
      * the open one - the next tab's test, and finally Desmos' own choice of body.
+     *
+     * The modal's controller goes along with it. It is the one thing a render function
+     * cannot reach on its own - it is a prop of the component we are patching - and Saved
+     * Graphs needs it to publish, so every tab is handed it.
      */
     function body(conditional, h, tab, otherwise) {
         return (
@@ -95,7 +114,8 @@
             JSON.stringify("cde-tab cde-tab--" + tab.key) +
             ",didMount:(e)=>window.__desmosExt.ui.mount(" +
             JSON.stringify(tabId(tab)) +
-            ",e),willUnmount:(e)=>window.__desmosExt.ui.unmount(e)})," +
+            ",e,this.props.controller())," +
+            "willUnmount:(e)=>window.__desmosExt.ui.unmount(e)})," +
             "false:()=>" +
             otherwise +
             "})"
@@ -131,7 +151,7 @@
                         ",children:()=>" +
                         translate +
                         tail +
-                        tabs()
+                        added()
                             .map(function (tab) {
                                 return "," + heading(h, translate, tab);
                             })
@@ -147,7 +167,7 @@
                 replace: function (whole, trailing) {
                     return (
                         "mq-narration-token = token\n" +
-                        tabs()
+                        added()
                             .map(function (tab) {
                                 return tabId(tab) + "-heading = " + tab.label;
                             })

@@ -378,20 +378,27 @@ async function loadExtension(entry) {
 // which extensions load
 // ---------------------------------------------------------------------------
 
+/** `matrices`, `desmodder@v0.15.17` -> {id, arg}. The spelling ?ext= and a graph both use. */
+function parseExtension(part) {
+    const at = part.indexOf("@");
+    return at === -1
+        ? { id: part, arg: null }
+        : { id: part.slice(0, at), arg: part.slice(at + 1) };
+}
+
+/** A comma-separated list of those, or a list of them, cleaned up. */
+function parseExtensions(parts) {
+    return parts
+        .map((part) => String(part).trim().toLowerCase())
+        .filter((part) => part && part !== "none")
+        .map(parseExtension);
+}
+
 /** `?ext=matrices,desmodder@v0.15.17` -> [{id, arg}], or null if there is no ?ext= at all. */
 function requestedExtensions() {
     const raw = new URLSearchParams(location.search).get("ext");
     if (raw === null) return null;
-    return raw
-        .split(",")
-        .map((part) => part.trim().toLowerCase())
-        .filter((part) => part && part !== "none")
-        .map((part) => {
-            const at = part.indexOf("@");
-            return at === -1
-                ? { id: part, arg: null }
-                : { id: part.slice(0, at), arg: part.slice(at + 1) };
-        });
+    return parseExtensions(raw.split(","));
 }
 
 function storedExtensions() {
@@ -426,32 +433,54 @@ function isEnabled(entry, stored) {
 }
 
 /**
- * The extensions to run, scripts and all. ?ext= wins when present; with no ?ext= at all,
- * fall back to the stored toggles over the manifest's defaults. Either way the forced ones
- * come too.
+ * The extensions to run, scripts and all.
+ *
+ * Two lists, added together. The base is ?ext= when there is one and the stored toggles over
+ * the manifest's defaults when there is not; `byGraph` is what the open graph asks to be
+ * opened with. A graph can therefore bring an extension along, but never take one away - an
+ * id in both is kept once, with the base's argument, so a version pinned in the address bar
+ * is not overruled by a graph that names the same extension plainly.
+ *
+ * Either way the forced ones come too.
  */
-async function enabledExtensions(mode) {
+async function enabledExtensions(mode, byGraph = []) {
     const wanted = [];
     const requested = requestedExtensions();
+    const seen = new Map();
+
+    /**
+     * Once each, in the order first asked for - which is why the base goes in before the
+     * graph. A second mention can still supply the argument the first one left out: only two
+     * that actually differ are a conflict, and there the base wins.
+     */
+    const want = (id, arg) => {
+        const already = seen.get(id);
+        if (already) {
+            if (already.arg === null) already.arg = arg;
+            return;
+        }
+        const entry = MANIFEST.get(id);
+        if (!entry) return console.warn(`desmos: no extension named "${id}"`);
+        const one = { entry, arg };
+        seen.set(id, one);
+        wanted.push(one);
+    };
 
     if (requested) {
-        for (const { id, arg } of requested) {
-            const entry = MANIFEST.get(id);
-            if (entry) wanted.push({ entry, arg });
-            else console.warn(`desmos: no extension named "${id}"`);
-        }
-        // ...and the forced ones, which ?ext= does not get a say over. After the rest, in
-        // manifest order among themselves.
-        const asked = new Set(requested.map(({ id }) => id));
-        for (const entry of MANIFEST.values()) {
-            if (entry.forced && !asked.has(entry.id))
-                wanted.push({ entry, arg: null });
-        }
+        for (const { id, arg } of requested) want(id, arg);
     } else {
         const stored = storedExtensions();
         for (const entry of MANIFEST.values()) {
-            if (isEnabled(entry, stored)) wanted.push({ entry, arg: null });
+            if (isEnabled(entry, stored)) want(entry.id, null);
         }
+    }
+
+    for (const { id, arg } of parseExtensions(byGraph)) want(id, arg);
+
+    // ...and the forced ones, which none of the above gets a say over. After the rest, in
+    // manifest order among themselves.
+    for (const entry of MANIFEST.values()) {
+        if (entry.forced) want(entry.id, null);
     }
 
     // An extension aimed at the wrong calculator is not just useless: DesModder looks for a

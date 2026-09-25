@@ -71,7 +71,8 @@
                 "index.js",
                 "tabs/extensions.js",
                 "tabs/themes.js",
-                "tabs/patchHelper.js"
+                "tabs/patchHelper.js",
+                "tabs/savedGraphs.js"
             ],
             "css": true,
             "forceEnabled": true
