@@ -13,6 +13,12 @@ extension({
             match: /(\i\.defaultLimit=1e5;var \i=\i,\i)=1e4/,
             replace: "$1=1e8",
             count: 1
+        },
+        // nested too deeply
+        {
+            match: "if(this.instructions.length>=32768)",
+            replace: "if(false)",
+            count: 1
         }
     ]
 });
