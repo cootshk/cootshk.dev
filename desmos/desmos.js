@@ -240,6 +240,20 @@ function releaseBlobs() {
 /** The folder the metadata sits in, and the key it sits under. Paired with savedGraphs.js. */
 const META_FOLDER = ".dcg";
 
+/** The magic a .dcg file starts with, before the calculator id and the gzipped body. */
+const DCG_MAGIC = "DCG";
+
+/**
+ * Where an uploaded file waits out the reload that opens it.
+ *
+ * Opening one is a page load, the same as opening an example, because that is the only way
+ * the extensions it asks for can be there from the start. It has no address to be fetched
+ * back from, so it travels in sessionStorage instead - as the bytes that were uploaded,
+ * still gzipped, which is the difference between a few hundred kilobytes and the several
+ * megabytes an undo stack turns into once it is spelled out.
+ */
+const UPLOAD_KEY = "desmos-upload";
+
 /** Desmos hands the page its graph in <body data-load-data>, as `graph`. */
 function loadData(source) {
     const raw = source.body && source.body.getAttribute("data-load-data");
@@ -316,6 +330,92 @@ function graphExtensions(state) {
             return meta.forcePlugins.filter((one) => typeof one === "string");
     }
     return [];
+}
+
+/** Take a .dcg apart: the calculator it was written for, and what was in it. */
+async function readDcg(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const head = new TextDecoder().decode(bytes.subarray(0, DCG_MAGIC.length));
+    if (head !== DCG_MAGIC || bytes[DCG_MAGIC.length] !== 0)
+        throw new Error("that is not a .dcg file");
+
+    const end = bytes.indexOf(0, DCG_MAGIC.length + 1);
+    if (end === -1) throw new Error("that .dcg file is truncated");
+
+    const json = await new Response(
+        new Blob([bytes.subarray(end + 1)])
+            .stream()
+            .pipeThrough(new DecompressionStream("gzip"))
+    ).text();
+
+    return {
+        id: new TextDecoder().decode(bytes.subarray(DCG_MAGIC.length + 1, end)),
+        body: JSON.parse(json)
+    };
+}
+
+// btoa and atob speak in characters, so the bytes go through one at a time - in chunks,
+// because String.fromCharCode takes its arguments on the stack and a graph is not small.
+const B64_CHUNK = 0x8000;
+
+function toBase64(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length; i += B64_CHUNK)
+        out += String.fromCharCode.apply(
+            null,
+            bytes.subarray(i, i + B64_CHUNK)
+        );
+    return btoa(out);
+}
+
+function fromBase64(text) {
+    const raw = atob(text);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+}
+
+/**
+ * Leave a .dcg for the next load to open, and go there. Returns false if it would not fit,
+ * which is the caller's cue to open it in place instead.
+ */
+function holdUpload(bytes) {
+    try {
+        sessionStorage.setItem(UPLOAD_KEY, toBase64(bytes));
+        return true;
+    } catch (error) {
+        console.warn("desmos: couldn't hold the upload across a reload", error);
+        return false;
+    }
+}
+
+/**
+ * The .dcg waiting to be opened, taken rather than read: a file opens once, and a reload
+ * after that is a reload of the graph, not another upload of it.
+ */
+async function pendingUpload() {
+    let held;
+    try {
+        held = sessionStorage.getItem(UPLOAD_KEY);
+        if (held !== null) sessionStorage.removeItem(UPLOAD_KEY);
+    } catch (error) {
+        return null;
+    }
+    if (!held) return null;
+    try {
+        return await readDcg(fromBase64(held).buffer);
+    } catch (error) {
+        console.error("desmos: couldn't open the uploaded file", error);
+        return null;
+    }
+}
+
+/** What an uploaded file asks for - its metadata says so outright. */
+function uploadExtensions(upload) {
+    const forced = upload && upload.body && upload.body.metadata;
+    return forced && Array.isArray(forced.forcePlugins)
+        ? forced.forcePlugins.filter((one) => typeof one === "string")
+        : [];
 }
 
 /** What the graph at this address asks for. Never fatal: a graph is worth more than a list. */
@@ -522,10 +622,16 @@ async function load(mode, graph) {
         "text/html"
     );
 
-    const active = await enabledExtensions(
-        mode,
-        await wantedByGraph(source, graph)
-    );
+    // An uploaded file is opened by this load, so it is the thing being opened: its own
+    // metadata names the extensions, and the address has no graph for wantedByGraph to read.
+    const upload = await pendingUpload();
+    const asked = upload
+        ? uploadExtensions(upload)
+        : // What the graph asks to be opened with, whether or not it gets it:
+          // enabledExtensions() drops the list if this graph's has been turned down, and the
+          // Extensions tab says so.
+          await wantedByGraph(source, graph);
+    const active = await enabledExtensions(mode, asked, graph);
     const context = (entry) => ({
         mode,
         graph,
@@ -572,9 +678,12 @@ async function load(mode, graph) {
     title(mode);
 
     patchWindow(bundle, buildUrl ? new URL(buildUrl).pathname : null);
+    // Left for extensions/settings/tabs/savedGraphs.js to put into the calculator once there
+    // is one. The loader's part is over: it only needed the extension list.
+    window.__desmosExt.upload = upload;
     // Before any extension runs: ui() and main() are where an extension draws, and both of
     // them reach for __desmosExt.ui.
-    uiRuntime(uiConfig(mode, active));
+    uiRuntime(uiConfig(mode, active, graph, asked));
 
     for (const entry of active) {
         // One guard() each, so an extension that throws does not stop the next one.

@@ -31,9 +31,24 @@
 //   ui.apply()                         write the toggles down and reload onto them.
 //   ui.reload()                        reload the page as it stands.
 //
+//   ui.wantedByGraph()                 what the open graph asks to be opened with.
+//   ui.hasRequired()                   is it requiring anything this load?
+//   ui.unlockRequired() / ui.requiredUnlocked()
+//                                      edit those toggles anyway.
+//   ui.resetRequired()                 put them back the way the graph wants them.
+//   ui.ignoringGraph()                 is that list being turned down for this graph?
+//   ui.restoreGraph()                  take that back, and reload.
+//
 // Toggling is a draft: setEnabled() only moves a switch, and nothing outlives the page until
 // apply() writes the whole set down. That is what makes unlock() safe - a ?ext= address can
 // be examined, and even edited, without quietly rewriting what the next visit loads.
+//
+// An extension the graph requires reads as on, because it is, and starts locked like a forced
+// one - a graph asking for what it needs to draw correctly is the ordinary case, and not
+// something to be switched off by accident. unlockRequired() frees those switches; turning
+// one off and applying is what turns the graph's list down, and the answer is remembered
+// against that one graph, so the same extension still arrives with the next graph that wants
+// it. resetRequired() undoes the editing; restoreGraph() undoes the refusal.
 //
 //   ui.slot(name, render)              offer a named mount point. render(root, data) draws
 //                                      into a fresh element and may return a teardown
@@ -140,6 +155,18 @@ function uiRuntime(config) {
     // Whether the toggles have been unlocked for editing despite ?ext= deciding this load.
     var unlockedToggles = false;
 
+    // ...and the same for the ones the open graph requires, which lock separately: ?ext= and
+    // a graph are different claims on the same switches, and neither implies the other.
+    var unlockedRequired = false;
+
+    function required(entry) {
+        return !!entry && !!entry.byGraph;
+    }
+
+    function hasRequired() {
+        return catalog.some(required);
+    }
+
     function has(id) {
         return Object.prototype.hasOwnProperty.call(draft, id);
     }
@@ -152,6 +179,9 @@ function uiRuntime(config) {
         if (has(id)) return draft[id];
         // ?ext= is the whole answer while it is there, so the toggles report the load itself.
         if (config.overridden) return entry.active;
+        // So is the graph, for the ones it names: the switch shows what is running, and
+        // moving it is how someone disagrees.
+        if (entry.byGraph) return true;
         var choice = stored()[id];
         return choice === undefined ? !!entry["default"] : !!choice;
     }
@@ -159,6 +189,7 @@ function uiRuntime(config) {
     function locked(id) {
         var entry = byId[id];
         if (!entry || !entry.supported || entry.forced) return true;
+        if (required(entry) && !unlockedRequired) return true;
         return !!config.overridden && !unlockedToggles;
     }
 
@@ -198,6 +229,25 @@ function uiRuntime(config) {
         return true;
     }
 
+    /** The same, for the switches the open graph is holding down. */
+    function unlockRequired() {
+        if (unlockedRequired || !hasRequired()) return false;
+        unlockedRequired = true;
+        announce();
+        return true;
+    }
+
+    /** Forget any argument with the graph and lock its switches again. */
+    function resetRequired() {
+        if (!hasRequired()) return false;
+        catalog.forEach(function (entry) {
+            if (required(entry)) delete draft[entry.id];
+        });
+        unlockedRequired = false;
+        announce();
+        return true;
+    }
+
     /** Is the page out of date - is something toggled on that isn't running, or vice versa? */
     function dirty() {
         return catalog.some(function (entry) {
@@ -209,13 +259,20 @@ function uiRuntime(config) {
         g.location.reload();
     }
 
+    /** The graph asked for these, and the toggles now say no to at least one of them. */
+    function refusingGraph() {
+        return catalog.some(function (entry) {
+            return entry.byGraph && !enabled(entry.id);
+        });
+    }
+
     /**
      * Make the toggles the answer: write down every one of them - not just the flipped ones,
      * since a ?ext= load may never have agreed with what was stored - and come back up on it.
      *
-     * ?ext= goes, because it would win again and none of this would have meant anything. A
-     * graph that asks for extensions of its own still gets them; that list is added to
-     * whatever is stored, not replaced by it.
+     * ?ext= goes, because it would win again and none of this would have meant anything. So
+     * does the open graph's list, but only if one of the toggles has actually turned it down,
+     * and only for that graph - a list nobody argued with is left to keep working.
      */
     function apply() {
         var choices = stored();
@@ -227,6 +284,11 @@ function uiRuntime(config) {
         });
         try {
             g.localStorage.setItem(config.storage, JSON.stringify(choices));
+            if (config.graph && refusingGraph())
+                g.localStorage.setItem(
+                    config.overrideStorage + config.graph,
+                    "true"
+                );
         } catch (e) {
             /* private browsing - the choice just doesn't stick */
         }
@@ -235,6 +297,18 @@ function uiRuntime(config) {
         if (!url.searchParams.has("ext")) return reload();
         url.searchParams.delete("ext");
         g.location.replace(url.toString());
+    }
+
+    /** Let this graph have its extensions back. */
+    function restoreGraph() {
+        if (!config.graph) return false;
+        try {
+            g.localStorage.removeItem(config.overrideStorage + config.graph);
+        } catch (e) {
+            return false;
+        }
+        reload();
+        return true;
     }
 
     // ---------------------------------------------------------------------------
@@ -348,6 +422,20 @@ function uiRuntime(config) {
         onDirty: onDirty,
         apply: apply,
         reload: reload,
+
+        wantedByGraph: function () {
+            return (config.wantedByGraph || []).slice();
+        },
+        hasRequired: hasRequired,
+        unlockRequired: unlockRequired,
+        requiredUnlocked: function () {
+            return unlockedRequired;
+        },
+        resetRequired: resetRequired,
+        ignoringGraph: function () {
+            return !!config.ignoringGraph;
+        },
+        restoreGraph: restoreGraph,
 
         slot: slot,
         mount: mount,

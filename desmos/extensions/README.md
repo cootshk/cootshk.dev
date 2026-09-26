@@ -144,6 +144,10 @@ Extensions.settings.tab({
 Call it at the top level of the file: the manifest's `file` order is the tab
 order, and the registry is read once, when the bundle is patched.
 
+A tab's `main` is the settings extension's own `main()` shared out, which is
+also where a tab fills slots elsewhere in the modal - `tabs/savedGraphs.js`
+uses it for the Upload Graph button beside "New Graph".
+
 `id` in place of `label` takes over a tab Desmos already has, by naming the id
 Desmos itself uses - the heading and the label are already there, so only the
 body is ours. That is what `settings/tabs/savedGraphs.js` does with
@@ -180,11 +184,38 @@ Reading that list has to happen before anything loads, so it does not go
 through `Calc`: `desmos.js` reads the graph out of the page it already fetched
 (`<body data-load-data>`, or the `stateUrl` it points at) and finds the hidden
 `.dcg` folder there. `settings/tabs/savedGraphs.js` writes that folder and owns
-the format; the two are a pair.
+the metadata; the two are a pair.
+
+An uploaded `.dcg` is the same story, which is why "Upload Graph" reloads the
+page rather than opening the file where it stands - an extension cannot be
+started once the calculator is running. The file has no address to be fetched
+back from, so it waits out the reload in `sessionStorage` under `desmos-upload`,
+still gzipped, and `desmos.js` reads `forcePlugins` straight off its metadata.
+A file written for another calculator navigates to that one, the way an example
+belonging elsewhere does. If it is too big for `sessionStorage` it opens in
+place instead, without its extensions - better than not opening.
 
 `forceEnabled: true` pins an extension on regardless: its toggle is locked, and
 neither `?ext=` nor a graph gets a say. It is for extensions that the UI itself
 depends on.
+
+### Saying no to a graph
+An extension the graph requires shows as on in the Extensions tab, because it
+is, and carries a "Required by graph" line. Those switches start greyed out -
+the tab says "This graph requires certain extensions." and puts an "Unlock"
+button beside Apply - since a graph asking for what it needs to draw correctly
+is the ordinary case, not something to switch off by accident. Unlock frees
+them and becomes "Reset", which puts them back; switching one off and pressing
+"Apply and Reload" is how someone refuses.
+
+That answer is remembered as `localOverrideForcedPlugins.<hash>` in
+`localStorage`, against that one graph - so the same extension still arrives
+with the next graph that wants it. A later visit to the refused graph says
+"Ignoring graph-forced plugins." with an Undo beside it, which drops the key and
+reloads.
+
+Nothing is written unless a toggle actually turned something down; applying
+after an unrelated change leaves the graph's list working.
 
 ## Toggles are a draft
 `ui.setEnabled()` only moves a switch. Nothing is written down until

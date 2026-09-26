@@ -14,8 +14,9 @@
     /** The folder the metadata is kept in, on the graph itself. */
     var FOLDER = ".dcg";
 
-    /** The magic a .dcg file starts with, before the calculator id and the gzipped body. */
-    var MAGIC = "DCG";
+    // The file format itself is read by the loader, which has to understand a .dcg before
+    // any of this is running: DCG_MAGIC, readDcg() and holdUpload() are all desmos.js', and
+    // in scope here the same way `mode` and `MODES` are. This file only writes them.
 
     /** How long to wait out a burst of graph edits before redrawing the thumbnail. */
     var THUMBNAIL_DELAY = 400;
@@ -32,7 +33,20 @@
         // Desmos' own id for the tab, which is what makes this a takeover rather than an
         // addition: no heading of ours, no label, just the body.
         id: "my-graphs",
-        render: savedGraphsTab
+        render: savedGraphsTab,
+
+        // The other half of the modal we have a hand in: the Upload Graph button beside
+        // "New Graph", whose place ../index.js patches in.
+        main: function () {
+            var ext = window.__desmosExt;
+            ext.ui.slot("cde-upload", uploadButton);
+            // A file uploaded on the last page load, waiting for a calculator to go into.
+            if (ext.upload)
+                ext.onCalc(function () {
+                    applyUpload(ext.upload);
+                    ext.upload = null;
+                });
+        }
     });
 
     // -----------------------------------------------------------------------
@@ -117,15 +131,28 @@
         return found && found.note ? readNote(found.note.text || "") : null;
     }
 
-    /** An id no expression in `list` is using. */
-    function freshId(list, seed) {
+    /**
+     * An id Desmos has not used and will not use again.
+     *
+     * Its own counter only ever goes up, so an id freed by deleting an expression is still
+     * spoken for - picking the lowest one nothing currently holds would hand back an id the
+     * calculator still considers taken. Ask the calculator instead, and only fall back to
+     * counting if that ever stops being a thing.
+     */
+    function freshId(list) {
+        try {
+            var id = Calc.controller.generateId();
+            if (id) return String(id);
+        } catch (error) {
+            /* fall through to counting */
+        }
         var taken = {};
         list.forEach(function (item) {
             taken[item.id] = true;
         });
-        var n = 1;
-        while (taken[seed + n]) n++;
-        return seed + n;
+        var n = list.length;
+        while (taken["dcg-" + n]) n++;
+        return "dcg-" + n;
     }
 
     /**
@@ -143,39 +170,51 @@
         if (!list) return;
 
         var found = findFolder(list);
-        if (found && found.note) {
-            found.note.text = writeNote(meta);
-        } else if (found) {
-            // A .dcg folder without a metadata note: add one after whatever is in it, so it
-            // lands inside the folder rather than after the folder's last sibling.
+        var folder;
+        var inside;
+
+        if (found) {
+            // Lift the folder and everything in it out of where it stands. A graph that has
+            // been saved before has grown since, and the folder is only at the end of the
+            // sheet if it is put back there.
+            folder = found.folder;
             var end = found.at + 1;
-            while (end < list.length && list[end].folderId === found.folder.id)
-                end++;
-            list.splice(end, 0, {
-                type: "text",
-                id: freshId(list, "dcg-note-"),
-                folderId: found.folder.id,
-                text: writeNote(meta)
-            });
+            while (end < list.length && list[end].folderId === folder.id) end++;
+            inside = list.splice(found.at, end - found.at).slice(1);
         } else {
-            var folderId = freshId(list, "dcg-folder-");
-            list.push({
+            folder = {
                 type: "folder",
-                id: folderId,
+                id: freshId(list),
                 title: FOLDER,
                 // Desmos' own hidden folder flag - its geometry folder is secret the same
                 // way. The folder stays out of the expression list unless the reader has
                 // author features turned on.
                 secret: true,
                 collapsed: true
-            });
-            list.push({
+            };
+            inside = [];
+        }
+
+        var note = inside.filter(function (item) {
+            return item.type === "text" && readNote(item.text || "");
+        })[0];
+        if (note) {
+            note.text = writeNote(meta);
+        } else {
+            inside.push({
                 type: "text",
-                id: freshId(list, "dcg-note-"),
-                folderId: folderId,
+                id: freshId(list),
+                folderId: folder.id,
                 text: writeNote(meta)
             });
         }
+
+        // Last, and in one piece: the folder owns the run of items that follows it.
+        list.push(folder);
+        inside.forEach(function (item) {
+            item.folderId = folder.id;
+            list.push(item);
+        });
 
         Calc.setState(state, { allowUndo: true });
     }
@@ -231,7 +270,7 @@
             .then(function (gzipped) {
                 return new Blob(
                     [
-                        new TextEncoder().encode(MAGIC + "\0" + id + "\0"),
+                        new TextEncoder().encode(DCG_MAGIC + "\0" + id + "\0"),
                         gzipped
                     ],
                     { type: "application/octet-stream" }
@@ -277,6 +316,87 @@
     }
 
     // -----------------------------------------------------------------------
+    // reading one back
+    // -----------------------------------------------------------------------
+
+    /**
+     * Put the undo stack back.
+     *
+     * Desmos will only take its own history object, and what identifies one is a symbol and
+     * a prototype - neither of which survives JSON. Both can be borrowed from the history
+     * the calculator already has, which is what this does. Worth a try and not worth a
+     * failed load: the graph itself is already in by the time this runs.
+     */
+    function restoreHistory(saved) {
+        if (!saved || !saved.history || !saved.currentState) return false;
+        try {
+            var live = Calc.getHistory();
+            var key = Object.getOwnPropertySymbols(live).filter(function (one) {
+                return one.description === "privateHistoryProperty";
+            })[0];
+            if (!key) return false;
+
+            var stack = Object.create(Object.getPrototypeOf(live[key]));
+            Object.keys(saved.history).forEach(function (name) {
+                stack[name] = saved.history[name];
+            });
+
+            var history = Object.create(Object.getPrototypeOf(live));
+            history.currentState = saved.currentState;
+            Object.defineProperty(history, key, {
+                value: stack,
+                enumerable: false
+            });
+
+            Calc.restoreHistory(history);
+            return true;
+        } catch (error) {
+            console.warn("desmos: couldn't restore the graph history", error);
+            return false;
+        }
+    }
+
+    /**
+     * Put an uploaded file into the calculator. Runs once, at startup, on the load that the
+     * upload itself asked for - by which point the extensions it named are already running,
+     * which is the whole reason opening one is a page load.
+     */
+    function applyUpload(upload) {
+        var body = (upload && upload.body) || {};
+        if (!body.graph) {
+            console.error("desmos: the uploaded file has no graph in it");
+            return;
+        }
+        try {
+            Calc.setState(body.graph);
+            restoreHistory(body.history);
+
+            var meta = body.metadata || {};
+            // window.shellController is Desmos' own global, and the only way to the graph's
+            // name from out here - the modal, which hands its controller to the tab, may
+            // never have been opened.
+            if (meta.name) nameGraph(window.shellController, meta.name);
+        } catch (error) {
+            console.error("desmos: couldn't open the uploaded graph", error);
+        }
+    }
+
+    /** Extensions a file asks for that this page is not running. */
+    function missingPlugins(meta) {
+        var ui = window.__desmosExt.ui;
+        var wanted =
+            meta && Array.isArray(meta.forcePlugins) ? meta.forcePlugins : [];
+        return wanted
+            .map(function (one) {
+                return String(one).split("@")[0];
+            })
+            .filter(function (id) {
+                var entry = ui.get(id);
+                return !entry || !entry.active;
+            });
+    }
+
+    // -----------------------------------------------------------------------
     // links
     // -----------------------------------------------------------------------
 
@@ -309,6 +429,111 @@
                 area.remove();
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // the Upload Graph button
+    // -----------------------------------------------------------------------
+
+    /**
+     * Beside "New Graph", in Desmos' own outline-button style so the two match. `controller`
+     * is the modal's, handed over by ../index.js.
+     */
+    function uploadButton(root, controller) {
+        var ui = window.__desmosExt.ui;
+
+        var file = ui.el("input", {
+            type: "file",
+            // A hint for the picker, not a guarantee - the bytes are checked either way.
+            accept: ".dcg",
+            class: "cde-upload__file",
+            onchange: function () {
+                var chosen = file.files && file.files[0];
+                // Cleared, so choosing the same file twice in a row still counts.
+                file.value = "";
+                if (chosen) open(chosen);
+            }
+        });
+
+        var button = ui.el("button", {
+            class: "dcg-btn-gray-outline cde-upload__button",
+            type: "button",
+            text: "Upload Graph",
+            onclick: function () {
+                file.click();
+            }
+        });
+
+        ui.el(root, null, button, file);
+
+        function say(text) {
+            button.textContent = text;
+        }
+
+        /**
+         * Opening a file is a page load, the same as opening an example: the extensions it
+         * asks for are chosen before the calculator starts, so there is no opening one
+         * properly without going round again. The file is checked here - a reload that
+         * landed on a broken one would have nothing left to report it with - then held for
+         * the next load to pick up.
+         */
+        function open(chosen) {
+            say("Opening...");
+            chosen
+                .arrayBuffer()
+                .then(function (buffer) {
+                    return readDcg(buffer).then(function (read) {
+                        if (!read.body || !read.body.graph)
+                            throw new Error("there is no graph in it");
+
+                        // A file written for another calculator opens in that one, which is
+                        // what Desmos does with an example belonging elsewhere.
+                        var to = MODES[read.id] || mode;
+
+                        // Too big to carry across a reload: opening it here loses only the
+                        // extensions it asks for, which beats not opening it at all.
+                        if (!holdUpload(new Uint8Array(buffer)))
+                            return inPlace(read);
+
+                        // No graph named: the address has to stop pointing at the one being
+                        // left, and an upload has no address of its own.
+                        navigateTo(to, undefined);
+                    });
+                })
+                .catch(function (error) {
+                    console.error("desmos: couldn't open the .dcg file", error);
+                    say("Couldn't open it");
+                    setTimeout(function () {
+                        say("Upload Graph");
+                    }, 2500);
+                });
+        }
+
+        /** Open it here and now, for when it cannot be carried across a reload. */
+        function inPlace(read) {
+            var here = calculatorId();
+            if (read.id && read.id !== here)
+                throw new Error(
+                    "that is a " + read.id + " graph, and this is " + here
+                );
+
+            applyUpload(read);
+
+            var missing = missingPlugins(read.body.metadata);
+            if (missing.length)
+                console.warn(
+                    "desmos: this graph asks for " +
+                        missing.join(", ") +
+                        ", which " +
+                        (missing.length === 1 ? "is" : "are") +
+                        " not running"
+                );
+
+            // Out of the way, so the graph that was just opened can be seen.
+            if (controller && controller.dispatch)
+                controller.dispatch({ type: "close-modal" });
+            say("Upload Graph");
+        }
     }
 
     // -----------------------------------------------------------------------

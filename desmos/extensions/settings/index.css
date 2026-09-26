@@ -31,6 +31,23 @@
     outline: none;
     border-color: var(--dcg-accent-color, #2f72dc);
 }
+/* Freeing the switches the graph is holding down - a plain white button, because it is a
+   step towards Apply rather than the thing itself. */
+.cde-ext__required {
+    flex: none;
+    height: 34px;
+    padding: 0 16px;
+    font: inherit;
+    color: inherit;
+    border: 1px solid var(--dcg-custom-border-color, #bbb);
+    /* The same pill as Apply beside it - the pair reads as one control. */
+    border-radius: 17px;
+    background: var(--dcg-custom-background-color, #fff);
+    cursor: pointer;
+}
+.cde-ext__note--required {
+    color: var(--dcg-accent-color, #2f72dc);
+}
 .cde-ext__reload {
     flex: none;
     height: 34px;
@@ -122,6 +139,12 @@
 }
 .cde-ext-card__panel[hidden] {
     display: none;
+}
+/* Why a switch is on when no toggle of theirs put it there. */
+.cde-ext-card__note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--dcg-accent-color, #2f72dc);
 }
 .cde-ext-toggle {
     position: relative;
@@ -349,6 +372,26 @@
 }
 .cde-patch__status--error {
     color: var(--dcg-error-color, #c74440);
+}
+
+/* --- the Upload Graph button, beside "New Graph" --- */
+/* It sits inside Desmos' own new-item section, after the button and its caret. Those two are
+   one control and touch; this is a separate one, so it stands off from them. */
+.cde-upload {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+}
+/* dcg-btn-gray-outline is Desmos' white outline button - the same one "New Graph" uses - so
+   there is nothing to style here but the bits its own button class would have brought. */
+.cde-upload__button {
+    height: 100%;
+    white-space: nowrap;
+    cursor: pointer;
+}
+/* Opened by the button; never shown. `hidden` would keep some browsers from clicking it. */
+.cde-upload__file {
+    display: none;
 }
 
 /* --- the Saved Graphs tab --- */

@@ -135,6 +135,24 @@
         },
 
         patches: [
+            // A place for the Upload Graph button, immediately right of "New Graph" and its
+            // dropdown caret - the two of those are one control, so ours goes after both.
+            // tabs/savedGraphs.js fills the slot; it owns the .dcg format.
+            {
+                match: /(\i)\(\i,\{anchor:\(\)=>\i\("div",\{class:\(\)=>\(\{"dcg-btn-gray-outline":!0,"dcg-new-my-graphs-item__dropdown":!0[^\]]*?"account-shell-narration-new-graph-options"[^\]]*?controller:this\.const\(this\.controller\)\}\)(\]\}\))/,
+                count: 1,
+                replace: function (whole, h, tail) {
+                    return (
+                        whole.slice(0, whole.length - tail.length) +
+                        "," +
+                        h +
+                        '("div",{class:"cde-upload",' +
+                        'didMount:(e)=>window.__desmosExt.ui.mount("cde-upload",e,this.props.controller()),' +
+                        "willUnmount:(e)=>window.__desmosExt.ui.unmount(e)})" +
+                        tail
+                    );
+                }
+            },
             // The headings, appended to the tablist after the "Examples" tab. Each `replace`
             // is a function rather than a string so that it is tabs() as it stands when the
             // bundle is patched that decides, not tabs() as it stood when this file loaded.

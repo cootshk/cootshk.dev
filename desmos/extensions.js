@@ -401,6 +401,23 @@ function requestedExtensions() {
     return parseExtensions(raw.split(","));
 }
 
+/**
+ * A graph asks to be opened with certain extensions, and "Apply and Reload" is how someone
+ * says no. The answer is remembered per graph, under this prefix plus the graph's hash, so
+ * turning one of them off here does not turn it off for every other graph that wants it.
+ */
+const FORCE_OVERRIDE = "localOverrideForcedPlugins.";
+
+/** Has this graph's list been turned down? */
+function graphForcedIgnored(graph) {
+    if (!graph) return false;
+    try {
+        return localStorage.getItem(FORCE_OVERRIDE + graph) === "true";
+    } catch (_) {
+        return false;
+    }
+}
+
 function storedExtensions() {
     try {
         return JSON.parse(localStorage.getItem(EXT_STORAGE)) || {};
@@ -443,10 +460,12 @@ function isEnabled(entry, stored) {
  *
  * Either way the forced ones come too.
  */
-async function enabledExtensions(mode, byGraph = []) {
+async function enabledExtensions(mode, byGraph = [], graph = null) {
     const wanted = [];
     const requested = requestedExtensions();
     const seen = new Map();
+    // ...unless this graph's list has been turned down here before.
+    const asked = graphForcedIgnored(graph) ? [] : byGraph;
 
     /**
      * Once each, in the order first asked for - which is why the base goes in before the
@@ -475,7 +494,7 @@ async function enabledExtensions(mode, byGraph = []) {
         }
     }
 
-    for (const { id, arg } of parseExtensions(byGraph)) want(id, arg);
+    for (const { id, arg } of parseExtensions(asked)) want(id, arg);
 
     // ...and the forced ones, which none of the above gets a say over. After the rest, in
     // manifest order among themselves.
@@ -520,8 +539,9 @@ async function enabledExtensions(mode, byGraph = []) {
  * The manifest as ui.js sees it: everything it needs to draw the Extensions tab. `active` is
  * what this load actually started, which is how the UI knows a toggle has been flipped since.
  */
-function extensionCatalog(mode, active) {
+function extensionCatalog(mode, active, asked) {
     const running = new Set(active.map((entry) => entry.def.id));
+    const byGraph = new Set(asked.map(({ id }) => id));
     return [...MANIFEST.values()].map((entry) => ({
         id: entry.id,
         name: entry.name,
@@ -529,15 +549,28 @@ function extensionCatalog(mode, active) {
         supported: supportsMode(entry, mode),
         forced: entry.forced,
         default: entry.default,
-        active: running.has(entry.id)
+        active: running.has(entry.id),
+        // On because the graph says so, rather than because a toggle does. Shown as on for
+        // that reason, but still a toggle: switching it off is what writes the override.
+        byGraph: byGraph.has(entry.id)
     }));
 }
 
-/** The config uiRuntime() is handed. */
-function uiConfig(mode, active) {
+/** The config uiRuntime() is handed. `byGraph` is what the open graph asked for, raw. */
+function uiConfig(mode, active, graph = null, byGraph = []) {
+    const ignoring = graphForcedIgnored(graph);
     return {
         storage: EXT_STORAGE,
+        overrideStorage: FORCE_OVERRIDE,
+        graph: graph || null,
+        // What the graph wanted, whether or not it got it - the tab says so either way.
+        wantedByGraph: parseExtensions(byGraph).map(({ id }) => id),
+        ignoringGraph: ignoring,
         overridden: requestedExtensions() !== null,
-        extensions: extensionCatalog(mode, active)
+        extensions: extensionCatalog(
+            mode,
+            active,
+            ignoring ? [] : parseExtensions(byGraph)
+        )
     };
 }

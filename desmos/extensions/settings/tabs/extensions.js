@@ -31,6 +31,24 @@
             onclick: ui.apply
         });
 
+        // The graph is holding some of the switches down. This frees them, and once freed
+        // puts them back - to the left of Apply, because it is the step before it.
+        var required = ui.hasRequired()
+            ? ui.el("button", {
+                  class: "cde-ext__required",
+                  type: "button",
+                  text: "Unlock",
+                  title: "Edit the extensions this graph requires.",
+                  onclick: function () {
+                      if (ui.requiredUnlocked()) ui.resetRequired();
+                      else ui.unlockRequired();
+                      required.textContent = ui.requiredUnlocked()
+                          ? "Reset"
+                          : "Unlock";
+                  }
+              })
+            : null;
+
         // ?ext= decides the load it is part of, so the toggles below are showing it rather
         // than the stored set and are read-only. This says so, and offers the way out.
         var unlock = ui.overridden()
@@ -55,6 +73,24 @@
               )
             : null;
 
+        // This graph asked for extensions and was told no, here, last time Apply was
+        // pressed. Say so, and offer the way back - it is remembered per graph, and there is
+        // otherwise nothing to show that the graph ever asked.
+        var graphNote = ui.ignoringGraph()
+            ? ui.el(
+                  "p",
+                  { class: "cde-ext__note" },
+                  ui.el("span", { text: "Ignoring graph-forced plugins." }),
+                  ui.el("button", {
+                      class: "cde-ext__unlock",
+                      type: "button",
+                      text: "Undo",
+                      title: "Let this graph load what it asks for again.",
+                      onclick: ui.restoreGraph
+                  })
+              )
+            : null;
+
         var grid = ui.el("div", { class: "cde-ext__grid" });
         var empty = ui.el("p", { class: "cde-ext__empty", hidden: true });
 
@@ -62,7 +98,7 @@
             var drawn = card(entry);
             return {
                 node: drawn.node,
-                unlock: drawn.unlock,
+                relock: drawn.relock,
                 // id included: it is what ?ext= takes, so it is worth being able to
                 // search for even though the card shows the name.
                 haystack: (
@@ -84,8 +120,15 @@
         ui.el(
             root,
             null,
-            ui.el("div", { class: "cde-ext__bar" }, search, reload),
+            ui.el("div", { class: "cde-ext__bar" }, search, required, reload),
+            ui.hasRequired()
+                ? ui.el("p", {
+                      class: "cde-ext__note cde-ext__note--required",
+                      text: "This graph requires certain extensions."
+                  })
+                : null,
             note,
+            graphNote,
             grid,
             empty
         );
@@ -105,13 +148,12 @@
 
         return ui.onDirty(function () {
             reload.hidden = !ui.dirty();
-            // Unlocking does not redraw the tab, so the switches it frees are told directly.
-            if (unlock && ui.unlocked()) {
-                unlock.hidden = true;
-                cards.forEach(function (one) {
-                    one.unlock();
-                });
-            }
+            // Unlocking does not redraw the tab, so the switches are told directly - and
+            // told every time, since Reset locks the graph's back up again.
+            if (unlock && ui.unlocked()) unlock.hidden = true;
+            cards.forEach(function (one) {
+                one.relock();
+            });
         });
     }
 
@@ -138,7 +180,9 @@
                     ? "Always on"
                     : ui.overridden()
                       ? "?ext= in the URL is overriding this"
-                      : null
+                      : entry.byGraph
+                        ? "This graph requires it. Unlock, switch it off and apply to refuse."
+                        : null
             },
             box,
             ui.el("span", { class: "cde-ext-toggle__track" })
@@ -166,6 +210,12 @@
                     ? entry.description
                     : "Not available on this calculator."
             }),
+            entry.byGraph
+                ? ui.el("p", {
+                      class: "cde-ext-card__note",
+                      text: "Required by graph"
+                  })
+                : null,
             // A panel belongs to a running extension, so there is nothing to draw for one
             // that has been switched off until the page is reloaded.
             ui.hasPanel(entry.id) ? settings(entry) : null
@@ -173,10 +223,12 @@
 
         return {
             node: node,
-            unlock: function () {
-                if (ui.locked(entry.id)) return;
-                box.disabled = false;
-                toggle.removeAttribute("title");
+            /** Match the switch to whatever the locks now say. */
+            relock: function () {
+                var shut = ui.locked(entry.id);
+                box.disabled = shut;
+                box.checked = ui.enabled(entry.id);
+                if (!shut) toggle.removeAttribute("title");
             }
         };
     }

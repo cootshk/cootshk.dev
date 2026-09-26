@@ -1,0 +1,14 @@
+# The DCG (Desmos Calculator Graph) File Format
+- the bytes "DCG"
+- a null byte
+- the type of calculator ("graphing", "3d", "geometry", etc.)
+- another null byte
+- A gzip-encoded (with the header stripped) JSON object containing:
+  - "metadata": object containing
+    - "name": string (default: "Untitled Graph")
+    - "description": string (optional)
+    - "author": string (optional)
+    - "version": string (optional)
+    - "forcePlugins": array of strings (optional)
+  - "graph": <Calc.getState();>
+  - "history": <Calc.getHistory();>
