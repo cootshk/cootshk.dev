@@ -243,16 +243,46 @@ const META_FOLDER = ".dcg";
 /** The magic a .dcg file starts with, before the calculator id and the gzipped body. */
 const DCG_MAGIC = "DCG";
 
-/**
- * Where an uploaded file waits out the reload that opens it.
- *
- * Opening one is a page load, the same as opening an example, because that is the only way
- * the extensions it asks for can be there from the start. It has no address to be fetched
- * back from, so it travels in sessionStorage instead - as the bytes that were uploaded,
- * still gzipped, which is the difference between a few hundred kilobytes and the several
- * megabytes an undo stack turns into once it is spelled out.
- */
-const UPLOAD_KEY = "desmos-upload";
+// Where an uploaded file waits out the reload that opens it.
+//
+// Opening one is a page load, the same as opening an example, because that is the only way
+// the extensions it asks for can be there from the start. It has no address to be fetched
+// back from, so it travels here instead.
+//
+// IndexedDB rather than sessionStorage, which is the obvious place and the wrong one: that
+// is about five megabytes per origin, it holds strings rather than bytes - so the file has
+// to go through base64 and grow by a third on the way - and there is no asking for more.
+// Desmos caps a graph at 5MB, but keeps up to a hundred of them in the undo stack, so a file
+// with a long history behind it is nowhere near that ceiling even gzipped. IndexedDB takes
+// the bytes as they are and is bounded by disk instead.
+const UPLOAD_DB = "desmos-uploads";
+const UPLOAD_STORE = "pending";
+const UPLOAD_ID = "graph";
+
+/** The one object store, opened and handed to `work` as a read-write transaction. */
+function withUploads(work) {
+    return new Promise((resolve, reject) => {
+        const opening = indexedDB.open(UPLOAD_DB, 1);
+        opening.onupgradeneeded = () =>
+            opening.result.createObjectStore(UPLOAD_STORE);
+        opening.onerror = () => reject(opening.error);
+        opening.onsuccess = () => {
+            const db = opening.result;
+            try {
+                const tx = db.transaction(UPLOAD_STORE, "readwrite");
+                // Resolved when the transaction commits, not when `work` returns: an await
+                // in the middle of one would let it close, and a read and the delete that
+                // follows it have to be the same trip.
+                tx.oncomplete = () => (db.close(), resolve());
+                tx.onerror = tx.onabort = () => (db.close(), reject(tx.error));
+                work(tx.objectStore(UPLOAD_STORE));
+            } catch (error) {
+                db.close();
+                reject(error);
+            }
+        };
+    });
+}
 
 /** Desmos hands the page its graph in <body data-load-data>, as `graph`. */
 function loadData(source) {
@@ -354,39 +384,12 @@ async function readDcg(buffer) {
     };
 }
 
-// btoa and atob speak in characters, so the bytes go through one at a time - in chunks,
-// because String.fromCharCode takes its arguments on the stack and a graph is not small.
-const B64_CHUNK = 0x8000;
-
-function toBase64(bytes) {
-    let out = "";
-    for (let i = 0; i < bytes.length; i += B64_CHUNK)
-        out += String.fromCharCode.apply(
-            null,
-            bytes.subarray(i, i + B64_CHUNK)
-        );
-    return btoa(out);
-}
-
-function fromBase64(text) {
-    const raw = atob(text);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    return bytes;
-}
-
 /**
- * Leave a .dcg for the next load to open, and go there. Returns false if it would not fit,
- * which is the caller's cue to open it in place instead.
+ * Leave a .dcg for the next load to open. Rejects if it would not go, which is the caller's
+ * cue to open it where it stands instead.
  */
 function holdUpload(bytes) {
-    try {
-        sessionStorage.setItem(UPLOAD_KEY, toBase64(bytes));
-        return true;
-    } catch (error) {
-        console.warn("desmos: couldn't hold the upload across a reload", error);
-        return false;
-    }
+    return withUploads((store) => store.put(bytes, UPLOAD_ID));
 }
 
 /**
@@ -396,14 +399,19 @@ function holdUpload(bytes) {
 async function pendingUpload() {
     let held;
     try {
-        held = sessionStorage.getItem(UPLOAD_KEY);
-        if (held !== null) sessionStorage.removeItem(UPLOAD_KEY);
+        await withUploads((store) => {
+            const reading = store.get(UPLOAD_ID);
+            reading.onsuccess = () => {
+                held = reading.result;
+                if (held !== undefined) store.delete(UPLOAD_ID);
+            };
+        });
     } catch (error) {
         return null;
     }
     if (!held) return null;
     try {
-        return await readDcg(fromBase64(held).buffer);
+        return await readDcg(held.buffer || held);
     } catch (error) {
         console.error("desmos: couldn't open the uploaded file", error);
         return null;

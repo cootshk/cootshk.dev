@@ -380,14 +380,28 @@
 .cde-upload {
     display: inline-flex;
     align-items: center;
-    margin-left: 8px;
 }
-/* dcg-btn-gray-outline is Desmos' white outline button - the same one "New Graph" uses - so
-   there is nothing to style here but the bits its own button class would have brought. */
-.cde-upload__button {
-    height: 100%;
-    white-space: nowrap;
-    cursor: pointer;
+/* dcg-btn-gray-outline is Desmos' white outline button, but only half of what "New Graph"
+   looks like: the rest is on dcg-new-my-graphs-item__button, and that cannot be borrowed
+   whole because it squares off its right-hand corners to be joined to the dropdown caret.
+   So the same measurements are repeated here, and all four corners kept.
+ 
+   Written three classes deep because Desmos' own rules are two, and a tie would leave this
+   to whichever stylesheet happened to load second. */
+.cde-upload .cde-upload__button.dcg-btn-gray-outline {
+    display: flex;
+    align-items: center;
+    height: 36px;
+    /* The base button class is roomier than the one next door - 0 20px against 0 10px - and
+       leaves the font at whatever is inherited rather than the .875rem beside it. */
+    padding: 0 10px;
+    font-size: 0.875rem;
+    /* Both hard-coded by Desmos on the button this sits beside; a themed colour here would
+       be the one thing about the pair that did not match. */
+    color: #333;
+    box-shadow: none;
+    /* Enough to read as a control of its own, against the caret it is not part of. */
+    margin-left: 6px;
 }
 /* Opened by the button; never shown. `hidden` would keep some browsers from clicking it. */
 .cde-upload__file {

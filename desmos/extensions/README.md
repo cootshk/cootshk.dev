@@ -189,11 +189,19 @@ the metadata; the two are a pair.
 An uploaded `.dcg` is the same story, which is why "Upload Graph" reloads the
 page rather than opening the file where it stands - an extension cannot be
 started once the calculator is running. The file has no address to be fetched
-back from, so it waits out the reload in `sessionStorage` under `desmos-upload`,
-still gzipped, and `desmos.js` reads `forcePlugins` straight off its metadata.
-A file written for another calculator navigates to that one, the way an example
-belonging elsewhere does. If it is too big for `sessionStorage` it opens in
-place instead, without its extensions - better than not opening.
+back from, so it waits out the reload in IndexedDB (`desmos-uploads`), still
+gzipped and still bytes, and `desmos.js` reads `forcePlugins` straight off its
+metadata. A file written for another calculator navigates to that one, the way
+an example belonging elsewhere does.
+
+`sessionStorage` is the obvious place for that and the wrong one. It is about
+five megabytes per origin with no way to ask for more, and it holds strings, so
+the file has to go through base64 and grow by a third on the way. Desmos caps a
+graph at 5MB, but keeps up to a hundred of them in the undo stack: a six
+thousand expression graph with a full stack behind it is a 4.5MB file and 6MB of
+base64, which does not fit. IndexedDB takes the bytes as they are and is bounded
+by free disk instead. If it is unavailable the file opens in place, without the
+extensions it asks for - better than not opening.
 
 `forceEnabled: true` pins an extension on regardless: its toggle is locked, and
 neither `?ext=` nor a graph gets a say. It is for extensions that the UI itself

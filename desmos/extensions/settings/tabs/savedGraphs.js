@@ -18,6 +18,9 @@
     // any of this is running: DCG_MAGIC, readDcg() and holdUpload() are all desmos.js', and
     // in scope here the same way `mode` and `MODES` are. This file only writes them.
 
+    /** What the upload button says whenever it is not busy. */
+    var UPLOAD_LABEL = "Upload Graph";
+
     /** How long to wait out a burst of graph edits before redrawing the thumbnail. */
     var THUMBNAIL_DELAY = 400;
 
@@ -458,7 +461,7 @@
         var button = ui.el("button", {
             class: "dcg-btn-gray-outline cde-upload__button",
             type: "button",
-            text: "Upload Graph",
+            text: UPLOAD_LABEL,
             onclick: function () {
                 file.click();
             }
@@ -490,32 +493,48 @@
                         // what Desmos does with an example belonging elsewhere.
                         var to = MODES[read.id] || mode;
 
-                        // Too big to carry across a reload: opening it here loses only the
-                        // extensions it asks for, which beats not opening it at all.
-                        if (!holdUpload(new Uint8Array(buffer)))
-                            return inPlace(read);
-
-                        // No graph named: the address has to stop pointing at the one being
-                        // left, and an upload has no address of its own.
-                        navigateTo(to, undefined);
+                        return holdUpload(new Uint8Array(buffer)).then(
+                            function () {
+                                // No graph named: the address has to stop pointing at the
+                                // one being left, and an upload has no address of its own.
+                                navigateTo(to, undefined);
+                            },
+                            function (error) {
+                                // Nothing wrong with the file - it just cannot be carried
+                                // across the reload. Opening it here loses the extensions it
+                                // asks for and nothing else, which beats not opening it.
+                                console.warn(
+                                    "desmos: couldn't hold the upload across a reload",
+                                    error
+                                );
+                                inPlace(read);
+                            }
+                        );
                     });
                 })
                 .catch(function (error) {
                     console.error("desmos: couldn't open the .dcg file", error);
-                    say("Couldn't open it");
-                    setTimeout(function () {
-                        say("Upload Graph");
-                    }, 2500);
+                    // Nothing was opened, so the button goes back to what it said rather
+                    // than staying behind to report it.
+                    say(UPLOAD_LABEL);
+                    alert("Not a valid Desmos graph!");
                 });
         }
 
         /** Open it here and now, for when it cannot be carried across a reload. */
         function inPlace(read) {
             var here = calculatorId();
-            if (read.id && read.id !== here)
-                throw new Error(
-                    "that is a " + read.id + " graph, and this is " + here
+            if (read.id && read.id !== here) {
+                // Nothing wrong with the file - it is for another calculator, and going
+                // there is exactly the trip it could not be carried on.
+                say(UPLOAD_LABEL);
+                alert(
+                    "That graph is for the " +
+                        read.id +
+                        " calculator, and it couldn't be sent there."
                 );
+                return;
+            }
 
             applyUpload(read);
 
@@ -532,7 +551,7 @@
             // Out of the way, so the graph that was just opened can be seen.
             if (controller && controller.dispatch)
                 controller.dispatch({ type: "close-modal" });
-            say("Upload Graph");
+            say(UPLOAD_LABEL);
         }
     }
 
