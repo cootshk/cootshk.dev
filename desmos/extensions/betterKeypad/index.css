@@ -1,0 +1,9 @@
+/* The keypad is Desmos' own now, so it needs no styling of ours. What is left is the
+   other half of the mobile fix: a long expression on a narrow screen scrolls in its
+   field instead of being clipped by it. The class is repeated to outweigh the rule
+   Desmos sets it with. */
+.dcg-mq-editable-field
+    .dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block.dcg-mq-root-block {
+    overflow-x: auto;
+    scrollbar-width: none;
+}

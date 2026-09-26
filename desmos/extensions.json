@@ -8,6 +8,16 @@
                 "3d"
             ]
         },
+        "betterKeypad": {
+            "name": "Better Keypad",
+            "description": "Adds Greek letter, copy/paste and selection keys to the on-screen keypad.",
+            "supports": [
+                "graphing",
+                "3d",
+                "geometry"
+            ],
+            "css": true
+        },
         "bottomExpressions": {
             "name": "Bottom Expressions",
             "description": "Forces expression list to be on bottom."
