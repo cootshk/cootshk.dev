@@ -630,7 +630,7 @@
                           { class: "cde-saved__group" },
                           ui.el("span", {
                               class: "cde-saved__title",
-                              text: "Force plugins"
+                              text: "Force extensions"
                           }),
                           ui.el(
                               "div",
