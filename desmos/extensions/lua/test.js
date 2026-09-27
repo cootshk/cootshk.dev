@@ -570,25 +570,42 @@ async function main() {
     // here: Desmos' note textarea is an invisible sheet over the whole container and has to go,
     // and Monaco's own <textarea class="inputarea"> is how it takes the mouse and must not.
     const css = fs.readFileSync(path.join(__dirname, "index.css"), "utf8");
-    const hides = css
-        .split("}")
-        .filter((rule) => /display\s*:\s*none/.test(rule))
-        .join("}");
+    const rule = (sel) => {
+        const at = css.indexOf(sel);
+        return at === -1 ? "" : css.slice(at, css.indexOf("}", at));
+    };
+    const area = rule("[data-cde-lua] textarea.dcg-smart-textarea");
     ok(
-        "hides Desmos' invisible note textarea",
-        /textarea\.dcg-smart-textarea/.test(hides),
-        "it would swallow every click"
+        !!area && !/display:\s*none/.test(area),
+        "Desmos' note textarea is not hidden",
+        "it is the element Desmos focuses for a note's row - hidden, Escape has nowhere to " +
+            "hand the keyboard and the arrows stop working"
     );
     ok(
-        "does not hide Monaco's input textarea",
-        !/(^|[\s,>])textarea(?![.\w-])/.test(hides),
-        "a blanket `textarea` here makes the box unclickable and untypable"
+        /pointer-events:\s*none/.test(area),
+        "but it cannot be clicked",
+        "at full size and clickable it swallows every click meant for the editor under it"
     );
     ok(
-        "the cell host is inset like the note's own text",
+        /width:\s*1px/.test(area) && /height:\s*1px/.test(area),
+        "and is shrunk to a point",
+        "Desmos sizes it to cover the whole container"
+    );
+    ok(
+        !/(^|[\s,>])textarea(?![.\w-])/.test(
+            css
+                .split("}")
+                .filter((r) => /display\s*:\s*none/.test(r))
+                .join("}")
+        ),
+        "and Monaco's input textarea is untouched",
+        "a blanket `textarea` rule makes the box unclickable and untypable"
+    );
+    ok(
         /paddingLeft/.test(
             fs.readFileSync(path.join(__dirname, "editor.js"), "utf8")
         ),
+        "the cell host is inset like the note's own text",
         "without it the box sits under the row's icon gutter"
     );
 
@@ -618,11 +635,7 @@ async function main() {
         "and no .lua folder",
         !list.some((i) => i.type === "folder" && i.title === ".lua")
     );
-    ok(
-        "a re-parse was requested",
-        dispatched.length >= 0 && reparsed > 0,
-        "reparsed=" + reparsed
-    );
+    ok("a re-parse was requested", reparsed > 0, "reparsed=" + reparsed);
 
     // 22. switching a cell off withdraws its definitions
     lua.runner.setOn(cell, false);
@@ -636,7 +649,7 @@ async function main() {
     lua.runner.setOn(cell, true);
     await new Promise((r) => setTimeout(r, 60));
     const sampled = Object.values(injected()).filter((v) =>
-        /w_\{[xy]\}|w_/.test(v.latex)
+        /w_\{?[xy]\}?|w_/.test(v.latex)
     );
     ok(
         "sample plots the points and not the columns",
@@ -659,14 +672,9 @@ async function main() {
         !lua.isCell({ type: "text", id: "z", text: "hello" })
     );
     ok(
-        "and with the extension off it is still readable Lua",
+        "with the extension off it is still readable Lua",
         saved.text === "Desmos.j = 1",
         saved.text
-    );
-    ok(
-        "the source is the text, verbatim",
-        saved.text === "Desmos.j = 1",
-        JSON.stringify(saved.text)
     );
     ok("no sentinel in the source", !/^--!lua/.test(saved.text), saved.text);
     ok(
@@ -706,7 +714,6 @@ async function main() {
     cell = lua.cell(id);
     lua.edited(id, "Desmos.e = 1");
     lua.flush(id);
-    // A snapshot that has not caught up yet, exactly as Desmos would serve it.
     const realGetState = Calc.getState;
     Calc.getState = () => ({
         expressions: {
@@ -745,6 +752,63 @@ async function main() {
         ),
         "and no static stand-in for it",
         "the static form is what went blank"
+    );
+
+    // 28. the keys, as far as they can be checked without a DOM: Escape hands the row back
+    // through Desmos' own focus dispatches, and Shift+Enter adds a line at the selection.
+    ok(
+        /move-focus-to-item/.test(ed) && /set-selected-id/.test(ed),
+        "Escape hands the row to Desmos rather than only dropping focus",
+        "Desmos keeps focus as state; blurring alone leaves no row focused"
+    );
+    ok(
+        /KeyMod\.Shift \| api\.KeyCode\.Enter/.test(ed),
+        "Shift+Enter is bound",
+        "plain Enter must stay a newline, so the row shortcut needs its own binding"
+    );
+    ok(
+        /type: "new-expression"/.test(ed),
+        "and adds an expression below, focused",
+        "new-expression inserts at the selection with shouldFocus"
+    );
+
+    ok(
+        /onDidFocusEditorText/.test(ed) && /set-selected-id/.test(ed),
+        "focusing a cell moves Desmos' selection marker to its row",
+        "the editor is ours, so Desmos has no other way of knowing which row is in use"
+    );
+    ok(
+        /querySelector\("textarea\.dcg-smart-textarea"\)/.test(ed),
+        "Escape hands the keyboard to the note's own textarea",
+        "the row container's keydown only handles reorder mode, so focusing it leaves the " +
+            "arrows dead"
+    );
+
+    ok(
+        /event\.key === "Tab"/.test(ed) && /getLineMaxColumn/.test(ed),
+        "Tab from the row puts the caret at the end of the code",
+        "the same move Tab makes over an expression"
+    );
+    ok(
+        /host\.contains\(event\.target\)/.test(ed),
+        "and keys from inside the editor are left to it",
+        "otherwise Tab could never indent"
+    );
+    ok(
+        /event\.key\.length === 1/.test(ed) &&
+            /trigger\("cde-lua", "type"/.test(ed),
+        "a letter typed on the row goes into the code and is typed there",
+        "the keystroke is cancelled, so the character has to be put in by hand"
+    );
+    ok(
+        /area\.readOnly = true/.test(ed),
+        "and the row's own textarea cannot take text",
+        "it still holds the source, so a stray keystroke would be spliced into it"
+    );
+    ok(
+        /cell\.box\.contains\(document\.activeElement\)/.test(ed),
+        "the keyboard survives Monaco replacing the fallback textarea",
+        "the first cell is made before Monaco has loaded, and would lose its caret"
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");

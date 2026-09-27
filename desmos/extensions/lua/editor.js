@@ -49,6 +49,9 @@
     /** A cell to focus as soon as its row turns up - the freshly created one. */
     var pending = null;
 
+    /** Rows we have already bound keys on, so a re-render does not stack another listener. */
+    var bound = new WeakSet();
+
     var Calc = null;
     var ui = null;
 
@@ -85,6 +88,8 @@
         }
 
         node.setAttribute("data-cde-lua", "");
+        keys(cell, node);
+        guard(cell, node);
 
         var anchor = node.querySelector(".dcg-displayTextarea");
         var parent = anchor ? anchor.parentNode : node;
@@ -99,6 +104,114 @@
         mount(cell);
         render(cell);
         take(cell);
+    }
+
+    /**
+     * Desmos' own textarea for the row keeps the keyboard whenever the editor does not - that is
+     * what makes Escape, Tab and the arrows work - but it also still holds the note's text. Left
+     * writable, anything typed while the row is focused is spliced into it by Desmos' own note
+     * editing, and scan() then faithfully carries it into the code box.
+     *
+     * Read-only on the element, not on Desmos' model: the browser refuses text, while focus,
+     * caret movement and every key Desmos binds still behave. `keys` below is what a typed
+     * character is *for* - this is the backstop for everything it does not catch, a paste
+     * included. Re-applied because React rebuilds rows and would drop it.
+     */
+    function guard(cell, node) {
+        var area =
+            (node || cell.node) &&
+            (node || cell.node).querySelector("textarea.dcg-smart-textarea");
+        if (area && !area.readOnly) area.readOnly = true;
+    }
+
+    /**
+     * The keys that belong to the row rather than to the editor.
+     *
+     * Bound on the row, not on our box: the two things that can hold the keyboard when the
+     * editor does not are Desmos' item container and the note's textarea, and both are inside
+     * the row and outside the box. An event that came from inside the box is the editor's own -
+     * Tab there indents, and letters are already going where they should.
+     *
+     *   Tab         put the caret at the end of the code, as Tab does over an expression
+     *   a printable go into the code and type it, the way typing on an expression's row starts
+     *               editing it
+     *
+     * Everything else is left alone, so Enter still makes a line below and Backspace still
+     * deletes the row - both Desmos', both already right.
+     */
+    function keys(cell, node) {
+        if (bound.has(node)) return;
+        bound.add(node);
+
+        node.addEventListener("keydown", function (event) {
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+            var live = lua.cell(cell.id);
+            if (!live || !live.host) return;
+            if (live.host.contains(event.target)) return;
+
+            if (event.key === "Tab") {
+                if (event.shiftKey) return;
+                event.preventDefault();
+                event.stopPropagation();
+                enter(live);
+                return;
+            }
+
+            // One character's worth of key: a letter, a digit, punctuation, a space. Enter, the
+            // arrows and the rest report longer names and are not ours.
+            if (event.key && event.key.length === 1) {
+                event.preventDefault();
+                event.stopPropagation();
+                enter(live);
+                type(live, event.key);
+            }
+        });
+    }
+
+    /**
+     * Type `text` into the cell, as if it had been typed in the editor.
+     *
+     * The keystroke that brought us here was cancelled - the editor did not have the keyboard
+     * when it happened - so the character has to be put in by hand rather than left to arrive.
+     */
+    function type(cell, text) {
+        var editor = editors.get(cell.id);
+        if (editor) {
+            editor.trigger("cde-lua", "type", { text: text });
+            return;
+        }
+
+        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
+        if (!input) return;
+        // enter() has already put the caret at the end.
+        input.value += text;
+        input.style.height = tall(input.value) + "px";
+        lua.edited(cell.id, input.value);
+    }
+
+    /** Put the keyboard in the cell's code, caret at the end. */
+    function enter(cell) {
+        var editor = editors.get(cell.id);
+        if (editor) {
+            var model = editor.getModel();
+            if (model) {
+                var line = model.getLineCount();
+                var at = {
+                    lineNumber: line,
+                    column: model.getLineMaxColumn(line)
+                };
+                editor.setPosition(at);
+                editor.revealPositionInCenterIfOutsideViewport(at);
+            }
+            editor.focus();
+            return;
+        }
+
+        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
+        if (!input) return;
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
     }
 
     /**
@@ -180,7 +293,11 @@
         ["keydown", "keypress", "keyup"].forEach(function (type) {
             host.addEventListener(type, function (event) {
                 event.stopPropagation();
-                if (type === "keydown" && event.key === "Escape") blur(cell);
+                if (type !== "keydown") return;
+                if (event.key === "Escape") {
+                    event.preventDefault();
+                    toRow(cell);
+                }
             });
         });
 
@@ -213,6 +330,11 @@
         }
         if (editors.has(cell.id)) return;
 
+        // If the box has the keyboard, the editor should end up with it. This is the first cell
+        // anyone makes: it was given a textarea because Monaco had not arrived yet, and
+        // replacing that textarea now would otherwise lose the caret it was just handed.
+        var had = cell.box.contains(document.activeElement);
+
         cell.box.textContent = "";
         var editor = api.editor.create(cell.box, {
             model: model(cell),
@@ -239,6 +361,9 @@
         editor.onDidContentSizeChange(function () {
             size(cell);
         });
+        editor.onDidFocusEditorText(function () {
+            select(cell);
+        });
         editor.onDidBlurEditorText(function () {
             lua.flush(cell.id);
             if (cell.on) lua.runner.run(cell);
@@ -247,9 +372,13 @@
             lua.flush(cell.id);
             lua.runner.run(cell);
         });
+        editor.addCommand(api.KeyMod.Shift | api.KeyCode.Enter, function () {
+            newRow(cell);
+        });
 
         size(cell);
         markers(cell, cell.syntax || cell.error || "");
+        if (had) enter(cell);
     }
 
     /** The box grows with the text, up to a point, after which it scrolls. */
@@ -278,6 +407,9 @@
             autocomplete: "off",
             wrap: "off",
             "aria-label": "Lua",
+            onfocus: function () {
+                select(cell);
+            },
             oninput: function () {
                 lua.edited(cell.id, input.value);
                 input.style.height = tall(input.value) + "px";
@@ -285,6 +417,17 @@
             onblur: function () {
                 lua.flush(cell.id);
                 if (cell.on) lua.runner.run(cell);
+            },
+            onkeydown: function (event) {
+                if (event.key !== "Enter") return;
+                if (event.shiftKey) {
+                    event.preventDefault();
+                    newRow(cell);
+                } else if (event.metaKey || event.ctrlKey) {
+                    event.preventDefault();
+                    lua.flush(cell.id);
+                    lua.runner.run(cell);
+                }
             }
         });
         input.value = cell.source;
@@ -338,24 +481,95 @@
     function take(cell) {
         if (pending !== cell.id) return;
         pending = null;
-        var editor = editors.get(cell.id);
-        if (editor) return editor.focus();
-        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
-        if (input) input.focus();
+        enter(cell);
     }
 
-    /** Escape: hand the keyboard back to Desmos. */
-    function blur(cell) {
-        var editor = editors.get(cell.id);
-        if (editor) {
-            var node = editor.getDomNode();
-            if (node) node.blur();
-            var area = cell.box && cell.box.querySelector("textarea");
-            if (area) area.blur();
-            return;
+    /**
+     * Put Desmos' selection on this row - the blue marker down its left edge - without touching
+     * where the keyboard is. Clicking into a cell has to do this: the editor is ours, so Desmos
+     * has no other way of knowing which row is being worked on, and the marker would otherwise
+     * stay wherever it was left.
+     *
+     * Selection only. `move-focus-to-item` would have Desmos focus the row's own textarea and
+     * take the keyboard straight back off the editor.
+     */
+    function select(cell) {
+        var controller = Calc && Calc.controller;
+        if (!controller) return;
+        try {
+            controller.dispatch({ type: "set-selected-id", id: cell.id });
+        } catch (error) {
+            console.warn("desmos: couldn't select the row", error);
         }
-        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
-        if (input) input.blur();
+    }
+
+    /**
+     * Escape: give the row to Desmos, so the expression sheet's own keys work on it - Enter for
+     * a new line below, up and down to walk to the neighbouring ones.
+     *
+     * Desmos keeps focus as state and the views follow it, so `move-focus-to-item` - its own
+     * "focus this row" - is half of it. The other half is DOM focus, and for a note that means
+     * the note's own textarea: its keydown is where Desmos' navigation for a note lives. The row
+     * container will not do, tabIndex or not - its own keydown only handles reorder mode, which
+     * is why Escape used to leave the keyboard nowhere at all.
+     *
+     * index.css keeps that textarea at a point rather than hiding it, for exactly this.
+     */
+    function toRow(cell) {
+        lua.flush(cell.id);
+
+        var controller = Calc && Calc.controller;
+        if (controller)
+            try {
+                controller.dispatch({ type: "set-selected-id", id: cell.id });
+                controller.dispatch({
+                    type: "move-focus-to-item",
+                    id: cell.id
+                });
+            } catch (error) {
+                console.warn(
+                    "desmos: couldn't hand the row back to Desmos",
+                    error
+                );
+            }
+
+        var area =
+            cell.node && cell.node.querySelector("textarea.dcg-smart-textarea");
+        if (area) return area.focus();
+
+        // Nothing of Desmos' to hand it to. Its focus state is still right, so at least stop
+        // holding the keyboard here.
+        drop(cell);
+        if (cell.node && cell.node.focus) cell.node.focus();
+    }
+
+    /** Let go of the keyboard, without saying where it should go next. */
+    function drop(cell) {
+        if (!cell.box) return;
+        var area = cell.box.querySelector("textarea");
+        if (area) area.blur();
+    }
+
+    /**
+     * Shift+Enter: a new expression below this cell, focused - the same thing Escape then Enter
+     * does, without the Escape. Plain Enter is left alone, so it still breaks the line inside
+     * the cell.
+     *
+     * `new-expression` inserts at the selection and focuses what it made, so the selection has
+     * to be this row first.
+     */
+    function newRow(cell) {
+        lua.flush(cell.id);
+        drop(cell);
+
+        var controller = Calc && Calc.controller;
+        if (!controller) return;
+        try {
+            controller.dispatch({ type: "set-selected-id", id: cell.id });
+            controller.dispatch({ type: "new-expression" });
+        } catch (error) {
+            console.warn("desmos: couldn't add a line below the cell", error);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -363,6 +577,7 @@
     // -----------------------------------------------------------------------
 
     function render(cell) {
+        guard(cell);
         if (!cell.parts) return;
         var p = cell.parts;
 

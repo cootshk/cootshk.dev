@@ -6,24 +6,42 @@
  * is hard to type into, and because the coloured <pre> and the live editor have to be the same
  * colour or focusing a cell would make it flinch. Same reasoning as the Themes tab. */
 
-/* A cell is a note, so Desmos has drawn note machinery we are standing in front of. Two pieces:
- * the .dcg-displayTextarea that shows the text, and - the one that matters - Desmos' own
- * textarea, which is
+/* A cell is a note, so Desmos has drawn note machinery we are standing in front of.
+ *
+ * The rendered text goes; the textarea does not. Desmos' own is
  *
  *     .dcg-smart-textarea-container textarea.dcg-smart-textarea {
  *         opacity: 0; position: absolute; top: 0; left: 0; bottom: 0; right: 0; height: 100%
  *     }
  *
- * an invisible sheet over the whole container. Left alone it swallows every click meant for the
- * editor underneath it.
+ * an invisible sheet over the whole container - and it is *also* the element Desmos focuses when
+ * a note's row is focused. Hiding it outright takes the keyboard away from the row: Escape had
+ * nowhere to hand it, so Enter and the arrows did nothing afterwards, while arrowing over the
+ * row from elsewhere still worked because that is driven by Desmos' focus state rather than by
+ * the DOM.
  *
- * Both named exactly. A blanket `textarea` here would also catch Monaco's own
- * <textarea class="inputarea">, which is how Monaco takes the mouse and the keyboard - hiding
- * that gives you a box you cannot click into or type in, which looks like the editor being
- * broken rather than like a stylesheet being too eager. */
-[data-cde-lua] .dcg-displayTextarea,
-[data-cde-lua] textarea.dcg-smart-textarea {
+ * So it is kept, shrunk to a point and made click-through. `pointer-events: none` is the part
+ * that matters: at full size and clickable it swallows every click meant for the editor beneath
+ * it, which is what hiding it was for in the first place.
+ *
+ * Named exactly, both of them. A blanket `textarea` would also catch Monaco's own
+ * <textarea class="inputarea">, which is how Monaco takes the mouse and the keyboard. */
+[data-cde-lua] .dcg-displayTextarea {
     display: none !important;
+}
+
+[data-cde-lua] textarea.dcg-smart-textarea {
+    top: 0 !important;
+    left: 0 !important;
+    right: auto !important;
+    bottom: auto !important;
+    width: 1px !important;
+    height: 1px !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    resize: none !important;
 }
 
 .cde-lua {

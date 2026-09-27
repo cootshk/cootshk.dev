@@ -148,6 +148,44 @@ be plotted. It is N points with straight lines between them: no derivative, wron
 discontinuity, and nothing outside the range you gave. That is the honest shape of a Lua
 function on a Desmos graph.
 
+## Keys
+
+|                      |                                          |
+| -------------------- | ---------------------------------------- |
+| `Enter`              | a new line inside the cell               |
+| `Shift`+`Enter`      | a new expression below the cell, focused |
+| `Ctrl`/`Cmd`+`Enter` | run the cell now                         |
+| `Esc`                | hand the row to Desmos                   |
+
+After `Esc` the row belongs to the expression sheet again, so Desmos' own keys work on it -
+`Enter` for a new line below, up and down to walk to the neighbouring ones. `Shift`+`Enter` is
+that pair in one press.
+
+Desmos keeps focus as state rather than as DOM focus, so `Esc` dispatches `set-selected-id` and
+`move-focus-to-item` - its own "focus this row" - and then puts DOM focus on **the note's own
+textarea**, which is where Desmos' navigation for a note lives. The row container will not do:
+`tabIndex: -1` makes it focusable, but its `keydown` only handles reorder mode, so focusing it
+leaves the arrows dead. This is why `index.css` shrinks that textarea to a point and makes it
+click-through instead of hiding it.
+
+Clicking into a cell dispatches `set-selected-id` on its own, so Desmos' blue marker follows the
+row you are typing in - selection only, since `move-focus-to-item` would have Desmos take the
+keyboard straight back off the editor.
+
+`Tab` and any printable character are the ways back in, matching what they do over an expression:
+`Tab` places the caret, and typing starts editing. Both are handled on the row rather than on the
+box, because the two things that can hold the keyboard when the editor does not - Desmos' item
+container and the note's textarea - are both inside the row and outside the box; an event from
+inside the box is the editor's own, where `Tab` indents.
+
+A typed character arrives with the keystroke already cancelled, so it is inserted by hand rather
+than left to land. The row's own textarea is also made read-only: it still holds the cell's
+source, so anything the keys above do not catch - a paste, say - would otherwise be spliced
+straight into it by Desmos' note editing and turn up in the code box.
+
+Arrows, `Enter` and `Backspace` are otherwise held inside the editor, because Desmos binds all
+three to moving around the list.
+
 ## `print`
 
 Goes to a strip under the cell, and to the console.
