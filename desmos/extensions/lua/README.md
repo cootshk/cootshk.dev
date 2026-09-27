@@ -20,7 +20,7 @@ escaped.
 Desmos.k = a * 2
 ```
 
-Words after `--!lua` are pragmas. There is one: `unsafe`.
+There is one pragma: `unsafe`.
 
 Desmos has no typed-word conversions of its own - `table` is not one either, whatever the
 folklore says - so the `lua` trigger is this extension's. It fires the moment an expression's
@@ -31,41 +31,39 @@ cannot type a longer name that passes through it on the way: `lua` converts befo
 The `+` menu is the route that does not depend on any of that, and
 `Extensions.lua.add()` from the console is a third.
 
-## A real item type
+## How the item type works
 
-A cell would read better as its own item type - `{type:"lua", source:"..."}` - and this is what
-that would take, written down because finding it was the expensive part.
+Desmos knows five item types and asks about them in eight places. All eight patches (see
+`index.js`) answer the same way: _do what you do for a note_. Same state-to-model conversion,
+same saved shape, same row component. A Lua cell is a note in every respect except its name and
+what this extension does with it - which is why a real item type costs eight one-line patches
+rather than an item model written from scratch.
 
-**desmos.com is not the obstacle.** The server stores `state` as an opaque JSON string and does
-no schema validation: a graph containing a `type:"lua"` item posted to the endpoint behind
-`createSnapshotLink()` came back from its `stateUrl` byte for byte, `source` intact. That was
-the gate this extension was built against, and it was the wrong gate.
+| site                | what it needed                                                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Hv`                | state -> item model. Falls through to the note's factory, which spreads the state over the note defaults, so `type` stays `"lua"`.                     |
+| the two normalisers | one is the incremental `setState` path, which **throws** rather than shrugging - that path is version-history restore.                                 |
+| `B0`                | handing out an id to an item that arrived without one.                                                                                                 |
+| `ZL`                | item model -> saved state. Without it the default returns the _model_, putting the controller and the guid into the saved graph.                       |
+| `sm`                | the projection the list keeps beside each item.                                                                                                        |
+| the row renderer    | routes to Desmos' note view, whose template hardcodes `dcg-expressiontext` - which is what `editor.js` finds rows by.                                  |
+| `V0`                | `setExpression`, which is how a cell's text is written back. The note builder hardcodes `type:"text"`, so the patch borrows it and puts the type back. |
 
-The client is the obstacle. `setState` branches, and the branches fail differently:
+`text` carries the source rather than a field of its own because a note's saved state is built
+by one function from a fixed list of fields and its undo diffing by another. Putting the source
+anywhere else means patching both, for nothing but a nicer field name.
 
-```js
-t?.useIncrementalUpdate
-    ? gU(this.listModel, pre(this.listModel, e.expressions))
-    : dre(this.listModel, e.expressions, t || {});
-```
+**desmos.com does not care.** The server stores `state` as an opaque JSON string and does no
+schema validation - a graph with a `lua` item posted to the endpoint behind
+`createSnapshotLink()` comes back byte for byte. The client was always the only obstacle.
 
-| site             | what it does with a type it does not know                                                                                                                                                            |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Hv(r, e)`       | state -> item model. `default: return e` - hands back the raw state object, which is then pushed into `__itemModelArray` and `__itemIdToModel`. Not dropped; a foreign object where a model belongs. |
-| `pre(r, e)`      | the `useIncrementalUpdate` path. ``default: throw new Error(`Unknown item type: ${JSON.stringify(n)}`)`` - it **throws**.                                                                            |
-| the row renderer | the item-type switch. The `+` menu patch in `index.js` already sits on its sibling (`case"expression":case"note":case"table":case"folder":`).                                                        |
-| the serializer   | the other direction, for `getState`.                                                                                                                                                                 |
+### The trade
 
-Three `"Unknown item type"` guards exist in the state-to-item path in total.
-
-Note `allowUndo` and `useIncrementalUpdate` are independent options - only the second selects
-the throwing path. So this repo's own saves (`settings/tabs/savedGraphs.js:222`, and `convert`,
-`add` and `tidy` here) take the shrugging `dre` path, while **version-history restore** and
-calc-instance sync pass `useIncrementalUpdate:true` and would throw.
-
-That is five or so patches on top of the six here, each of which drops the whole extension when
-it misses - and the failure mode is a graph whose cells render as nothing. Build it behind the
-note form, not instead of it, so a missed patch degrades rather than loses someone's code.
+With this extension switched off, Desmos does not know what a `lua` item is: `Hv`'s default
+hands the list a raw state object in place of a model, and the incremental `setState` path
+throws. **A graph with cells in it wants this extension.** The note form this replaced degraded
+into readable text; a real item type does not. That is the price of the type, and
+`patches.test.js` is how you find out early that a Desmos deploy has moved one of the eight.
 
 ## Reading the graph
 

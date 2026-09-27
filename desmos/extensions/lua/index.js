@@ -10,22 +10,36 @@
 // type into). They hang themselves off `Extensions.lua`, which is why this file is first in
 // the manifest's `file` list.
 //
-// A cell is a note - `type: "text"` - whose text begins `--!lua`. That is a deliberate choice
-// over inventing a `type: "lua"` item:
+// A cell is its own item type - `{ type: "lua", id, text }` - and `text` is the Lua source,
+// verbatim. Not a note with a marker in it, which is what this used to be.
 //
-//   - `--!lua` is a Lua comment, so the note's text *is* the chunk. Nothing is reassembled and
-//     nothing is escaped; the bytes in the graph are the bytes the VM compiles.
-//   - Notes round-trip through getState/setState, Desmos' undo stack, this site's .dcg files
-//     and desmos.com's own save. An item type Desmos has never heard of survives the *server* -
-//     that was tested, and a `type:"lua"` item comes back from a snapshot link byte for byte -
-//     but not the client: see "A real item type" in ./README.md for the sites that would have
-//     to be taught about it, one of which throws rather than shrugging.
-//   - With this extension off, a cell is a note you can still read. Nothing is lost.
+// Desmos knows five item types and asks about them in eight places, three of which throw on a
+// type they have not met. The patches below answer all eight, and every one of them answers by
+// pointing at what Desmos already does for a note: the same state-to-model conversion, the same
+// saved shape, the same row component. A Lua cell is a note in every respect except its name
+// and what this extension does with it, which is why the whole thing costs eight one-line
+// patches instead of an item model written from scratch.
 //
-// The sentinel is not part of the chunk: `parse` slices it off, and what the VM compiles is
-// exactly what the editor holds. So an error on Lua line 3 is an error on editor line 3, and
-// there is no arithmetic to get wrong.
+// `text` rather than a field of its own for the same reason. A note's saved state is built by
+// one function from a fixed list of fields, and its undo diffing from another; putting the
+// source anywhere but `text` means patching both, for nothing but a nicer field name.
+//
+// The source is the chunk. Nothing is stripped from it, so Lua's line 3 is the editor's line 3.
+// A first line of `--!lua <pragmas>` is read for pragmas and then left exactly where it is -
+// it is a Lua comment, so the compiler does not care, and nothing has to count lines.
+//
+// The cost of a real type, stated plainly: with this extension switched off, Desmos does not
+// know what a `lua` item is. `Hv`'s default hands the raw state object to the list in place of
+// a model, and the incremental `setState` path throws outright. A graph with cells in it wants
+// this extension. That is the trade a real item type makes, and the note form did not.
 (function () {
+    /**
+     * A cell's optional first line: `--!lua <pragmas>`. Read for the pragmas and then left
+     * alone - it is a Lua comment, so the compiler ignores it, and leaving it in means the
+     * source is the chunk and no line numbers have to be adjusted.
+     */
+    var PRAGMA = /^--!lua[ \t]*([^\n]*)/;
+
     /**
      * The word that turns an expression into a cell, as it looks by the time it reaches the
      * state. Desmos has no magic words of its own - `table` is not one either - so this is
@@ -40,12 +54,6 @@
                 .toLowerCase() === "lua"
         );
     }
-
-    /** The first line of a cell. Anything after the word is a pragma - see `pragmas`. */
-    var SENTINEL = /^--!lua([ \t][^\n]*)?(?:\n|$)/;
-
-    /** What the sentinel line says when we write one ourselves. */
-    var HEADER = "--!lua";
 
     /**
      * Our graph observer. Desmos' unobserveEvent takes an event name and not a callback, so an
@@ -76,7 +84,63 @@
 
             // Everything this extension changes about Desmos itself.
             patches: [
-                // Lua's exports, handed to Desmos as statements rather than as expressions.
+                // --- the item type ------------------------------------------------
+                //
+                // Eight places Desmos asks what an item type is. Each answer is the one it
+                // already gives for a note, so a Lua cell converts, saves, undoes, re-renders
+                // and reloads exactly as a note does.
+
+                // State -> item model. Falls through to the note's own model factory, which
+                // spreads the state over the note defaults - so `type` stays "lua".
+                {
+                    match: /case"text":return (\i)\((\i),(\i)\.controller\);default:return \2\}/,
+                    replace: 'case"lua":$&',
+                    count: 1
+                },
+                // The two state normalisers. One of them is the incremental setState path,
+                // which throws rather than shrugging - that is version-history restore.
+                {
+                    match: /case"text":return py\(\i\);/,
+                    replace: 'case"lua":$&',
+                    count: 2
+                },
+                // Handing out an id to an item that arrived without one.
+                {
+                    match: /case"text":return\{\.\.\.(\i),id:\((\i)=\1\.id\)!=null\?\2:(\i)\.generateId\(\)\};/,
+                    replace: 'case"lua":$&',
+                    count: 1
+                },
+                // Item model -> saved state. Without this the default returns the *model*,
+                // which would put the controller and the guid into the saved graph.
+                {
+                    match: /case"text":return (\i)\((\i),(\i)\);default:return \2\}/,
+                    replace: 'case"lua":$&',
+                    count: 1
+                },
+                // The projection the list keeps beside each item.
+                {
+                    match: /case"text":return (\i)\((\i)\)\}/,
+                    replace: 'case"lua":$&',
+                    count: 1
+                },
+                // The row. Desmos' own note view, whose template hardcodes
+                // "dcg-expressiontext" - which is what editor.js finds rows by.
+                {
+                    match: /else if\((\i)\.type==="text"\)(\i)=l\(XT,/,
+                    replace:
+                        'else if($1.type==="text"||$1.type==="lua")$2=l(XT,',
+                    count: 1
+                },
+                // setExpression, which is how a cell's text is written back. The note builder
+                // hardcodes `type:"text"`, so borrow it and put the type back.
+                {
+                    match: /case"text":return iJ\((\i),(\i)\);/,
+                    replace:
+                        'case"lua":{let l=iJ($1,$2);l.type="lua";return l}$&',
+                    count: 1
+                },
+
+                // --- Lua's exports ----------------------------------------------
                 //
                 // requestParseForAllItems() builds a map of everything on the graph that has latex
                 // in it, then diffs that map against the last one and calls the evaluator's
@@ -127,8 +191,7 @@
                 }
             ],
 
-            SENTINEL: SENTINEL,
-            HEADER: HEADER,
+            PRAGMA: PRAGMA,
 
             /** Every cell on the graph, by expression id. Live - do not hold onto it. */
             cells: cells,
@@ -144,7 +207,6 @@
                 lua.Calc = calc;
 
                 menu();
-                tidy();
 
                 if (lua.bridge) lua.bridge.init(calc);
                 if (lua.editor) lua.editor.init(calc);
@@ -159,8 +221,7 @@
 
             /** Is this a Lua cell? */
             isCell: isCell,
-            parse: parse,
-            compose: compose,
+            pragmas: pragmas,
 
             /** The cell for an expression id, or undefined. */
             cell: function (id) {
@@ -244,42 +305,6 @@
     }
 
     /**
-     * Clear out the `.lua` folder an older version of this extension left on the graph.
-     *
-     * Exports used to be real expressions in a hidden folder; they are statements now, so the
-     * folder is dead weight in any graph saved while it existed. Removing it is a one-off on
-     * load, and silent - there is nothing in it that was the user's.
-     */
-    function tidy() {
-        var state = Calc.getState();
-        var list = (state.expressions || {}).list;
-        if (!list) return;
-
-        var folder = null;
-        for (var i = 0; i < list.length; i++)
-            if (list[i].type === "folder" && list[i].title === ".lua")
-                folder = list[i].id;
-
-        var stale = list.filter(function (item) {
-            return (
-                item.id.indexOf("cde-lua-") === 0 ||
-                (folder && item.folderId === folder) ||
-                item.id === folder
-            );
-        });
-        if (!stale.length) return;
-
-        var doomed = {};
-        stale.forEach(function (item) {
-            doomed[item.id] = true;
-        });
-        state.expressions.list = list.filter(function (item) {
-            return !doomed[item.id];
-        });
-        commit(state);
-    }
-
-    /**
      * Answer the + menu's Lua entry. Its button is Desmos' own, and Desmos' own button taps by
      * dispatching `new-<type>` - so the entry works by us knowing what `new-lua` means.
      *
@@ -304,29 +329,14 @@
     // -----------------------------------------------------------------------
 
     function isCell(item) {
-        return !!item && item.type === "text" && SENTINEL.test(item.text || "");
+        return !!item && item.type === "lua";
     }
 
-    /**
-     * Split a note's text into the pragmas on its sentinel line and the Lua below it. Returns
-     * null for a note that is not a cell.
-     */
-    function parse(text) {
-        var match = SENTINEL.exec(text || "");
-        if (!match) return null;
-        var words = (match[1] || "").trim();
-        return {
-            pragmas: new Set(words ? words.split(/\s+/) : []),
-            source: (text || "").slice(match[0].length)
-        };
-    }
-
-    /** The other way: a sentinel line and its pragmas, then the body. */
-    function compose(pragmas, source) {
-        var words = Array.from(pragmas || []);
-        return (
-            HEADER + (words.length ? " " + words.join(" ") : "") + "\n" + source
-        );
+    /** The pragmas a cell's source asks for, from its first line if it has such a line. */
+    function pragmas(source) {
+        var match = PRAGMA.exec(source || "");
+        var words = match ? match[1].trim() : "";
+        return new Set(words ? words.split(/\s+/) : []);
     }
 
     // -----------------------------------------------------------------------
@@ -360,14 +370,14 @@
             if (!isCell(item)) continue;
             seen.add(item.id);
 
-            var parsed = parse(item.text);
+            var source = item.text || "";
             var cell = cells.get(item.id);
 
             if (!cell) {
                 cell = {
                     id: item.id,
-                    source: parsed.source,
-                    pragmas: parsed.pragmas,
+                    source: source,
+                    pragmas: pragmas(source),
                     order: order++,
 
                     // Off on every load, always. A graph you have just opened is someone
@@ -396,11 +406,11 @@
                 if (lua.runner) lua.runner.check(cell);
             } else {
                 cell.order = order++;
-                cell.pragmas = parsed.pragmas;
+                cell.pragmas = pragmas(source);
                 // Changed underneath us - undo, setState, a graph load. Take it, and tell the
                 // editor so the box catches up without losing its undo history.
-                if (parsed.source !== cell.source) {
-                    cell.source = parsed.source;
+                if (source !== cell.source) {
+                    cell.source = source;
                     written.set(item.id, item.text);
                     if (lua.editor) lua.editor.refresh(cell);
                     if (lua.runner) lua.runner.edited(cell);
@@ -447,9 +457,9 @@
         rescan();
     }
 
-    /** An empty cell, as an item model. */
+    /** An empty cell, as an item. */
     function note(id, folderId) {
-        var item = { type: "text", id: String(id), text: HEADER + "\n" };
+        var item = { type: "lua", id: String(id), text: "" };
         if (folderId) item.folderId = folderId;
         return item;
     }
@@ -565,10 +575,9 @@
         clearTimeout(cell.timer);
         cell.timer = null;
 
-        var text = compose(cell.pragmas, cell.source);
-        if (written.get(id) === text) return;
-        written.set(id, text);
-        setExpression({ id: id, type: "text", text: text });
+        if (written.get(id) === cell.source) return;
+        written.set(id, cell.source);
+        setExpression({ id: id, type: "lua", text: cell.source });
     }
 
     /** Everything pending, now. Before a save, and on the way out. */

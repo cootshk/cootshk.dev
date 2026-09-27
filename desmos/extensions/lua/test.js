@@ -193,9 +193,15 @@ function syntaxOf(cell) {
     return bad;
 }
 
+/**
+ * A cell on the graph. `text` is the Lua source verbatim; pragmas ride on an optional first
+ * line, which stays in the source because it is a Lua comment.
+ */
 function cellWith(source, pragmas) {
     const id = String(++idc);
-    list.push({ type: "text", id, text: lua.compose(pragmas || [], source) });
+    const head =
+        pragmas && pragmas.length ? "--!lua " + pragmas.join(" ") + "\n" : "";
+    list.push({ type: "lua", id, text: head + source });
     return id;
 }
 
@@ -413,7 +419,7 @@ async function main() {
     const converted = list.find((e) => e.id === trigId);
     ok(
         "typing lua converted the expression to a note",
-        converted && converted.type === "text",
+        converted && converted.type === "lua",
         JSON.stringify(converted)
     );
     ok("and the note is a cell", !!lua.cell(trigId), "not discovered");
@@ -492,7 +498,7 @@ async function main() {
     const made = list[list.length - 1];
     ok(
         "and it is a cell",
-        made && made.type === "text" && !!lua.cell(made.id),
+        made && made.type === "lua" && !!lua.cell(made.id),
         JSON.stringify(made)
     );
     ok(
@@ -540,7 +546,7 @@ async function main() {
         const got = list.find((e) => e.id === tid);
         ok(
             "trigger accepts " + JSON.stringify(spelling),
-            got && got.type === "text",
+            got && got.type === "lua",
             JSON.stringify(got)
         );
     }
@@ -632,6 +638,50 @@ async function main() {
         sampled.length === 3 &&
             sampled.filter((v) => v.shouldGraph).length === 1,
         JSON.stringify(sampled)
+    );
+
+    // 24. the saved shape: its own type, and the source is the text verbatim
+    id = cellWith("Desmos.j = 1");
+    change();
+    const saved = list.find((e) => e.id === id);
+    ok(
+        "saved as its own item type",
+        saved.type === "lua",
+        JSON.stringify(saved)
+    );
+    ok(
+        "the source is the text, verbatim",
+        saved.text === "Desmos.j = 1",
+        JSON.stringify(saved.text)
+    );
+    ok("no sentinel in the source", !/^--!lua/.test(saved.text), saved.text);
+    ok(
+        "and the cell reads it back unchanged",
+        lua.cell(id).source === "Desmos.j = 1",
+        lua.cell(id).source
+    );
+
+    // 25. a pragma line is read but left in place, so line numbers do not shift
+    id = cellWith("Desmos.u = 1", ["unsafe"]);
+    change();
+    cell = lua.cell(id);
+    ok(
+        "pragma read off the first line",
+        cell.pragmas.has("unsafe"),
+        [...cell.pragmas].join(",")
+    );
+    ok(
+        "and left in the source",
+        /^--!lua unsafe\n/.test(cell.source),
+        JSON.stringify(cell.source)
+    );
+    lua.edited(cell.id, "--!lua unsafe\nerror('x')");
+    lua.runner.setOn(cell, true);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "so an error on source line 2 is reported as line 2",
+        lua.runner.line(cell, cell.error) === 2,
+        cell.error + " -> " + lua.runner.line(cell, cell.error)
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
