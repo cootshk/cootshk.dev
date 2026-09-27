@@ -108,8 +108,8 @@ function extension(def) {
  * applied to the bundle in order, each one's output feeding the next. `replace` is a
  * String.prototype.replace replacement, so $1, $2, $<name> and $& put the pieces the match
  * captured back into the bundle; it can also be a function, called with the arguments
- * String.replace would pass it. A plain string matches literally, and only its first
- * occurrence; a regex replaces every match it has, whether or not it was written /g.
+ * String.replace would pass it. A plain string matches literally; either way every
+ * occurrence in the bundle is replaced, whether or not the regex was written /g.
  *
  * Minified names change with every Desmos build, so write the identifiers in a pattern as
  * \i, which expands to exactly one of them:
@@ -141,7 +141,8 @@ const IDENTIFIER = "(?:[A-Za-z_$][\\w$]*)";
 
 /**
  * `match` with `\i` expanded and, unless `count` is 1, /g added. Strings are literal, so they
- * come back untouched.
+ * come back untouched - applyPatches replaces those with replaceAll, which is global with no
+ * flag to say so.
  *
  * Global by default because a pattern is a description of something to fix rather than of one
  * place in the bundle: written for a single call site and found at five, it has found five
@@ -209,12 +210,16 @@ function applyPatches(patches, js, id) {
                     (expected === undefined ? "" : `, expected ${expected}`)
             );
 
-        js = js.replace(
-            match,
+        const replacement =
             typeof patch.replace === "function"
                 ? patch.replace
-                : expandSelf(patch.replace, id)
-        );
+                : expandSelf(patch.replace, id);
+        // replaceAll for a string: canonicalizeMatch has already made a regex global, and a
+        // string has no flags of its own to be made global with.
+        js =
+            typeof match === "string"
+                ? js.replaceAll(match, replacement)
+                : js.replace(match, replacement);
     });
     return js;
 }

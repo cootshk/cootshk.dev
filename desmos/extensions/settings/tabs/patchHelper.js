@@ -88,23 +88,28 @@
 
     /**
      * Where `match` is found in `text`: the first SHOWN of them, and how many there are in
-     * all. For a string those two numbers disagree on purpose - applyPatches replaces it with
-     * String.replace, which takes only the first, but checks `count` against every one.
+     * all. Every one of them is a place the patch would change, string or regex alike -
+     * applyPatches takes a string through replaceAll and a regex through a /g replace.
      */
     function findAll(text, match) {
-        if (typeof match === "string") {
-            var at = text.indexOf(match);
-            // Shaped like a regex match, so that the diff below need not care which it has.
-            var first = [match];
-            first.index = at;
-            return {
-                found: at === -1 ? [] : [first],
-                count: countMatches(text, match)
-            };
-        }
-        var all = new RegExp(match.source, match.flags.replace("g", "") + "g");
         var found = [];
         var count = 0;
+        if (typeof match === "string") {
+            for (var at = match ? text.indexOf(match) : -1; at !== -1;) {
+                count++;
+                if (found.length < SHOWN) {
+                    // Shaped like a regex match, so that the diff below need not care which
+                    // of the two it has.
+                    var one = [match];
+                    one.index = at;
+                    found.push(one);
+                }
+                if (count >= CEILING) break;
+                at = text.indexOf(match, at + match.length);
+            }
+            return { found: found, count: count };
+        }
+        var all = new RegExp(match.source, match.flags.replace("g", "") + "g");
         var hit;
         while ((hit = all.exec(text)) !== null) {
             count++;
@@ -116,16 +121,8 @@
         return { found: found, count: count };
     }
 
-    /** The status line: how many there are, and how many of them a patch would take. */
-    function summary(match, hits) {
-        if (typeof match === "string")
-            return hits.count === 1
-                ? "1 occurrence."
-                : hits.count +
-                      " occurrences, but a plain string is replaced only where it first " +
-                      "appears. count still asserts all " +
-                      hits.count +
-                      ".";
+    /** The status line: how many there are, and how many of them are shown. */
+    function summary(hits) {
         return (
             (hits.count >= CEILING ? "Over " + CEILING : hits.count) +
             (hits.count === 1 ? " match" : " matches") +
@@ -387,15 +384,11 @@
 
             var hits = findAll(bundle, wanted);
             if (!hits.count) {
-                say(
-                    "No matches. A patch that matches nothing throws, and takes its " +
-                        "extension out of the load with it.",
-                    true
-                );
+                say("No matches.", true);
                 diff.appendChild(patternLine(wanted));
                 return;
             }
-            say(summary(wanted, hits));
+            say(summary(hits));
 
             // $self is expanded the way applyPatches expands it, but with nothing to put in
             // for the id: which extension this patch will belong to is not something the

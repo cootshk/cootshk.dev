@@ -54,8 +54,8 @@ extension({
 - `\i` expands to one JavaScript identifier, `(?:[A-Za-z_$][\w$]*)`. Desmos' minified
   names change with every build, so never write them out.
 - `replace` is a `String.replace` replacement: `$1`, `$2`, `$<name>` and `$&` put the
-  captured pieces back. A function works too. A `/g` match replaces every occurrence, a
-  plain one only the first.
+  captured pieces back. A function works too. Every occurrence is replaced, whether the
+  match is a regex written `/g` or not, and whether it is a regex or a plain string.
 - A patch that matches nothing throws, and the extension is dropped for that load - it
   will not silently half-apply itself to a build that moved on.
 - `count` asserts how many times the pattern appears. `count: 1` is the usual "this had
@@ -70,8 +70,8 @@ box over a diff of what the patch would do to the bundle. It compiles the patter
 loader's own `canonicalizeMatch`, so `\i` and the implied `/g` behave exactly as they will
 in a real patch, and it shows every match with the bundle either side of it - which is how
 a pattern that is looser than it looks gives itself away. Turn *Regex* off and the box is
-the literal string a `match` written as one would be, replaced only where it first appears
-and counted everywhere it occurs, just as `count` counts it.
+the literal string a `match` written as one would be, found everywhere it occurs - each of
+them a place the patch would change, just as `count` counts them.
 
 ## Drawing UI
 Desmos owns the whole document, so an extension that wants to show something
