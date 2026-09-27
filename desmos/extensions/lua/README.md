@@ -222,6 +222,7 @@ function on a Desmos graph.
 | `Shift`+`Enter`      | a new expression below the cell, focused |
 | `Ctrl`/`Cmd`+`Enter` | run the cell now                         |
 | `Esc`                | hand the row to Desmos                   |
+| `Backspace`          | delete the cell, when it is empty        |
 | ▶ in the gutter      | run the cell; ⏸ while it runs, to stop   |
 
 After `Esc` the row belongs to the expression sheet again, so Desmos' own keys work on it -
@@ -251,7 +252,13 @@ source, so anything the keys above do not catch - a paste, say - would otherwise
 straight into it by Desmos' note editing and turn up in the code box.
 
 Arrows, `Enter` and `Backspace` are otherwise held inside the editor, because Desmos binds all
-three to moving around the list.
+three to moving around the list. `Backspace` with nothing left to delete is the exception, and
+it is handed to Desmos rather than answered here: `on-special-key-pressed` is what an empty
+expression's own `Backspace` dispatches, so an empty cell is deleted on the same terms as an
+empty expression - not when it is the only item left, out of its folder first if it is the last
+thing in one, and leaving the caret at the end of the row above. The pending write is flushed
+before the row goes, because `setExpression` creates an id it cannot find: a write that landed
+after the delete would put the row back as a plain note.
 
 ## The gutter, `print` and errors
 

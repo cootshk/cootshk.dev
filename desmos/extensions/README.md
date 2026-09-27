@@ -127,6 +127,23 @@ The rest of `ui` - `el`, `css` (for styling that has to be computed), the
 extension list, the toggles, `dirty`/`reload` - is documented at the top of
 `../ui.js`.
 
+## A code box
+`window.__desmosExt.monaco` (see `../monaco.js`) is Monaco - the editor out of VS
+Code - loaded once and shared, because two copies is two loads: a second
+`loader.js` brings its own module registry and runs the whole editor again.
+
+```js
+const monaco = window.__desmosExt.monaco;
+monaco.warm();                       // a load is probably coming; start it when idle
+const api = monaco.api();            // the api if it is already here, null until then
+if (!api) monaco.load().then(draw, fallback);  // and the load itself
+```
+
+Nothing is fetched until the first `warm()` or `load()`. It comes from a CDN, so
+`load()` can reject and `api()` can stay null forever: give the box something to
+fall back on - both `extensions/lua` and the Themes tab fall back to a textarea,
+so that a page broken by a theme is still a page the theme can be deleted from.
+
 ## Tabs in the saved-graphs modal
 `extensions/settings` owns the tabs next to "Examples", and anything its manifest
 entry lists after `index.js` can add one:
@@ -138,6 +155,7 @@ Extensions.settings.tab({
   render: (root, controller) => {},  // the body; may return a teardown, like any other slot
   when: () => true,     // optional - leave the tab out when this is false
   main: () => {},       // optional - work that has to happen whether the tab is opened or not
+  opening: () => {},    // optional - the modal has been opened; this tab may be next
 });
 ```
 
@@ -147,6 +165,12 @@ order, and the registry is read once, when the bundle is patched.
 A tab's `main` is the settings extension's own `main()` shared out, which is
 also where a tab fills slots elsewhere in the modal - `tabs/savedGraphs.js`
 uses it for the Upload Graph button beside "New Graph".
+
+`opening` runs when any tab of ours is drawn, which is to say when the modal is
+opened: a head start for a tab with something slow to fetch, while its heading
+is still being read. `tabs/themes.js` asks for Monaco there, so that clicking
+Themes draws the editor instead of a textarea that is replaced a second later.
+It runs on every open, so make it cheap the second time.
 
 `id` in place of `label` takes over a tab Desmos already has, by naming the id
 Desmos itself uses - the heading and the label are already there, so only the

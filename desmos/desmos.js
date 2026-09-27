@@ -10,7 +10,8 @@
 // dynamically inserted, and that order is not guaranteed.
 //
 // Desmos and the loader share one window, which is the point - see extensions.js for the
-// hooks an extension can implement, and ui.js for what they draw with.
+// hooks an extension can implement, ui.js for what they draw with, and monaco.js for the one
+// copy of the editor the two that want one share.
 const local = {
     fetch: window.fetch.bind(window),
 

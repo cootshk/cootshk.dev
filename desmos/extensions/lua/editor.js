@@ -19,15 +19,13 @@
 // a cell you cannot empty, and nothing here should need a CDN to be fixable. Running does not
 // depend on Monaco at all; only the colours and the error markers do.
 //
+// Monaco itself is ../../monaco.js, shared with that tab and asked for as soon as this
+// extension starts rather than when the first cell is drawn - a cell drawn before it answers
+// is the textarea above, and it is replaced when it does.
+//
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
     var lua = window.Extensions.lua;
-
-    // The same pinned copy extensions/settings/tabs/themes.js loads, for the same reasons:
-    // 0.52.2 is the last release shipping the AMD build, and it is cross-origin on purpose -
-    // the proxy rewrites any same-origin URL onto its own prefix, so a copy served from this
-    // site could not fetch its own modules.
-    var MONACO = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min";
 
     /** Kept in step with index.css. */
     var FONT = 13;
@@ -37,7 +35,10 @@
     /** Past this the box scrolls rather than growing without end. */
     var MAX_HEIGHT = 480;
 
+    /** Monaco, once ../../monaco.js has it. Null until then, and forever if it never does. */
     var api = null;
+
+    /** Our end of that load, so a second cell being drawn does not ask again. */
     var loading = null;
 
     /** expr-id -> the editor in that row, while the row exists. */
@@ -70,6 +71,16 @@
     function init(calc) {
         Calc = calc;
         ui = window.__desmosExt.ui;
+
+        // Monaco is ../../monaco.js' copy, shared with the Themes tab, so it may be here
+        // already - in which case take it now, and the first cell is an editor rather than a
+        // textarea that turns into one a second later. If it is not, ask for it here rather
+        // than when the first cell is drawn: a cell is what this extension is for, so the
+        // wait is better spent while the graph is still opening than in front of someone
+        // who has just made one.
+        var shared = window.__desmosExt.monaco;
+        if (shared.api()) arrive(shared.api());
+        else want();
     }
 
     // -----------------------------------------------------------------------
@@ -414,7 +425,7 @@
 
         if (!api) {
             plain(cell);
-            want();
+            want(true);
             return;
         }
         if (editors.has(cell.id)) return;
@@ -464,6 +475,20 @@
         editor.addCommand(api.KeyMod.Shift | api.KeyCode.Enter, function () {
             newRow(cell);
         });
+        // Backspace with nothing left to delete: the cell goes, the way an empty expression
+        // does. Not a command, which would take the key in every cell however full - this
+        // has to ask the model first, and hand the key back to Monaco when there is text.
+        editor.onKeyDown(function (event) {
+            if (event.keyCode !== api.KeyCode.Backspace) return;
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            var text = editor.getModel();
+            if (!text || text.getValue() !== "") return;
+            event.preventDefault();
+            // Desmos binds this key on the row as well, and by now the note it reads is as
+            // empty as the box is: without this, one press would delete two rows.
+            event.stopPropagation();
+            remove(cell);
+        });
 
         size(cell);
         markers(cell, cell.syntax || cell.error || "");
@@ -507,6 +532,19 @@
                 lua.flush(cell.id);
             },
             onkeydown: function (event) {
+                if (
+                    event.key === "Backspace" &&
+                    !input.value &&
+                    !event.ctrlKey &&
+                    !event.metaKey &&
+                    !event.altKey
+                ) {
+                    event.preventDefault();
+                    // Desmos has this key on the row too; see mount() above.
+                    event.stopPropagation();
+                    remove(cell);
+                    return;
+                }
                 if (event.key !== "Enter") return;
                 if (event.shiftKey) {
                     event.preventDefault();
@@ -660,6 +698,40 @@
         }
     }
 
+    /**
+     * Backspace in an empty cell: the row goes, the way an empty expression's does.
+     *
+     * `on-special-key-pressed` is Desmos' own answer to that key rather than a delete of our
+     * own, because the answer is more than a delete: it declines when the cell is the only
+     * item left, moves a folder's last cell out of the folder instead of deleting it, and
+     * leaves the caret at the end of the row above. None of that is worth reimplementing, and
+     * all of it is one undo step, as a delete from the item menu is.
+     *
+     * It reads the selected item, so the selection has to be this row. Clicking into a cell
+     * selects it (select() above), but a cell focused any other way - the one Shift+Enter just
+     * made, an Escape and back - may have left the selection elsewhere.
+     *
+     * The flush is not about saving an empty cell: it is what cancels the pending write that
+     * emptying the box left behind. setExpression *creates* an id it does not find, so a write
+     * that landed after the delete would put the row back as a plain note.
+     */
+    function remove(cell) {
+        lua.flush(cell.id);
+        drop(cell);
+
+        var controller = Calc && Calc.controller;
+        if (!controller) return;
+        try {
+            controller.dispatch({ type: "set-selected-id", id: cell.id });
+            controller.dispatch({
+                type: "on-special-key-pressed",
+                key: "Backspace"
+            });
+        } catch (error) {
+            console.warn("desmos: couldn't delete the empty cell", error);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // the chrome
     // -----------------------------------------------------------------------
@@ -730,72 +802,28 @@
     // Monaco
     // -----------------------------------------------------------------------
 
-    /** Ask for Monaco, once, the first time a cell is drawn. */
-    function want() {
-        if (loading) return loading;
-        loading = load().then(
-            function (monaco) {
-                api = monaco;
-                ready();
-            },
-            function (error) {
+    /**
+     * Ask ../../monaco.js for the editor, once. `now` is for a cell that is on the screen
+     * waiting for one; without it the load waits for the page to go idle, which is what the
+     * ask in init() does - nothing is waiting for it yet and the graph is still opening.
+     * Either way it is the same single load, and this only decides when it starts.
+     */
+    function want(now) {
+        var shared = window.__desmosExt.monaco;
+        var start = now ? shared.load() : shared.warm();
+        if (!loading)
+            loading = start.then(arrive, function (error) {
                 console.warn(
                     "desmos: Monaco didn't load, so Lua cells are plain textareas",
                     error
                 );
-            }
-        );
+            });
         return loading;
     }
 
-    function load() {
-        return new Promise(function (resolve, reject) {
-            var script = document.createElement("script");
-            script.src = MONACO + "/vs/loader.js";
-            script.onerror = function () {
-                reject(new Error("couldn't fetch " + script.src));
-            };
-            script.onload = function () {
-                // loader.js puts its AMD require on the window over anything of that name.
-                // The Desmos bundle ran long ago, so there is nothing left to confuse.
-                var amd = window.require;
-                amd.config({ paths: { vs: MONACO + "/vs" } });
-                window.MonacoEnvironment = { getWorkerUrl: workerUrl };
-                amd(
-                    ["vs/editor/editor.main"],
-                    function () {
-                        resolve(window.monaco);
-                    },
-                    reject
-                );
-            };
-            document.head.appendChild(script);
-        });
-    }
-
-    var worker = null;
-
-    /**
-     * A worker cannot be made from another origin, so this is the way round it that Monaco
-     * documents: a worker of ours, one line long, that pulls the real one in.
-     */
-    function workerUrl() {
-        if (!worker) {
-            var body =
-                "self.MonacoEnvironment=" +
-                JSON.stringify({ baseUrl: MONACO + "/" }) +
-                ";\nimportScripts(" +
-                JSON.stringify(MONACO + "/vs/base/worker/workerMain.js") +
-                ");\n";
-            worker = URL.createObjectURL(
-                new Blob([body], { type: "text/javascript" })
-            );
-        }
-        return worker;
-    }
-
     /** Monaco has arrived: give every cell already on screen a real editor. */
-    function ready() {
+    function arrive(monaco) {
+        api = monaco;
         complete();
         lua.cells.forEach(function (cell) {
             if (cell.box) mount(cell);

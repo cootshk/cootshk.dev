@@ -12,8 +12,10 @@
 // kept and Reset is how it is thrown away.
 //
 // The box itself is Monaco, the editor out of VS Code, for the syntax highlighting and the
-// completion its CSS language service brings. It is fetched when the tab is first opened and
-// not before, and until it arrives - or for good, if it never does - the box is a plain
+// completion its CSS language service brings. It is ../../../monaco.js' copy, shared with
+// extensions/lua, and it is asked for when the graphs modal is opened rather than when this
+// tab is - by the time anyone has read the tab headings and clicked this one, it is usually
+// already here. Until it arrives - or for good, if it never does - the box is a plain
 // textarea with a line gutter, which is worth keeping around: this tab is the way out of a
 // theme that has broken the page, and it should not need a CDN to be that.
 //
@@ -27,14 +29,9 @@
     /** Where Save leaves the sheet, beside "desmos-extensions" (extensions.js). */
     var STORAGE = "desmos-theme";
 
-    // Monaco, from the same CDN copy Vencord's CSS editor loads. Pinned to 0.52.2, the last
-    // release to ship the AMD build this uses - 0.53 replaced it with hashed ESM chunks.
-    //
-    // Cross-origin on purpose. The proxy rewrites any same-origin URL onto its own prefix
-    // (worker.js), so a copy of Monaco served from this site could not fetch its own modules;
-    // a host it has never heard of is passed through untouched, which is also how
-    // extensions/desmosMd gets highlight.js.
-    var MONACO = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min";
+    /** What a theme looks like, for an empty textarea that Monaco is not going to replace. */
+    var EXAMPLE =
+        ".dcg-calculator-api-container {\n    --dcg-accent-color: #c74440;\n}";
 
     // What ?theme= asks for, read now rather than when it is wanted: the address bar is
     // rewritten as graphs are opened and saved, and the answer should not move with it.
@@ -84,7 +81,13 @@
         key: "themes",
         label: "Themes",
         render: themesTab,
-        main: applyStart
+        main: applyStart,
+        // The modal is open, so this tab is one click away: fetch the editor now and the box
+        // is drawn as Monaco the moment it is asked for, instead of as a textarea that is
+        // replaced a second later. Nothing is waiting on it yet, so it goes when idle.
+        opening: function () {
+            monaco().warm();
+        }
     });
 
     /** The saved sheet, or "" - private browsing included. */
@@ -124,60 +127,9 @@
     // Monaco
     // -----------------------------------------------------------------------
 
-    // The load, kept so that closing and reopening the modal does not start another.
-    var loading = null;
-
-    /** Monaco's api, loading it if this is the first time it has been asked for. */
+    /** ../../../monaco.js: one copy of the editor, shared with extensions/lua. */
     function monaco() {
-        if (loading) return loading;
-        loading = new Promise(function (resolve, reject) {
-            var script = document.createElement("script");
-            script.src = MONACO + "/vs/loader.js";
-            script.onerror = function () {
-                reject(new Error("couldn't fetch " + script.src));
-            };
-            script.onload = function () {
-                // loader.js puts its AMD require on the window, over anything of that name
-                // that was there. By now the Desmos bundle has long since run - this is the
-                // first time the tab has been opened - so there is nothing left to confuse.
-                var amd = window.require;
-                amd.config({ paths: { vs: MONACO + "/vs" } });
-                window.MonacoEnvironment = { getWorkerUrl: workerUrl };
-                amd(
-                    ["vs/editor/editor.main"],
-                    function () {
-                        resolve(window.monaco);
-                    },
-                    reject
-                );
-            };
-            document.head.appendChild(script);
-        });
-        return loading;
-    }
-
-    var worker = null;
-
-    /**
-     * Where the language service - the completion, and the squiggles under a typo - runs.
-     * A worker cannot be made from another origin, so this is the way round that Monaco
-     * documents: a worker of our own, one line long, that pulls the real one in. The proxy
-     * prepends its bootstrap to a blob worker and patches importScripts inside it, which
-     * changes nothing here: the URL below is on a host it does not proxy.
-     */
-    function workerUrl() {
-        if (!worker) {
-            var body =
-                "self.MonacoEnvironment=" +
-                JSON.stringify({ baseUrl: MONACO + "/" }) +
-                ";\nimportScripts(" +
-                JSON.stringify(MONACO + "/vs/base/worker/workerMain.js") +
-                ");\n";
-            worker = URL.createObjectURL(
-                new Blob([body], { type: "text/javascript" })
-            );
-        }
-        return worker;
+        return window.__desmosExt.monaco;
     }
 
     // Monaco's copy of the text, made once and kept: the editor is thrown away with the
@@ -229,10 +181,6 @@
                 event.stopPropagation();
             });
         });
-        // Whichever box is in `host`: the textarea now, Monaco if and when it arrives.
-        var box = textbox();
-        var live = true;
-
         ui.el(
             root,
             null,
@@ -246,17 +194,35 @@
             host
         );
 
-        monaco().then(
-            function (api) {
-                if (live) box = code(api);
-            },
-            function (error) {
-                console.warn(
-                    "desmos: Monaco didn't load, so the theme box is a plain textarea",
-                    error
+        // Whichever box is in `host`. Monaco if it is already here - opening the modal asked
+        // for it (`opening` above), so by the time this tab is clicked it usually is, and
+        // then there is no textarea to be seen appearing and replaced. The textarea until
+        // then, if not: a box that cannot be typed into while a CDN is thought about is no
+        // use to anyone, least of all to someone here to undo a theme.
+        //
+        // Built after `host` is on the page: Monaco measures its container as it is created.
+        var here = monaco().api();
+        var box = here ? code(here) : textbox();
+        var live = true;
+
+        if (!here)
+            monaco()
+                .load()
+                .then(
+                    function (api) {
+                        if (live) box = code(api);
+                    },
+                    function (error) {
+                        console.warn(
+                            "desmos: Monaco didn't load, so the theme box is a plain textarea",
+                            error
+                        );
+                        // The textarea is the box for good, so it may as well say what goes
+                        // in one. Held back until now so that an example does not flash up
+                        // in a box that was about to be replaced.
+                        if (live) box.hint(EXAMPLE);
+                    }
                 );
-            }
-        );
 
         return function () {
             live = false;
@@ -316,8 +282,6 @@
                 autocapitalize: "off",
                 autocomplete: "off",
                 wrap: "off",
-                placeholder:
-                    ".dcg-calculator-api-container {\n    --dcg-accent-color: #c74440;\n}",
                 "aria-label": "Theme CSS",
                 oninput: function () {
                     draft = input.value;
@@ -348,6 +312,10 @@
                     input.value = css;
                     number();
                 },
+                /** Say what a theme looks like, once this is the box it will be typed into. */
+                hint: function (example) {
+                    input.placeholder = example;
+                },
                 dispose: function () {
                     host.textContent = "";
                 }
@@ -366,7 +334,7 @@
 
         /** Monaco, in place of whatever was in the box before it finished loading. */
         function code(api) {
-            box.dispose();
+            if (box) box.dispose();
             host.className = "cde-theme__editor cde-theme__editor--code";
 
             var editor = api.editor.create(host, {

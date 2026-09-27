@@ -862,8 +862,8 @@ async function main() {
     // editor.js with its commentary removed. Every check below is about what the code does, and
     // a source-text assertion a *comment* can satisfy proves nothing: the first version of the
     // gutter check passed against a doc comment describing the markup while the markup itself was
-    // hand-rolled and invisible. Block comments go, and so do whole-line `//` ones - not trailing
-    // ones, which would take the "//" out of the Monaco CDN URL with them.
+    // hand-rolled and invisible. Block comments go, and so do whole-line `//` ones - trailing
+    // ones are left alone, being part of the line they are on.
     const code = ed
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .split("\n")
@@ -942,6 +942,46 @@ async function main() {
         "the keyboard survives Monaco replacing the fallback textarea",
         /cell\.box\.contains\(document\.activeElement\)/.test(code),
         "the first cell is made before Monaco has loaded, and would lose its caret"
+    );
+    ok(
+        "Backspace in an empty cell deletes it, on Desmos' own terms",
+        /key: "Backspace"/.test(code) &&
+            /type: "on-special-key-pressed"/.test(code),
+        "a delete of our own would take the last item left and a folder's last cell with it"
+    );
+    ok(
+        "and only when there is nothing left to delete",
+        /getValue\(\) !== ""/.test(code) && /!input\.value/.test(code),
+        "both boxes have to ask, or Backspace would never delete a character"
+    );
+    ok(
+        "and stops the key reaching the row",
+        /event\.stopPropagation\(\);\n\s*remove\(cell\)/.test(code),
+        "Desmos binds Backspace on the row too, and would delete a second one"
+    );
+    ok(
+        "the pending write is cancelled before the row goes",
+        /function remove\(cell\) \{\n\s*lua\.flush\(cell\.id\);/.test(code),
+        "setExpression creates an id it cannot find, so a late write resurrects the row"
+    );
+
+    // 28b. Monaco is the shared copy, not a second one. Two loaders means two loads: the
+    // second brings its own module registry and runs the whole editor again.
+    ok(
+        "Monaco comes from the shared loader",
+        /__desmosExt\.monaco/.test(code),
+        "desmos/monaco.js owns the one copy the Themes tab shares"
+    );
+    ok(
+        "and this file has no CDN of its own",
+        !/cdn\.jsdelivr|vs\/loader\.js|MonacoEnvironment/.test(ed),
+        "a second loader.js re-runs editor.main.js over the top of the first"
+    );
+    ok(
+        "a cell on the screen does not wait for the page to go idle",
+        /want\(true\)/.test(code) &&
+            /now \? shared\.load\(\) : shared\.warm\(\)/.test(code),
+        "the load is started when the extension does, and promoted when something is waiting"
     );
 
     // 29. a plain global write is an export, and so is _G
