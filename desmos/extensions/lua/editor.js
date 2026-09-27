@@ -89,6 +89,7 @@
 
         cell.node = node;
         cell.host = build(cell);
+        inset(cell.host, anchor);
         if (anchor && anchor.nextSibling)
             parent.insertBefore(cell.host, anchor.nextSibling);
         else parent.appendChild(cell.host);
@@ -97,6 +98,22 @@
         render(cell);
 
         if (pending === cell.id) focus(cell);
+    }
+
+    /**
+     * Stand where the note's own text stands.
+     *
+     * Desmos insets everything in a note - `.dcg-fixed-width-element` is
+     * `padding: 15px 35px 9px 53px` - and that 53px on the left is what clears the row's icon
+     * gutter. A box inserted beside it without the same inset starts underneath the gutter,
+     * where its left edge is cut off and cannot be clicked. Taken from the sibling rather than
+     * hard-coded, so the folder variant and any future change come along for free.
+     */
+    function inset(host, anchor) {
+        if (!anchor || !window.getComputedStyle) return;
+        var style = window.getComputedStyle(anchor);
+        if (style.paddingLeft) host.style.paddingLeft = style.paddingLeft;
+        if (style.paddingRight) host.style.paddingRight = style.paddingRight;
     }
 
     /** The row has gone - scrolled away, not deleted. Keep the model; drop the DOM. */
@@ -280,6 +297,7 @@
         if (view) editor.restoreViewState(view);
 
         active = cell;
+        watch(cell.box);
         fit();
         editor.focus();
     }
@@ -290,6 +308,7 @@
         active = null;
 
         views.set(cell.id, editor.saveViewState());
+        unwatch();
         if (live.parentNode) live.parentNode.removeChild(live);
         if (cell.box) {
             cell.box.classList.remove("cde-lua__box--live");
@@ -340,12 +359,14 @@
         p.run.title = cell.on ? "Stop this cell" : "Run this cell";
         p.run.classList.toggle("cde-lua__run--on", !!cell.on);
 
+        // Nothing for "off": the button already says so, and a cell that has never run has
+        // nothing to report.
         var note = "";
         if (cell.syntax) note = "syntax error";
         else if (cell.co && cell.parked) note = "waiting for the graph";
         else if (cell.co) note = "running";
-        else if (!cell.on) note = "off";
-        else if (cell.exports.size) note = cell.exports.size + " exported";
+        else if (cell.on && cell.exports.size)
+            note = cell.exports.size + " exported";
         p.status.textContent = note;
 
         p.out.textContent = (cell.output || []).join("\n");

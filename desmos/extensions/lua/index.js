@@ -16,15 +16,31 @@
 //   - `--!lua` is a Lua comment, so the note's text *is* the chunk. Nothing is reassembled and
 //     nothing is escaped; the bytes in the graph are the bytes the VM compiles.
 //   - Notes round-trip through getState/setState, Desmos' undo stack, this site's .dcg files
-//     and desmos.com's own save. An item type Desmos has never heard of survives none of
-//     those, and the first one it fails is `settings/tabs/savedGraphs.js`, which setStates the
-//     whole graph every time it writes metadata.
+//     and desmos.com's own save. An item type Desmos has never heard of survives the *server* -
+//     that was tested, and a `type:"lua"` item comes back from a snapshot link byte for byte -
+//     but not the client: see "A real item type" in ./README.md for the sites that would have
+//     to be taught about it, one of which throws rather than shrugging.
 //   - With this extension off, a cell is a note you can still read. Nothing is lost.
 //
 // The sentinel is not part of the chunk: `parse` slices it off, and what the VM compiles is
 // exactly what the editor holds. So an error on Lua line 3 is an error on editor line 3, and
 // there is no arithmetic to get wrong.
 (function () {
+    /**
+     * The word that turns an expression into a cell, as it looks by the time it reaches the
+     * state. Desmos has no magic words of its own - `table` is not one either - so this is
+     * ours, and it is lenient about the wrappers MathQuill sometimes puts round letters.
+     */
+    function isTrigger(latex) {
+        return (
+            String(latex == null ? "" : latex)
+                .replace(/\\(?:operatorname|mathrm|mathit|text)/g, "")
+                .replace(/\\[ ,;:!>]/g, "")
+                .replace(/[\s{}]/g, "")
+                .toLowerCase() === "lua"
+        );
+    }
+
     /** The first line of a cell. Anything after the word is a pragma - see `pragmas`. */
     var SENTINEL = /^--!lua([ \t][^\n]*)?(?:\n|$)/;
 
@@ -58,6 +74,59 @@
         Object.assign(lua, {
             id: "lua",
 
+            // Everything this extension changes about Desmos itself.
+            patches: [
+                // Lua's exports, handed to Desmos as statements rather than as expressions.
+                //
+                // requestParseForAllItems() builds a map of everything on the graph that has latex
+                // in it, then diffs that map against the last one and calls the evaluator's
+                // addStatement / removeStatement for whatever changed. Injecting into the map, at
+                // the last moment before the diff, means a Lua value is a statement Desmos
+                // evaluates like any other - with no item in the expression list, nothing in the
+                // saved graph, and nothing on the undo stack.
+                //
+                // It also means the reaper is Desmos' own: an export this cell no longer makes is
+                // simply absent from the map, and the diff removes the statement.
+                {
+                    match: /(\i)&&\((\i)\[\1\.id\]=\1\);(for\(let \i in )/,
+                    replace: "$1&&($2[$1.id]=$1);$self.inject($2);$3",
+                    count: 1
+                },
+
+                // "lua" in the + menu, beside table - the comparison people reach for.
+                //
+                // Desmos builds each entry of that menu with one component, so the cheapest way
+                // in is to let "lua" take the same path the built-in types take: the icon, the
+                // label and the tap all come from Desmos' own button. It asks three questions
+                // about a type, two of which throw on one they have not heard of, so all three
+                // get an answer. Its tap dispatches `new-lua`, which ready() below answers.
+                {
+                    match: /(\i)\.push\("table"\),/,
+                    replace: '$&$1.push("lua"),',
+                    count: 1
+                },
+                {
+                    match: /case"expression":case"note":case"table":case"folder":/,
+                    replace: 'case"lua":$&',
+                    count: 1
+                },
+                {
+                    match: /getAriaLabel\(\)\{let (\i)=this\.props\.itemType\(\);switch\(\1\)\{/,
+                    replace: '$&case"lua":return"Add a Lua cell";',
+                    count: 1
+                },
+                {
+                    match: /getIconText\(\)\{let (\i)=this\.props\.itemType\(\);switch\(\1\)\{/,
+                    replace: '$&case"lua":return"lua";',
+                    count: 1
+                },
+                {
+                    match: /getExpressionIcon\(\)\{switch\(this\.props\.itemType\(\)\)\{/,
+                    replace: '$&case"lua":return"dcg-icon-new-note";',
+                    count: 1
+                }
+            ],
+
             SENTINEL: SENTINEL,
             HEADER: HEADER,
 
@@ -66,7 +135,16 @@
 
             ready: function (calc) {
                 Calc = calc;
+
+                // An extension with `patches` is registered as a copy of the object handed to
+                // extension() (extensions.js:92), and that copy is the one on the window - so
+                // it is the one bridge.js, runner.js and editor.js add themselves to. Follow
+                // it, or `lua.bridge` here would be forever undefined.
+                lua = window.Extensions.lua;
                 lua.Calc = calc;
+
+                menu();
+                tidy();
 
                 if (lua.bridge) lua.bridge.init(calc);
                 if (lua.editor) lua.editor.init(calc);
@@ -114,15 +192,112 @@
             /** Put a cell where `id` is, converting the expression that is there. */
             convert: convert,
 
-            /** Add a cell after the current selection. The console's way in. */
-            add: function () {
-                var id = String(freshId());
-                setExpression({ id: id, type: "text", text: HEADER + "\n" });
-                rescan();
-                return id;
-            }
+            /** Add a cell after the current selection. The + menu and the console. */
+            add: add,
+
+            /**
+             * Put every cell's exports into the map Desmos is about to turn into statements.
+             * Called from the patch above, so `map` is Desmos' own.
+             *
+             * Only cells that are switched on contribute: off means a cell is not running, and
+             * a definition with no visible source and no cell behind it would be a mystery.
+             */
+            inject: function (map) {
+                cells.forEach(function (cell) {
+                    if (!cell.on) return;
+                    cell.exports.forEach(function (spec, name) {
+                        var id = "cde-lua-" + cell.id + "-" + name;
+                        map[id] = {
+                            id: id,
+                            type: "statement",
+                            latex: spec.latex,
+                            shouldGraph: spec.plot === true
+                        };
+                    });
+                });
+            },
+
+            /**
+             * Ask Desmos to look again. Everything a cell exported reaches the graph through
+             * this - inject() is only called from inside the parse.
+             */
+            reparse: reparse
         })
     );
+
+    /** Re-run Desmos' parse, which is what calls inject(). Coalesced into one per turn. */
+    var parsing = null;
+
+    function reparse() {
+        if (parsing || !Calc) return;
+        parsing = setTimeout(function () {
+            parsing = null;
+            try {
+                Calc.controller.requestParseForAllItems();
+            } catch (error) {
+                console.error(
+                    "desmos: couldn't hand Lua's exports to the evaluator",
+                    error
+                );
+            }
+        }, 0);
+    }
+
+    /**
+     * Clear out the `.lua` folder an older version of this extension left on the graph.
+     *
+     * Exports used to be real expressions in a hidden folder; they are statements now, so the
+     * folder is dead weight in any graph saved while it existed. Removing it is a one-off on
+     * load, and silent - there is nothing in it that was the user's.
+     */
+    function tidy() {
+        var state = Calc.getState();
+        var list = (state.expressions || {}).list;
+        if (!list) return;
+
+        var folder = null;
+        for (var i = 0; i < list.length; i++)
+            if (list[i].type === "folder" && list[i].title === ".lua")
+                folder = list[i].id;
+
+        var stale = list.filter(function (item) {
+            return (
+                item.id.indexOf("cde-lua-") === 0 ||
+                (folder && item.folderId === folder) ||
+                item.id === folder
+            );
+        });
+        if (!stale.length) return;
+
+        var doomed = {};
+        stale.forEach(function (item) {
+            doomed[item.id] = true;
+        });
+        state.expressions.list = list.filter(function (item) {
+            return !doomed[item.id];
+        });
+        commit(state);
+    }
+
+    /**
+     * Answer the + menu's Lua entry. Its button is Desmos' own, and Desmos' own button taps by
+     * dispatching `new-<type>` - so the entry works by us knowing what `new-lua` means.
+     *
+     * Wrapping a controller method at runtime rather than patching the reducer: the same shape
+     * extensions/matrices uses on getMathquillConfig, and one less pattern to go stale.
+     */
+    function menu() {
+        var controller = Calc.controller;
+        var dispatch = controller.dispatch;
+        controller.dispatch = function (action) {
+            if (action && action.type === "new-lua") {
+                add();
+                dispatch.call(controller, { type: "close-add-expression" });
+                return;
+            }
+            return dispatch.apply(controller, arguments);
+        };
+    }
 
     // -----------------------------------------------------------------------
     // what a cell is
@@ -177,7 +352,7 @@
             // The trigger: an expression that is just the word. Desmos does this for `table`
             // and `folder`; `lua` is not in autoOperatorNames, so three implicitly multiplied
             // variables is exactly the latex we get.
-            if (item.type === "expression" && item.latex === "lua") {
+            if (item.type === "expression" && isTrigger(item.latex)) {
                 convert(item);
                 continue;
             }
@@ -207,10 +382,6 @@
                     reads: new Set(),
                     exports: new Map(),
                     output: [],
-
-                    // export id -> the latex we last wrote for it, so a write that
-                    // would change nothing is skipped and the undo stack stays short
-                    written: new Map(),
 
                     co: null,
                     parked: false,
@@ -248,18 +419,88 @@
         paint();
     }
 
-    /** Turn the expression at `item.id` into an empty cell. */
+    /**
+     * Turn the expression at `item.id` into an empty cell.
+     *
+     * Not setExpression: for an item that already exists it dispatches
+     * set-expression-properties-from-api against the model that is there, and a type is not one
+     * of the properties that can be set - so it silently does nothing. Splicing the list and
+     * setting the state back is the way to replace an item with one of another type, and is
+     * what settings/tabs/savedGraphs.js does for the same reason.
+     */
     function convert(item) {
-        setExpression({ id: item.id, type: "text", text: HEADER + "\n" });
-        // The conversion is its own undo step, so Ctrl+Z gives the expression back.
+        var state = Calc.getState();
+        var list = (state.expressions || {}).list;
+        if (!list) return;
+
+        var at = -1;
+        for (var i = 0; i < list.length; i++)
+            if (list[i].id === item.id) {
+                at = i;
+                break;
+            }
+        if (at === -1) return;
+
+        list[at] = note(item.id, item.folderId);
+        commit(state);
         if (lua.editor) lua.editor.focusSoon(item.id);
         rescan();
     }
 
+    /** An empty cell, as an item model. */
+    function note(id, folderId) {
+        var item = { type: "text", id: String(id), text: HEADER + "\n" };
+        if (folderId) item.folderId = folderId;
+        return item;
+    }
+
+    /** A new cell after whatever is selected, or at the end. The + menu's way in. */
+    function add() {
+        var state = Calc.getState();
+        var list = (state.expressions || {}).list;
+        if (!list) return null;
+
+        var fresh = note(freshId());
+        var at = list.length;
+
+        try {
+            var selected =
+                Calc.controller.getSelectedItem &&
+                Calc.controller.getSelectedItem();
+            if (selected) {
+                for (var i = 0; i < list.length; i++)
+                    if (list[i].id === selected.id) {
+                        at = i + 1;
+                        break;
+                    }
+                // A cell added next to something in a folder belongs in that folder.
+                if (selected.folderId) fresh.folderId = selected.folderId;
+            }
+        } catch (error) {
+            // The end of the list is a perfectly good answer.
+        }
+
+        list.splice(at, 0, fresh);
+        commit(state);
+        if (lua.editor) lua.editor.focusSoon(fresh.id);
+        rescan();
+        return fresh.id;
+    }
+
+    /** Put a state back, as one undo step rather than a place you cannot get out of. */
+    function commit(state) {
+        writing = true;
+        try {
+            Calc.setState(state, { allowUndo: true });
+        } finally {
+            writing = false;
+        }
+    }
+
     /**
-     * setExpression, with our echo guard up. Desmos changing an item's type in place is the
-     * thing to watch here; if it ever refuses, this is the one place that has to learn the
-     * getState/splice/setState way round.
+     * setExpression, with our echo guard up. For updating a property of an item that already
+     * exists - a cell's text - which is all it is used for. It cannot change an item's *type*:
+     * see convert().
      */
     function setExpression(spec) {
         writing = true;

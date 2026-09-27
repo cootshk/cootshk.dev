@@ -38,7 +38,7 @@
         },
         "lua": {
             "name": "Lua",
-            "description": "Lua scripting cells in the expression sheet. Type \"lua\" into an empty expression. A cell never runs until you switch it on.",
+            "description": "Lua scripting cells in the expression sheet. Add one from the + menu, or type \"lua\" into an empty expression. Values a cell exports go straight to the evaluator, so nothing is added to the graph. A cell never runs until you switch it on.",
             "supports": ["graphing", "3d"],
             "file": ["index.js", "bridge.js", "runner.js", "editor.js"],
             "css": true

@@ -69,8 +69,15 @@
     function setOn(cell, on) {
         if (cell.on === on) return;
         cell.on = on;
-        if (on) start(cell);
-        else stop(cell);
+        if (on) {
+            start(cell);
+        } else {
+            stop(cell);
+            // Off contributes nothing. A definition with no running cell behind it and no item
+            // in the list to point at would be a value from nowhere.
+            cell.exports = new Map();
+            lua.reparse();
+        }
         render(cell);
     }
 
@@ -269,12 +276,9 @@
     function done(cell) {
         release(cell);
         remember(cell);
-
-        try {
-            lua.bridge.writeExports(cell);
-        } catch (error) {
-            console.error("desmos: couldn't write a Lua cell's exports", error);
-        }
+        // Desmos' own parse picks the exports up from lua.inject(); nothing is written to the
+        // graph, so there is nothing here to undo or clean up.
+        lua.reparse();
 
         // A read that could not park - inside a JS callback, or table.sort's comparator - took
         // nil rather than a value. Go round again now that the helper has been made.
@@ -289,6 +293,9 @@
     function fail(cell, message) {
         release(cell);
         remember(cell);
+        // A run that died part-way still made whatever it made before it died; let the graph
+        // show that rather than silently keeping the last good set.
+        lua.reparse();
         cell.error = clean(cell, message);
         console.error("lua:", cell.error);
         render(cell);
@@ -314,11 +321,8 @@
         deps.forEach(function (readers) {
             readers.delete(cell.id);
         });
-        try {
-            lua.bridge.reap(cell, null);
-        } catch (error) {
-            console.error("desmos: couldn't clean up after a Lua cell", error);
-        }
+        cell.exports = new Map();
+        lua.reparse();
     }
 
     /** File this run's reads, so a change to any of them comes back to this cell. */

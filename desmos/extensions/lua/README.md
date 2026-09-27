@@ -1,17 +1,19 @@
 # Lua
 
-Lua cells in the expression sheet. Type `lua` into an empty expression and the row becomes an
-editor; a cell can read the graph's values as ordinary globals and hand values back by
-assigning to `Desmos`.
+Lua cells in the expression sheet. Pick **lua** from the `+` menu - next to note and table - or
+type `lua` into an empty expression, and the row becomes an editor; a cell can read the graph's
+values as ordinary globals and hand values back by assigning to `Desmos`.
 
 Nothing runs until you press the ▶ on the cell, and **every cell is off on every page load**.
 A graph you have just opened is somebody else's code.
 
 ## A cell
 
-A cell is a note whose text begins `--!lua`, which is why it survives saving, undo, `.dcg`
-files and desmos.com without this extension having to teach Desmos a new item type - and why,
-with the extension off, you still see your Lua rather than losing it.
+A cell is a note whose text begins `--!lua`, which is why it survives saving, undo, version
+history, `.dcg` files and desmos.com without this extension having to teach Desmos a new item
+type - and why, with the extension off, you still see your Lua rather than losing it. `--!lua`
+is a Lua comment, so the note's text _is_ the chunk: nothing is reassembled and nothing is
+escaped.
 
 ```lua
 --!lua
@@ -19,6 +21,51 @@ Desmos.k = a * 2
 ```
 
 Words after `--!lua` are pragmas. There is one: `unsafe`.
+
+Desmos has no typed-word conversions of its own - `table` is not one either, whatever the
+folklore says - so the `lua` trigger is this extension's. It fires the moment an expression's
+latex is exactly `lua`, which means you cannot type `lua` as a product of three variables, and
+cannot type a longer name that passes through it on the way: `lua` converts before the `p` of
+`luap` arrives. Undo gives the expression back.
+
+The `+` menu is the route that does not depend on any of that, and
+`Extensions.lua.add()` from the console is a third.
+
+## A real item type
+
+A cell would read better as its own item type - `{type:"lua", source:"..."}` - and this is what
+that would take, written down because finding it was the expensive part.
+
+**desmos.com is not the obstacle.** The server stores `state` as an opaque JSON string and does
+no schema validation: a graph containing a `type:"lua"` item posted to the endpoint behind
+`createSnapshotLink()` came back from its `stateUrl` byte for byte, `source` intact. That was
+the gate this extension was built against, and it was the wrong gate.
+
+The client is the obstacle. `setState` branches, and the branches fail differently:
+
+```js
+t?.useIncrementalUpdate
+    ? gU(this.listModel, pre(this.listModel, e.expressions))
+    : dre(this.listModel, e.expressions, t || {});
+```
+
+| site             | what it does with a type it does not know                                                                                                                                                            |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Hv(r, e)`       | state -> item model. `default: return e` - hands back the raw state object, which is then pushed into `__itemModelArray` and `__itemIdToModel`. Not dropped; a foreign object where a model belongs. |
+| `pre(r, e)`      | the `useIncrementalUpdate` path. ``default: throw new Error(`Unknown item type: ${JSON.stringify(n)}`)`` - it **throws**.                                                                            |
+| the row renderer | the item-type switch. The `+` menu patch in `index.js` already sits on its sibling (`case"expression":case"note":case"table":case"folder":`).                                                        |
+| the serializer   | the other direction, for `getState`.                                                                                                                                                                 |
+
+Three `"Unknown item type"` guards exist in the state-to-item path in total.
+
+Note `allowUndo` and `useIncrementalUpdate` are independent options - only the second selects
+the throwing path. So this repo's own saves (`settings/tabs/savedGraphs.js:222`, and `convert`,
+`add` and `tidy` here) take the shrugging `dre` path, while **version-history restore** and
+calc-instance sync pass `useIncrementalUpdate:true` and would throw.
+
+That is five or so patches on top of the six here, each of which drops the whole extension when
+it misses - and the failure mode is a graph whose cells render as nothing. Build it behind the
+note form, not instead of it, so a missed patch degrades rather than loses someone's code.
 
 ## Reading the graph
 
@@ -50,8 +97,15 @@ Desmos.get("\\left(P\\right).x")   -- a point's components; see Limits
 
 ## Writing to the graph
 
-Assign to `Desmos`. Each assignment becomes a real, hidden expression in a collapsed `.lua`
-folder, and stops being one when the cell stops making it.
+Assign to `Desmos`. Each assignment becomes a **statement in Desmos' evaluator** - not an
+expression in the list. Desmos resolves it exactly as it would a definition you had typed, but
+there is no item on the sheet, nothing in the saved graph, and nothing on the undo stack.
+
+How: `requestParseForAllItems()` builds a map of everything on the graph with latex in it, then
+diffs that map against the previous one and calls the evaluator's `addStatement` /
+`removeStatement` for whatever changed. One patch injects the cells' exports into that map at
+the last moment before the diff (`index.js`). The reaper comes free with it - an export a cell
+no longer makes is simply absent from the map, so Desmos removes the statement itself.
 
 ```lua
 Desmos.k = 42                      -- k=42
@@ -70,9 +124,11 @@ Names are one letter and an optional subscript, because that is what Desmos will
 
 ### Functions
 
-**A Lua function cannot become a Desmos function.** Desmos evaluates in a worker and wants
-derivatives, interval arithmetic and list broadcasting from anything it is asked to call; a
-closure gives it none of those. Two things work instead.
+**A Lua function cannot become a Desmos function.** Values are one thing - a statement's latex
+is just text, so a number or a list travels fine - but a _call_ is another: Desmos evaluates in
+a worker, and wants derivatives, interval arithmetic and list broadcasting from anything it
+calls. A closure gives it none of those, and it is on the wrong thread besides. Two things work
+instead.
 
 Write the latex yourself - Lua is very good at this, and it is the reason to reach for a cell
 in the first place:
@@ -91,9 +147,10 @@ Or sample it, which plots:
 Desmos.sample("g", function(x) return math.sin(x) ^ 3 end, -10, 10, 500)
 ```
 
-`sample` writes `g_{x}`, `g_{y}` and a point list `g`. It is N points with straight lines
-between them: no derivative, wrong across a discontinuity, and nothing outside the range you
-gave. That is the honest shape of a Lua function on a Desmos graph.
+`sample` defines `g_{x}`, `g_{y}` and a point list `g` - the last of which is the one marked to
+be plotted. It is N points with straight lines between them: no derivative, wrong across a
+discontinuity, and nothing outside the range you gave. That is the honest shape of a Lua
+function on a Desmos graph.
 
 ## `print`
 
@@ -136,6 +193,8 @@ instruction and will still hurt.
 - An undefined name and `NaN` look the same, because to the evaluator they are.
 - A cell that reads a value from somewhere it cannot pause - a `js` callback, `table.sort`'s
   comparator - takes `nil` that once and is re-run from the top when the value arrives.
+- An export is invisible: there is no row to click, so a wrong value has to be debugged from the
+  cell that made it. Switching a cell off withdraws everything it defined.
 - Cells _start_ in sheet order. They do not finish in it, because any of them may pause on a
   read. "A later cell sees an earlier cell" is the rule that holds.
 - Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
@@ -144,12 +203,19 @@ instruction and will still hurt.
 ## Tests
 
 ```
-node desmos/extensions/lua/test.js
+node desmos/extensions/lua/test.js            # the Lua half, offline
+node desmos/extensions/lua/patches.test.js    # do the + menu patches still match?
 ```
 
-The Lua half - bridge.js and runner.js - against the real VM out of `cdn/fengari-web.js` and a
-stub `Calc` that reports values on a timer, so the pause-and-resume path is exercised rather
-than assumed. No browser, and nothing to install.
+`test.js` runs index.js, bridge.js and runner.js against the real VM out of
+`cdn/fengari-web.js` and a stub `Calc` that reports values on a timer - so the pause-and-resume
+path is exercised rather than assumed. No browser, nothing to install.
+
+`patches.test.js` fetches the live Desmos bundle and applies the patches with the loader's own
+`canonicalizeMatch`, checking each lands as often as it claims and that the result still parses.
+Worth running after a Desmos deploy: a patch that matches nothing drops the whole extension for
+that load, which here means a graph's cells show as raw notes. The Patch Helper tab is the
+interactive version, and where to go when this says something has moved.
 
 ## The files
 

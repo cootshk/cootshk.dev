@@ -6,10 +6,23 @@
  * is hard to type into, and because the coloured <pre> and the live editor have to be the same
  * colour or focusing a cell would make it flinch. Same reasoning as the Themes tab. */
 
-/* A cell is a note, so Desmos has drawn note machinery we are standing in front of. */
+/* A cell is a note, so Desmos has drawn note machinery we are standing in front of. Two pieces:
+ * the .dcg-displayTextarea that shows the text, and - the one that matters - Desmos' own
+ * textarea, which is
+ *
+ *     .dcg-smart-textarea-container textarea.dcg-smart-textarea {
+ *         opacity: 0; position: absolute; top: 0; left: 0; bottom: 0; right: 0; height: 100%
+ *     }
+ *
+ * an invisible sheet over the whole container. Left alone it swallows every click meant for the
+ * editor underneath it.
+ *
+ * Both named exactly. A blanket `textarea` here would also catch Monaco's own
+ * <textarea class="inputarea">, which is how Monaco takes the mouse and the keyboard - hiding
+ * that gives you a box you cannot click into or type in, which looks like the editor being
+ * broken rather than like a stylesheet being too eager. */
 [data-cde-lua] .dcg-displayTextarea,
-[data-cde-lua] .dcg-textarea,
-[data-cde-lua] textarea:not(.cde-lua__plain) {
+[data-cde-lua] textarea.dcg-smart-textarea {
     display: none !important;
 }
 
@@ -17,7 +30,17 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 4px 6px 6px;
+    box-sizing: border-box;
+    /* The left and right insets are copied from the sibling we stand next to, in editor.js:
+     * Desmos' .dcg-fixed-width-element is `padding: 15px 35px 9px 53px`, and that 53px is what
+     * clears the row's icon gutter. Without it the box starts underneath the gutter, where its
+     * left edge is both cut off and unclickable. */
+    padding-top: 4px;
+    padding-bottom: 6px;
+    /* The row's .dcg-main is white-space: nowrap; wrapping inside the box is the box's business. */
+    white-space: normal;
+    /* Without this a long line makes the whole cell wider than the sheet instead of scrolling. */
+    min-width: 0;
     font-size: 13px;
 }
 
@@ -66,6 +89,12 @@
 
 .cde-lua__box {
     position: relative;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    /* Long lines scroll inside the box - the <pre> and the textarea do their own, and Monaco
+     * brings its own scrollbars - rather than widening the cell. */
     overflow: hidden;
     border: 1px solid #333;
     border-radius: 3px;
@@ -80,6 +109,7 @@
 .cde-lua__live {
     width: 100%;
     height: 100%;
+    min-height: 20px;
 }
 
 /* Kept in step with FONT and LINE in editor.js: the resting box has to be exactly as tall as
@@ -101,12 +131,15 @@
 
 .cde-lua__static {
     display: block;
+    box-sizing: border-box;
+    max-width: 100%;
     overflow-x: auto;
     cursor: text;
 }
 
 .cde-lua__plain {
     display: block;
+    box-sizing: border-box;
     width: 100%;
     max-height: 480px;
     overflow: auto;

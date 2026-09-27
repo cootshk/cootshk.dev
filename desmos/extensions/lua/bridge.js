@@ -15,9 +15,13 @@
 // and lua_isyieldable is the test; there the read gives nil and the cell is marked stale, to
 // be re-run from the top once the value lands.
 //
-// Writing is the dull direction on purpose. `Desmos.k = 5` writes a real expression into a
-// hidden folder; a plain global write does not. __newindex fires for every new global, so
-// exporting them all would turn a forgotten `local` into an expression on someone's graph.
+// Writing is the dull direction on purpose. `Desmos.k = 5` records an export; a plain global
+// write does not. __newindex fires for every new global, so exporting them all would turn a
+// forgotten `local` into a definition on someone's graph.
+//
+// An export never becomes an item in the expression list. It is handed straight to Desmos'
+// evaluator as a statement - see the patch in ./index.js - so it leaves nothing in the saved
+// graph, nothing on the undo stack, and no folder to tidy up.
 //
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
@@ -41,9 +45,6 @@
      */
     var NAME = /^([A-Za-z])(?:_([A-Za-z0-9]+))?$/;
 
-    /** The folder exports are written into. Hidden, like Desmos' own geometry folder. */
-    var FOLDER = ".lua";
-
     /** latex -> { h, ready, value, wake: [] }. One HelperExpression per name asked for. */
     var helpers = new Map();
 
@@ -61,8 +62,6 @@
         pushValue: pushValue,
         begin: begin,
         finish: finish,
-        writeExports: writeExports,
-        reap: reap,
         names: names,
 
         /** runner.js fills these in. */
@@ -396,7 +395,7 @@
         if (!current) return 0;
         current.exports.set(key(lhs), {
             latex: lhs + "=" + rhs,
-            hidden: C.lua_isnil(co, 3) ? false : !C.lua_toboolean(co, 3)
+            plot: C.lua_isnil(co, 3) ? false : !!C.lua_toboolean(co, 3)
         });
         return 0;
     }
@@ -444,15 +443,16 @@
         var yn = base + "_{y}";
         current.exports.set(key(xn), {
             latex: xn + "=" + list(xs),
-            hidden: true
+            plot: false
         });
         current.exports.set(key(yn), {
             latex: yn + "=" + list(ys),
-            hidden: true
+            plot: false
         });
+        // The one that is meant to be seen.
         current.exports.set(key(base), {
             latex: "\\left(" + xn + "," + yn + "\\right)",
-            hidden: false
+            plot: true
         });
         return 0;
     }
@@ -482,7 +482,7 @@
             return fail(co, 'cannot export "' + name + '": ' + rhs.error);
         current.exports.set(key(latex), {
             latex: latex + "=" + rhs.latex,
-            hidden: true
+            plot: false
         });
         return 0;
     }
@@ -623,66 +623,6 @@
         return 0;
     }
 
-    // -----------------------------------------------------------------------
-    // the exports folder
-    // -----------------------------------------------------------------------
-
-    /** The id of the hidden folder exports live in, making it if it is not there. */
-    function folder() {
-        var list = (Calc.getState().expressions || {}).list || [];
-        for (var i = 0; i < list.length; i++)
-            if (list[i].type === "folder" && list[i].title === FOLDER)
-                return list[i].id;
-
-        var id = "cde-lua-folder";
-        Calc.setExpression({
-            type: "folder",
-            id: id,
-            title: FOLDER,
-            // Hidden the way Desmos' own geometry folder is: this is machinery, not the graph.
-            secret: true,
-            collapsed: true
-        });
-        return id;
-    }
-
-    /** Put a cell's exports on the graph, and take away the ones it no longer makes. */
-    function writeExports(cell) {
-        var prefix = "cde-lua-" + cell.id + "-";
-        var wanted = new Set();
-
-        if (cell.exports.size) {
-            var fid = folder();
-            cell.exports.forEach(function (spec, name) {
-                var id = prefix + name;
-                wanted.add(id);
-                if (cell.written.get(id) === spec.latex) return;
-                cell.written.set(id, spec.latex);
-                Calc.setExpression({
-                    id: id,
-                    type: "expression",
-                    folderId: fid,
-                    latex: spec.latex,
-                    hidden: spec.hidden
-                });
-            });
-        }
-
-        reap(cell, wanted);
-    }
-
-    /** Remove the expressions this cell used to make and does not make any more. */
-    function reap(cell, keep) {
-        var prefix = "cde-lua-" + cell.id + "-";
-        var list = (Calc.getState().expressions || {}).list || [];
-        list.forEach(function (item) {
-            if (item.id.indexOf(prefix) !== 0) return;
-            if (keep && keep.has(item.id)) return;
-            cell.written.delete(item.id);
-            Calc.removeExpression({ id: item.id });
-        });
-    }
-
     /** Every name currently defined on the graph, for the editor's completion list. */
     function names() {
         var list = (Calc.getState().expressions || {}).list || [];
@@ -698,5 +638,4 @@
     }
 
     lua.bridge.grantJs = grantJs;
-    lua.bridge.folder = folder;
 })();

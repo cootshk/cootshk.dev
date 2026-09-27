@@ -58,6 +58,9 @@ global.extension = (def) => {
 // Values arrive on a timer, which is the whole point: it forces the yield/resume path.
 const GRAPH = { a: 5, b: 3, L: [1, 2, 3] };
 const observers = [];
+let selected = null;
+const dispatched = [];
+let reparsed = 0;
 // What Calc.observeEvent("change.cdeLua") would fire. Rescanning is how index.js notices a
 // note that has appeared, so the harness has to do it the same way the graph would.
 const change = () => observers.forEach((cb) => cb());
@@ -65,7 +68,12 @@ let list = [];
 const helpers = [];
 
 const Calc = {
-    getState: () => ({ expressions: { list: list.slice() } }),
+    // Desmos hands back a copy, and convert()/add() edit the copy before setting it back - so
+    // the stub has to copy the items too, or a test would pass on a mutation Desmos would not
+    // have kept.
+    getState: () => ({
+        expressions: { list: list.map((i) => Object.assign({}, i)) }
+    }),
     setExpression(spec) {
         const at = list.findIndex((i) => i.id === spec.id);
         if (at === -1) list.push(Object.assign({}, spec));
@@ -74,11 +82,25 @@ const Calc = {
     removeExpression({ id }) {
         list = list.filter((i) => i.id !== id);
     },
+    // convert() and add() replace an item with one of another type, which setExpression cannot
+    // do (it dispatches set-expression-properties-from-api against the model already there),
+    // so they go through setState - and so must the stub.
+    setState(state) {
+        list = state.expressions.list.map((i) => Object.assign({}, i));
+    },
     observeEvent: (name, cb) => {
         observers.push(cb);
     },
     unobserveEvent: () => {},
-    controller: { generateId: () => String(++idc) },
+    controller: {
+        generateId: () => String(++idc),
+        getSelectedItem: () => selected,
+        dispatch: (action) => dispatched.push(action),
+        // Exports reach the graph only through Desmos' parse, which calls lua.inject().
+        requestParseForAllItems: () => {
+            reparsed++;
+        }
+    },
     HelperExpression({ latex }) {
         const h = { numericValue: NaN, listValue: undefined, _cbs: [] };
         h.observe = (_k, cb) => h._cbs.push(cb);
@@ -143,12 +165,23 @@ function ok(name, cond, extra) {
     );
     if (!cond) fails++;
 }
+/**
+ * What Desmos would be handed for `name`. Exports are not items any more - they go straight
+ * into the parsable-object map the evaluator is built from - so this asks lua.inject() the same
+ * way the patched bundle does.
+ */
+/** The whole map lua.inject() would hand Desmos' parse. */
+function injected() {
+    const map = {};
+    lua.inject(map);
+    return map;
+}
+
+/** The latex Desmos would be given for `name`, or undefined. */
 function exported(name) {
-    const e = list.find(
-        (i) =>
-            i.id && i.id.indexOf("-" + name) === i.id.length - name.length - 1
-    );
-    return e && e.latex;
+    const map = injected();
+    const id = Object.keys(map).find((k) => k.endsWith("-" + name));
+    return id && map[id].latex;
 }
 
 /** Put the line-2 syntax error back, to check line() reads it. */
@@ -224,7 +257,7 @@ async function main() {
         exported("s") + " err=" + cell.error
     );
 
-    // 4. the reaper
+    // 4. the reaper is Desmos' own diff: an export that stops being made is simply absent
     lua.edited(cell.id, "Desmos.s = 1");
     await new Promise((r) => setTimeout(r, 900));
     ok("reaped nothing to reap", exported("s") === "s=1", exported("s"));
@@ -445,6 +478,160 @@ async function main() {
         "upstream global changed -> downstream re-ran (d=99)",
         exported("d") === "d=99",
         exported("d")
+    );
+
+    // 17. the + menu: its button dispatches new-lua, and ready() wrapped dispatch to answer it
+    const before = list.length;
+    Calc.controller.dispatch({ type: "new-lua" });
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "new-lua added an item",
+        list.length === before + 1,
+        before + " -> " + list.length
+    );
+    const made = list[list.length - 1];
+    ok(
+        "and it is a cell",
+        made && made.type === "text" && !!lua.cell(made.id),
+        JSON.stringify(made)
+    );
+    ok(
+        "and the menu was told to close",
+        dispatched.some((a) => a.type === "close-add-expression"),
+        JSON.stringify(dispatched)
+    );
+    ok(
+        "an unrelated dispatch still gets through",
+        (() => {
+            const n = dispatched.length;
+            Calc.controller.dispatch({ type: "something-else" });
+            return dispatched.length === n + 1;
+        })()
+    );
+
+    // 18. add() puts the cell after the selection, in the same folder
+    selected = { id: made.id, folderId: "F1" };
+    const placed = lua.add();
+    await new Promise((r) => setTimeout(r, 20));
+    const at = list.findIndex((i) => i.id === placed);
+    ok(
+        "added straight after the selected item",
+        at === list.findIndex((i) => i.id === made.id) + 1,
+        "index " + at
+    );
+    ok(
+        "and inherited its folder",
+        list[at].folderId === "F1",
+        list[at].folderId
+    );
+    selected = null;
+
+    // 19. the trigger is lenient about how MathQuill spells the word
+    for (const spelling of [
+        "lua",
+        "\\operatorname{lua}",
+        " lua ",
+        "\\mathrm{lua}"
+    ]) {
+        const tid = String(++idc);
+        list.push({ type: "expression", id: tid, latex: spelling });
+        change();
+        await new Promise((r) => setTimeout(r, 20));
+        const got = list.find((e) => e.id === tid);
+        ok(
+            "trigger accepts " + JSON.stringify(spelling),
+            got && got.type === "text",
+            JSON.stringify(got)
+        );
+    }
+    // Only on the whole thing - though note this says nothing about typing, where `lua` is
+    // reached on the way to `luap` and converts before the p arrives. See the README.
+    const nid = String(++idc);
+    list.push({ type: "expression", id: nid, latex: "luap" });
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "trigger ignores a latex that merely contains the word",
+        list.find((e) => e.id === nid).type === "expression"
+    );
+
+    // 20. the stylesheet, because two of its rules are load-bearing and neither is visible from
+    // here: Desmos' note textarea is an invisible sheet over the whole container and has to go,
+    // and Monaco's own <textarea class="inputarea"> is how it takes the mouse and must not.
+    const css = fs.readFileSync(path.join(__dirname, "index.css"), "utf8");
+    const hides = css
+        .split("}")
+        .filter((rule) => /display\s*:\s*none/.test(rule))
+        .join("}");
+    ok(
+        "hides Desmos' invisible note textarea",
+        /textarea\.dcg-smart-textarea/.test(hides),
+        "it would swallow every click"
+    );
+    ok(
+        "does not hide Monaco's input textarea",
+        !/(^|[\s,>])textarea(?![.\w-])/.test(hides),
+        "a blanket `textarea` here makes the box unclickable and untypable"
+    );
+    ok(
+        "the cell host is inset like the note's own text",
+        /paddingLeft/.test(
+            fs.readFileSync(path.join(__dirname, "editor.js"), "utf8")
+        ),
+        "without it the box sits under the row's icon gutter"
+    );
+
+    // 21. exports are statements, not expressions: nothing lands in the graph
+    id = cellWith("Desmos.m = 3");
+    change();
+    cell = lua.cell(id);
+    lua.runner.setOn(cell, true);
+    await new Promise((r) => setTimeout(r, 60));
+    const map = injected();
+    const entry = Object.values(map).find((v) => v.latex === "m=3");
+    ok("the export is in the statement map", !!entry, JSON.stringify(map));
+    ok(
+        "shaped as a statement",
+        entry &&
+            entry.type === "statement" &&
+            entry.shouldGraph === false &&
+            typeof entry.id === "string",
+        JSON.stringify(entry)
+    );
+    ok(
+        "no expression item was created for it",
+        !list.some((i) => i.type === "expression" && /m=3/.test(i.latex || "")),
+        JSON.stringify(list.filter((i) => i.type === "expression"))
+    );
+    ok(
+        "and no .lua folder",
+        !list.some((i) => i.type === "folder" && i.title === ".lua")
+    );
+    ok(
+        "a re-parse was requested",
+        dispatched.length >= 0 && reparsed > 0,
+        "reparsed=" + reparsed
+    );
+
+    // 22. switching a cell off withdraws its definitions
+    lua.runner.setOn(cell, false);
+    await new Promise((r) => setTimeout(r, 20));
+    ok("off withdraws the export", exported("m") === undefined, exported("m"));
+
+    // 23. Desmos.sample marks only the point list as something to plot
+    id = cellWith('Desmos.sample("w", function(x) return x end, 0, 1, 2)');
+    change();
+    cell = lua.cell(id);
+    lua.runner.setOn(cell, true);
+    await new Promise((r) => setTimeout(r, 60));
+    const sampled = Object.values(injected()).filter((v) =>
+        /w_\{[xy]\}|w_/.test(v.latex)
+    );
+    ok(
+        "sample plots the points and not the columns",
+        sampled.length === 3 &&
+            sampled.filter((v) => v.shouldGraph).length === 1,
+        JSON.stringify(sampled)
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
