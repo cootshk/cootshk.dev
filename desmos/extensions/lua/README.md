@@ -1,0 +1,162 @@
+# Lua
+
+Lua cells in the expression sheet. Type `lua` into an empty expression and the row becomes an
+editor; a cell can read the graph's values as ordinary globals and hand values back by
+assigning to `Desmos`.
+
+Nothing runs until you press the ▶ on the cell, and **every cell is off on every page load**.
+A graph you have just opened is somebody else's code.
+
+## A cell
+
+A cell is a note whose text begins `--!lua`, which is why it survives saving, undo, `.dcg`
+files and desmos.com without this extension having to teach Desmos a new item type - and why,
+with the extension off, you still see your Lua rather than losing it.
+
+```lua
+--!lua
+Desmos.k = a * 2
+```
+
+Words after `--!lua` are pragmas. There is one: `unsafe`.
+
+## Reading the graph
+
+Any Desmos name is a global. `a` is `a`, and `a_b` is `a_{b}` - one letter and an optional
+subscript, which is what a Desmos name is.
+
+```lua
+Desmos.c = a * 2 + b        -- numbers
+local total = 0
+for _, x in ipairs(L) do    -- a list-valued name arrives as a table
+    total = total + x
+end
+```
+
+A value the evaluator has not produced yet does not come back as `nil`: the cell **stops and
+waits**, then carries on when the value lands. So a cell can read a name defined below it, or
+on a graph that has only just opened, and still be correct.
+
+Whatever a cell reads becomes what it watches. Change `a` and every cell that read `a` runs
+again by itself. That includes globals from other cells - one cell's `base = 10` is another
+cell's `base`, and changing it re-runs the reader.
+
+`Desmos.get(latex)` is the way to read anything that is not a plain name:
+
+```lua
+Desmos.get("\\sin(2)")
+Desmos.get("\\left(P\\right).x")   -- a point's components; see Limits
+```
+
+## Writing to the graph
+
+Assign to `Desmos`. Each assignment becomes a real, hidden expression in a collapsed `.lua`
+folder, and stops being one when the cell stops making it.
+
+```lua
+Desmos.k = 42                      -- k=42
+Desmos.v = {1, 2, 3}               -- v=\left[1,2,3\right]
+Desmos.p = {x = 1, y = 2}          -- p=\left(1,2\right)
+Desmos.q = {{x=0,y=0}, {x=1,y=1}}  -- a list of points
+Desmos.k = nil                     -- and it is gone
+```
+
+A plain global is **not** an export. `helper = function() end` at the top of a cell is a global
+write, and a graph full of expressions named `helper` would help nobody. Globals are how cells
+talk to each other; `Desmos` is how a cell talks to the graph.
+
+Names are one letter and an optional subscript, because that is what Desmos will parse.
+`Desmos.total` is refused, with the reason.
+
+### Functions
+
+**A Lua function cannot become a Desmos function.** Desmos evaluates in a worker and wants
+derivatives, interval arithmetic and list broadcasting from anything it is asked to call; a
+closure gives it none of those. Two things work instead.
+
+Write the latex yourself - Lua is very good at this, and it is the reason to reach for a cell
+in the first place:
+
+```lua
+local terms = {}
+for n = 1, 12 do
+    terms[#terms + 1] = "\\frac{x^{" .. (2 * n - 1) .. "}}{" .. fact(2 * n - 1) .. "}"
+end
+Desmos.define("S(x)", table.concat(terms, "-"))
+```
+
+Or sample it, which plots:
+
+```lua
+Desmos.sample("g", function(x) return math.sin(x) ^ 3 end, -10, 10, 500)
+```
+
+`sample` writes `g_{x}`, `g_{y}` and a point list `g`. It is N points with straight lines
+between them: no derivative, wrong across a discontinuity, and nothing outside the range you
+gave. That is the honest shape of a Lua function on a Desmos graph.
+
+## `print`
+
+Goes to a strip under the cell, and to the console.
+
+## What a cell can reach
+
+A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
+`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print` and `Desmos`. `_G` is a
+table the cells share, not the page's globals.
+
+Left out: `debug` (it reaches upvalues and the registry, so it escapes any of this), `load`,
+`require`, `dofile` (they build an environment of their own), `io`, `os` and `package`.
+
+`js` - the whole DOM, through fengari's interop - is behind a pragma:
+
+```lua
+--!lua unsafe
+js.global.console:log("hello")
+```
+
+That is real: `js.global` is this page, same-origin, with its storage and its session. A cell
+with `unsafe` on it can do anything a script on cootshk.dev can do. It still will not run until
+you press ▶, which is the control that matters.
+
+## Loops
+
+A cell that never finishes does not take the tab with it - it yields every few million
+instructions and picks up on the next frame, and gives up after ten seconds. A cell that
+re-runs more than twenty times while the graph settles is called a dependency loop and stopped;
+that is easy to build by exporting a value the same cell reads.
+
+What this does not catch is a single expensive call - `string.rep("x", 1e9)` is one Lua
+instruction and will still hurt.
+
+## Limits
+
+- Numbers and lists of numbers can be read. A point reads as `NaN`; use
+  `Desmos.get("\\left(P\\right).x")`.
+- An undefined name and `NaN` look the same, because to the evaluator they are.
+- A cell that reads a value from somewhere it cannot pause - a `js` callback, `table.sort`'s
+  comparator - takes `nil` that once and is re-run from the top when the value arrives.
+- Cells _start_ in sheet order. They do not finish in it, because any of them may pause on a
+  read. "A later cell sees an earlier cell" is the rule that holds.
+- Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
+  running all still work; the colours and the error squiggles do not.
+
+## Tests
+
+```
+node desmos/extensions/lua/test.js
+```
+
+The Lua half - bridge.js and runner.js - against the real VM out of `cdn/fengari-web.js` and a
+stub `Calc` that reports values on a timer, so the pause-and-resume path is exercised rather
+than assumed. No browser, and nothing to install.
+
+## The files
+
+|             |                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `index.js`  | what a cell is, where its text lives, when it is written back, and the `lua` trigger |
+| `bridge.js` | the environment a cell runs in, reading the graph, and writing to it                 |
+| `runner.js` | when a cell runs, the loop watchdog, and errors                                      |
+| `editor.js` | Monaco - one instance, moved between cells - and the textarea it falls back to       |
+| `test.js`   | the above; not loaded in the browser                                                 |

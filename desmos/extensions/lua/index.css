@@ -1,0 +1,147 @@
+/* A Lua cell's row.
+ *
+ * The chrome outside the box follows the calculator - Desmos' own custom properties, with
+ * fallbacks, the way extensions/settings/index.css does it. The box itself does not: it is
+ * Monaco's vs-dark, hard-coded to match, because an editor that restyles as you type into it
+ * is hard to type into, and because the coloured <pre> and the live editor have to be the same
+ * colour or focusing a cell would make it flinch. Same reasoning as the Themes tab. */
+
+/* A cell is a note, so Desmos has drawn note machinery we are standing in front of. */
+[data-cde-lua] .dcg-displayTextarea,
+[data-cde-lua] .dcg-textarea,
+[data-cde-lua] textarea:not(.cde-lua__plain) {
+    display: none !important;
+}
+
+.cde-lua {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 4px 6px 6px;
+    font-size: 13px;
+}
+
+/* --- the bar ------------------------------------------------------------- */
+
+.cde-lua__bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cde-lua__run {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--dcg-custom-border-color, #d1d1d1);
+    border-radius: 50%;
+    background: var(--dcg-custom-background-color, #fff);
+    color: var(--dcg-custom-secondary-text-color, #666);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.cde-lua__run:hover {
+    color: var(--dcg-custom-text-color, #454545);
+    border-color: var(--dcg-custom-secondary-text-color, #888);
+}
+
+/* On is the loud state, because off is the resting one and nothing runs by accident. */
+.cde-lua__run--on {
+    background: var(--dcg-accent-color, #2f72dc);
+    border-color: var(--dcg-accent-color, #2f72dc);
+    color: #fff;
+}
+
+.cde-lua__status {
+    color: var(--dcg-custom-secondary-text-color, #888);
+    font-size: 11px;
+    font-style: italic;
+    user-select: none;
+}
+
+/* --- the box ------------------------------------------------------------- */
+
+.cde-lua__box {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid #333;
+    border-radius: 3px;
+    background: #1e1e1e;
+}
+
+/* Monaco draws its own everything, so the box gets out of the way when it moves in. */
+.cde-lua__box--live {
+    overflow: visible;
+}
+
+.cde-lua__live {
+    width: 100%;
+    height: 100%;
+}
+
+/* Kept in step with FONT and LINE in editor.js: the resting box has to be exactly as tall as
+ * the live one, or focusing a cell would make the row jump. */
+.cde-lua__static,
+.cde-lua__plain {
+    margin: 0;
+    padding: 6px 8px;
+    border: 0;
+    background: transparent;
+    color: #d4d4d4;
+    font-family:
+        "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 20px;
+    tab-size: 4;
+    white-space: pre;
+}
+
+.cde-lua__static {
+    display: block;
+    overflow-x: auto;
+    cursor: text;
+}
+
+.cde-lua__plain {
+    display: block;
+    width: 100%;
+    max-height: 480px;
+    overflow: auto;
+    outline: none;
+    resize: none;
+}
+
+/* --- what came out of it ------------------------------------------------- */
+
+.cde-lua__out,
+.cde-lua__error {
+    display: none;
+    margin: 0;
+    padding: 3px 6px;
+    border-radius: 3px;
+    font-family:
+        "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 11px;
+    line-height: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cde-lua--shown {
+    display: block;
+}
+
+.cde-lua__out {
+    max-height: 120px;
+    overflow: auto;
+    background: var(--dcg-custom-well-background-color, rgba(0, 0, 0, 0.04));
+    color: var(--dcg-custom-secondary-text-color, #666);
+}
+
+.cde-lua__error {
+    background: rgba(199, 68, 64, 0.12);
+    color: var(--dcg-error-color, #c74440);
+}
