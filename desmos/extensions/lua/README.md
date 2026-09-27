@@ -182,6 +182,28 @@ that is easy to build by exporting a value the same cell reads.
 What this does not catch is a single expensive call - `string.rep("x", 1e9)` is one Lua
 instruction and will still hurt.
 
+## Two bugs worth not reintroducing
+
+Both were in the editor, and both came from the same idea: _one_ Monaco moved into whichever
+cell had focus, with every other cell showing a `<pre>` coloured by `monaco.editor.colorize`.
+It is cheaper, and it is wrong twice:
+
+- focusing a cell replaced the very element the click had landed on, so the click never reached
+  the editor and it took several to get in;
+- and leaving a cell rebuilt its box from `cell.source`, which turned any bug anywhere near that
+  value into the cell's text visibly disappearing.
+
+One editor per cell has neither, because nothing is ever re-derived: the Monaco model _is_ the
+text. `test.js` asserts that shape so it does not come back as an optimisation.
+
+The value bug underneath the second one is worth knowing separately, because it will bite
+anything else that reads the graph back: **`getState()` is a frame stale.** `setExpression` sets
+an item model's `text` immediately, but `getState()` reads `cachedViewState`, which Desmos
+rebuilds once a frame. Read back inside the frame you wrote in, it reports the _previous_ text -
+which looks exactly like someone else editing underneath you. `index.js` reads
+`Calc.controller.getAllItemModels()` instead, and there is a test that fails if that is ever
+swapped back.
+
 ## Limits
 
 - Numbers and lists of numbers can be read. A point reads as `NaN`; use
@@ -195,6 +217,9 @@ instruction and will still hurt.
   read. "A later cell sees an earlier cell" is the rule that holds.
 - Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
   running all still work; the colours and the error squiggles do not.
+- One Monaco editor per cell, built when the row appears and disposed when it scrolls away. The
+  model outlives the row, so scrolling costs no undo history, and the number of live editors is
+  bounded by what is on screen rather than by how many cells the graph has.
 
 ## Tests
 

@@ -101,30 +101,30 @@
     background: #1e1e1e;
 }
 
-/* Monaco's own background and scrollbars have square corners, so they have to be clipped by
- * the box rather than allowed over it - otherwise a focused cell shows the box's rounded edge
- * and Monaco's square one at the same time. The completion popup still escapes: it is an
- * overflow widget, and `fixedOverflowWidgets` in editor.js positions it against the viewport.
- * Monaco's own layers take the radius too, so nothing square reaches the corners. */
-.cde-lua__box--live .monaco-editor,
-.cde-lua__box--live .monaco-editor .overflow-guard,
-.cde-lua__box--live .monaco-editor-background {
+/* Monaco's own background and scrollbars have square corners, so they are clipped by the box
+ * rather than allowed over it - otherwise a cell shows the box's rounded edge and Monaco's
+ * square one at the same time. Its layers take the radius too, so nothing square reaches a
+ * corner. The completion popup still escapes: it is an overflow widget, and
+ * `fixedOverflowWidgets` in editor.js positions it against the viewport. */
+.cde-lua__box .monaco-editor,
+.cde-lua__box .monaco-editor .overflow-guard,
+.cde-lua__box .monaco-editor-background {
     border-radius: inherit;
 }
 
-.cde-lua__live {
-    width: 100%;
-    height: 100%;
-    min-height: 20px;
-}
-
-/* Kept in step with FONT and LINE in editor.js: the resting box has to be exactly as tall as
- * the live one, or focusing a cell would make the row jump. */
-.cde-lua__static,
+/* Kept in step with FONT, LINE and PAD in editor.js. Only the fallback needs this now - the
+ * editor is told its own font - but the two should still look the same. */
 .cde-lua__plain {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    max-height: 480px;
     margin: 0;
     padding: 6px 8px;
     border: 0;
+    overflow: auto;
+    outline: none;
+    resize: none;
     background: transparent;
     color: #d4d4d4;
     font-family:
@@ -133,24 +133,6 @@
     line-height: 20px;
     tab-size: 4;
     white-space: pre;
-}
-
-.cde-lua__static {
-    display: block;
-    box-sizing: border-box;
-    max-width: 100%;
-    overflow-x: auto;
-    cursor: text;
-}
-
-.cde-lua__plain {
-    display: block;
-    box-sizing: border-box;
-    width: 100%;
-    max-height: 480px;
-    overflow: auto;
-    outline: none;
-    resize: none;
 }
 
 /* --- what came out of it ------------------------------------------------- */

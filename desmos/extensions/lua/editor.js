@@ -1,15 +1,23 @@
 // The box you type a cell into, and the chrome around it.
 //
-// There is one Monaco editor on the page, not one per cell. It is moved into whichever cell
-// has focus; every other cell shows a <pre> coloured by monaco.editor.colorize, which uses the
-// same tokenizer and the same theme, so there is no shift when focus arrives. The expression
-// list virtualizes and can hold dozens of rows - a full editor on each one is a language
-// worker and a view layer each, re-paid every time a row scrolls back into view.
+// One Monaco editor per cell, built when the row appears and thrown away when it goes. This
+// used to be a single editor moved into whichever cell had focus, with the others showing a
+// <pre> coloured by monaco.editor.colorize - cheaper, and wrong twice over:
+//
+//   - focusing a cell replaced the very element the click had landed on, so the click did not
+//     reach the editor and it took several to get in;
+//   - and leaving a cell rebuilt its box from `cell.source`, which turned every bug anywhere
+//     near that value into the cell's text visibly vanishing.
+//
+// A row that scrolls out of the expression list is unmounted by Desmos, so the number of live
+// editors is bounded by what is on screen rather than by how many cells the graph has. The text
+// is never re-derived from anything: the Monaco model *is* the text, it outlives the row, and
+// nothing repaints on focus.
 //
 // Until Monaco arrives - or for good, if it never does - a cell is a textarea. That is worth
-// keeping for the reason extensions/settings/tabs/themes.js keeps it: a cell you cannot edit
-// is a cell you cannot empty, and nothing here should need a CDN to be fixable. Running does
-// not depend on Monaco at all; only the colours and the error markers do.
+// keeping for the reason extensions/settings/tabs/themes.js keeps it: a cell you cannot edit is
+// a cell you cannot empty, and nothing here should need a CDN to be fixable. Running does not
+// depend on Monaco at all; only the colours and the error markers do.
 //
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
@@ -21,9 +29,10 @@
     // site could not fetch its own modules.
     var MONACO = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min";
 
-    /** Kept in step with index.css, so the static box is exactly as tall as the live one. */
+    /** Kept in step with index.css. */
     var FONT = 13;
     var LINE = 20;
+    var PAD = 12;
 
     /** Past this the box scrolls rather than growing without end. */
     var MAX_HEIGHT = 480;
@@ -31,20 +40,13 @@
     var api = null;
     var loading = null;
 
-    /** The one editor, and the element it lives in while it is not in a cell. */
-    var editor = null;
-    var live = null;
+    /** expr-id -> the editor in that row, while the row exists. */
+    var editors = new Map();
 
-    /** The cell the editor is in, or null. */
-    var active = null;
-
-    /** expr-id -> Monaco model. Outlives the row, so scrolling does not cost undo history. */
+    /** expr-id -> Monaco model. Outlives the row, so scrolling costs no undo history. */
     var models = new Map();
 
-    /** expr-id -> saveViewState(), so the caret is where you left it. */
-    var views = new Map();
-
-    /** A cell to focus as soon as its row turns up - the freshly converted one. */
+    /** A cell to focus as soon as its row turns up - the freshly created one. */
     var pending = null;
 
     var Calc = null;
@@ -78,7 +80,7 @@
      */
     function attach(cell, node) {
         if (cell.node === node && node.contains(cell.host)) {
-            if (pending === cell.id) focus(cell);
+            take(cell);
             return;
         }
 
@@ -94,10 +96,9 @@
             parent.insertBefore(cell.host, anchor.nextSibling);
         else parent.appendChild(cell.host);
 
-        paint(cell);
+        mount(cell);
         render(cell);
-
-        if (pending === cell.id) focus(cell);
+        take(cell);
     }
 
     /**
@@ -116,9 +117,14 @@
         if (style.paddingRight) host.style.paddingRight = style.paddingRight;
     }
 
-    /** The row has gone - scrolled away, not deleted. Keep the model; drop the DOM. */
+    /** The row has gone - scrolled away, not deleted. Keep the model; drop the editor. */
     function detach(cell) {
-        if (active && active.id === cell.id) blur();
+        var editor = editors.get(cell.id);
+        if (editor) {
+            // The model is not disposed with it: the model is the text, and the text stays.
+            editor.dispose();
+            editors.delete(cell.id);
+        }
         if (cell.host && cell.host.parentNode)
             cell.host.parentNode.removeChild(cell.host);
         if (cell.node) cell.node.removeAttribute("data-cde-lua");
@@ -131,15 +137,13 @@
     function forget(cell) {
         detach(cell);
         var model = models.get(cell.id);
-        if (model) {
-            // A moment's grace, so delete-then-undo keeps its history.
-            setTimeout(function () {
-                if (lua.cell(cell.id)) return;
-                model.dispose();
-                models.delete(cell.id);
-                views.delete(cell.id);
-            }, 5000);
-        }
+        if (!model) return;
+        // A moment's grace, so delete-then-undo keeps its history.
+        setTimeout(function () {
+            if (lua.cell(cell.id)) return;
+            model.dispose();
+            models.delete(cell.id);
+        }, 5000);
     }
 
     function build(cell) {
@@ -176,12 +180,8 @@
         ["keydown", "keypress", "keyup"].forEach(function (type) {
             host.addEventListener(type, function (event) {
                 event.stopPropagation();
-                if (type === "keydown" && event.key === "Escape") blur();
+                if (type === "keydown" && event.key === "Escape") blur(cell);
             });
-        });
-
-        box.addEventListener("mousedown", function () {
-            focus(cell);
         });
 
         ui.el(
@@ -199,53 +199,74 @@
     }
 
     // -----------------------------------------------------------------------
-    // the two forms of the box
+    // the editor in it
     // -----------------------------------------------------------------------
 
-    /**
-     * Draw the resting form of the box: a coloured <pre>, or a textarea if that is all we have.
-     *
-     * The text goes in first and the colouring is layered over it. colorize() is a promise, and
-     * a promise that rejects - or resolves after this <pre> has been replaced by another paint -
-     * must not be the difference between showing the cell and showing nothing.
-     */
-    function paint(cell) {
+    /** Put an editor in the cell's box - Monaco if we have it, a textarea until we do. */
+    function mount(cell) {
         if (!cell.box) return;
-        if (active && active.id === cell.id) return;
-
-        // fit() leaves an explicit height on the box while the editor is in it. The resting
-        // box sizes itself from its text instead.
-        cell.box.style.height = "";
 
         if (!api) {
             plain(cell);
             want();
             return;
         }
+        if (editors.has(cell.id)) return;
 
-        var pre = ui.el("pre", { class: "cde-lua__static" });
-        // The text, before anything asynchronous. Unstyled beats absent.
-        pre.textContent = cell.source || "";
-        pre.style.minHeight = height(cell.source) + "px";
         cell.box.textContent = "";
-        cell.box.appendChild(pre);
+        var editor = api.editor.create(cell.box, {
+            model: model(cell),
+            theme: "vs-dark",
+            // One editor per row and a width we do not set, so Monaco can watch its own
+            // container. Height is ours, and wordWrap is off, so this cannot feed back.
+            automaticLayout: true,
+            minimap: { enabled: false },
+            overviewRulerLanes: 0,
+            scrollBeyondLastLine: false,
+            // The completion list is taller than a row has room for; a fixed widget is
+            // positioned against the viewport instead of being clipped by the cell.
+            fixedOverflowWidgets: true,
+            lineNumbers: "on",
+            lineNumbersMinChars: 3,
+            folding: false,
+            wordWrap: "off",
+            fontSize: FONT,
+            lineHeight: LINE,
+            padding: { top: 6, bottom: 6 }
+        });
+        editors.set(cell.id, editor);
 
-        api.editor.colorize(cell.source || "", "lua", { tabSize: 4 }).then(
-            function (html) {
-                // Another paint may have thrown this <pre> away in the meantime.
-                if (pre.parentNode === cell.box) pre.innerHTML = html;
-            },
-            function (error) {
-                // The text is already there; it just will not be coloured.
-                console.warn("desmos: couldn't colour a Lua cell", error);
-            }
-        );
+        editor.onDidContentSizeChange(function () {
+            size(cell);
+        });
+        editor.onDidBlurEditorText(function () {
+            lua.flush(cell.id);
+            if (cell.on) lua.runner.run(cell);
+        });
+        editor.addCommand(api.KeyMod.CtrlCmd | api.KeyCode.Enter, function () {
+            lua.flush(cell.id);
+            lua.runner.run(cell);
+        });
+
+        size(cell);
+        markers(cell, cell.syntax || cell.error || "");
     }
 
-    /** The textarea. Also the way in, before Monaco has arrived. */
+    /** The box grows with the text, up to a point, after which it scrolls. */
+    function size(cell) {
+        var editor = editors.get(cell.id);
+        if (!editor || !cell.box) return;
+        var h = Math.min(
+            MAX_HEIGHT,
+            Math.max(LINE, editor.getContentHeight()) + PAD
+        );
+        cell.box.style.height = h + "px";
+    }
+
+    /** The textarea: the way in before Monaco arrives, and the way in if it never does. */
     function plain(cell) {
-        if (cell.box.querySelector(".cde-lua__plain")) {
-            var existing = cell.box.querySelector(".cde-lua__plain");
+        var existing = cell.box.querySelector(".cde-lua__plain");
+        if (existing) {
             if (existing.value !== cell.source) existing.value = cell.source;
             return;
         }
@@ -259,89 +280,29 @@
             "aria-label": "Lua",
             oninput: function () {
                 lua.edited(cell.id, input.value);
-                input.style.height = height(input.value) + "px";
+                input.style.height = tall(input.value) + "px";
             },
             onblur: function () {
                 lua.flush(cell.id);
+                if (cell.on) lua.runner.run(cell);
             }
         });
         input.value = cell.source;
-        input.style.height = height(cell.source) + "px";
+        input.style.height = tall(cell.source) + "px";
         cell.box.textContent = "";
         cell.box.appendChild(input);
     }
 
-    function height(text) {
+    function tall(text) {
         var lines = String(text || "").split("\n").length;
-        return Math.min(MAX_HEIGHT, Math.max(LINE, lines * LINE) + 12);
+        return Math.min(MAX_HEIGHT, Math.max(LINE, lines * LINE) + PAD);
     }
 
-    /** The text changed underneath the box - an undo, a graph load. Catch the box up. */
-    function refresh(cell) {
-        var model = models.get(cell.id);
-        if (model && model.getValue() !== cell.source)
-            // Through an edit rather than setValue, so the editor's own undo history is not
-            // thrown away while someone is typing in it.
-            model.pushEditOperations(
-                null,
-                [{ range: model.getFullModelRange(), text: cell.source }],
-                null
-            );
-        paint(cell);
-    }
-
-    // -----------------------------------------------------------------------
-    // moving the editor
-    // -----------------------------------------------------------------------
-
-    function focus(cell) {
-        pending = null;
-        if (!api) {
-            want();
-            var input = cell.box && cell.box.querySelector(".cde-lua__plain");
-            if (input) input.focus();
-            return;
-        }
-        if (active && active.id === cell.id) return;
-        if (active) blur();
-        if (!cell.box) return;
-
-        editor.setModel(model(cell));
-        cell.box.textContent = "";
-        cell.box.appendChild(live);
-        cell.box.classList.add("cde-lua__box--live");
-
-        var view = views.get(cell.id);
-        if (view) editor.restoreViewState(view);
-
-        active = cell;
-        watch(cell.box);
-        fit();
-        editor.focus();
-    }
-
-    function blur() {
-        if (!active) return;
-        var cell = active;
-        active = null;
-
-        views.set(cell.id, editor.saveViewState());
-        unwatch();
-        if (live.parentNode) live.parentNode.removeChild(live);
-        if (cell.box) {
-            cell.box.classList.remove("cde-lua__box--live");
-            paint(cell);
-        }
-        lua.flush(cell.id);
-        if (cell.on) lua.runner.run(cell);
-    }
-
+    /** The model is the text. It outlives the row, which is why scrolling costs nothing. */
     function model(cell) {
         var found = models.get(cell.id);
-        if (found) {
-            if (found.getValue() !== cell.source) found.setValue(cell.source);
-            return found;
-        }
+        if (found) return found;
+
         found = api.editor.createModel(cell.source, "lua");
         found.updateOptions({
             tabSize: 4,
@@ -355,14 +316,46 @@
         return found;
     }
 
-    function fit() {
-        if (!active || !active.box) return;
-        var h = Math.min(
-            MAX_HEIGHT,
-            Math.max(LINE, editor.getContentHeight()) + 12
-        );
-        active.box.style.height = h + "px";
-        editor.layout({ width: active.box.clientWidth, height: h });
+    /**
+     * The text changed underneath the box - an undo, a graph load, another tab. Catch the box
+     * up. Nothing else redraws on its own: the editor and the model are the same text.
+     */
+    function refresh(cell) {
+        var found = models.get(cell.id);
+        if (found && found.getValue() !== cell.source)
+            // Through an edit rather than setValue, so the editor's own undo history is not
+            // thrown away while someone is typing in it.
+            found.pushEditOperations(
+                null,
+                [{ range: found.getFullModelRange(), text: cell.source }],
+                null
+            );
+        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
+        if (input && input.value !== cell.source) input.value = cell.source;
+    }
+
+    /** Focus a cell that asked to be focused as soon as it had somewhere to be. */
+    function take(cell) {
+        if (pending !== cell.id) return;
+        pending = null;
+        var editor = editors.get(cell.id);
+        if (editor) return editor.focus();
+        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
+        if (input) input.focus();
+    }
+
+    /** Escape: hand the keyboard back to Desmos. */
+    function blur(cell) {
+        var editor = editors.get(cell.id);
+        if (editor) {
+            var node = editor.getDomNode();
+            if (node) node.blur();
+            var area = cell.box && cell.box.querySelector("textarea");
+            if (area) area.blur();
+            return;
+        }
+        var input = cell.box && cell.box.querySelector(".cde-lua__plain");
+        if (input) input.blur();
     }
 
     // -----------------------------------------------------------------------
@@ -486,45 +479,11 @@
         return worker;
     }
 
-    /** Monaco has arrived: build the one editor, then redraw every cell with it. */
+    /** Monaco has arrived: give every cell already on screen a real editor. */
     function ready() {
-        live = ui.el("div", { class: "cde-lua__live" });
-
-        editor = api.editor.create(live, {
-            value: "",
-            language: "lua",
-            theme: "vs-dark",
-            // Our own, driven by fit(): automaticLayout watches the container, and the
-            // container's height is something we set, which is a loop.
-            automaticLayout: false,
-            minimap: { enabled: false },
-            overviewRulerLanes: 0,
-            scrollBeyondLastLine: false,
-            // The completion list is taller than a row has room for; a fixed widget is
-            // positioned against the viewport instead of being clipped by the cell.
-            fixedOverflowWidgets: true,
-            lineNumbers: "on",
-            lineNumbersMinChars: 3,
-            folding: false,
-            wordWrap: "off",
-            fontSize: FONT,
-            lineHeight: LINE,
-            padding: { top: 6, bottom: 6 }
-        });
-
-        editor.onDidContentSizeChange(fit);
-        editor.onDidBlurEditorText(function () {
-            // A click on another cell moves the editor itself, and that reads as a blur; let
-            // it land before deciding this one is finished with.
-            setTimeout(function () {
-                if (active && !document.contains(live)) blur();
-            }, 0);
-        });
-
         complete();
-
         lua.cells.forEach(function (cell) {
-            if (cell.box) paint(cell);
+            if (cell.box) mount(cell);
         });
     }
 

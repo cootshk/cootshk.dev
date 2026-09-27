@@ -94,6 +94,8 @@ const Calc = {
     unobserveEvent: () => {},
     controller: {
         generateId: () => String(++idc),
+        // What scan() reads: the live models, which unlike getState() have no cache lag.
+        getAllItemModels: () => list,
         getSelectedItem: () => selected,
         dispatch: (action) => dispatched.push(action),
         // Exports reach the graph only through Desmos' parse, which calls lua.inject().
@@ -694,6 +696,55 @@ async function main() {
         "so an error on source line 2 is reported as line 2",
         lua.runner.line(cell, cell.error) === 2,
         cell.error + " -> " + lua.runner.line(cell, cell.error)
+    );
+
+    // 26. the cache-lag trap: getState() is a frame behind our own setExpression, so a scan
+    // that trusted it would revert a cell to its pre-write text - emptying a new cell the
+    // moment focus left it. scan() reads the live models, so a stale snapshot cannot win.
+    id = cellWith("");
+    change();
+    cell = lua.cell(id);
+    lua.edited(id, "Desmos.e = 1");
+    lua.flush(id);
+    // A snapshot that has not caught up yet, exactly as Desmos would serve it.
+    const realGetState = Calc.getState;
+    Calc.getState = () => ({
+        expressions: {
+            list: list.map((i) =>
+                i.id === id ? Object.assign({}, i, { text: "" }) : i
+            )
+        }
+    });
+    change();
+    Calc.getState = realGetState;
+    ok(
+        "a stale snapshot does not wipe a cell",
+        lua.cell(id).source === "Desmos.e = 1",
+        JSON.stringify(lua.cell(id).source)
+    );
+
+    // 27. the editor's shape, because both of its bugs were design bugs and neither is visible
+    // from here. It used to be one editor moved into the focused cell, with the rest showing a
+    // colorize()d <pre>. Focusing replaced the element the click had landed on, so it took
+    // several clicks to get in; and leaving a cell rebuilt its box from `cell.source`, so any
+    // bug near that value showed up as the text vanishing. One editor per cell has neither.
+    const ed = fs.readFileSync(path.join(__dirname, "editor.js"), "utf8");
+    ok(
+        !/colorize/.test(ed),
+        "no cell is re-rendered from its source text",
+        "a box rebuilt on blur turns any bug near cell.source into lost text"
+    );
+    ok(
+        /editors\.set\(cell\.id,/.test(ed),
+        "there is an editor per cell, not one that moves",
+        "a moved editor replaces the element the click landed on"
+    );
+    ok(
+        !/cde-lua__static/.test(
+            ed + fs.readFileSync(path.join(__dirname, "index.css"), "utf8")
+        ),
+        "and no static stand-in for it",
+        "the static form is what went blank"
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");

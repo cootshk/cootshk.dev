@@ -332,7 +332,7 @@
     function scan() {
         if (writing) return;
 
-        var list = (Calc.getState().expressions || {}).list || [];
+        var list = items();
         var seen = new Set();
         var order = 0;
 
@@ -407,6 +407,28 @@
         });
 
         paint();
+    }
+
+    /**
+     * Every item on the graph, live.
+     *
+     * Deliberately not getState(). A note's saved state is a cache - `cachedViewState` - that
+     * Desmos rebuilds once a frame, while setExpression sets the model's `text` immediately. So
+     * for the rest of the frame in which we write a cell back, getState() still reports the
+     * *previous* text. Read then, it looks exactly like someone editing the cell underneath us,
+     * and scan() dutifully "corrects" the cell to the stale value: for a cell that began empty,
+     * that is its text vanishing the moment focus leaves it.
+     *
+     * The item models have no such lag, and they are what the saved state is built from.
+     */
+    function items() {
+        try {
+            var live = Calc.controller.getAllItemModels();
+            if (live && typeof live.length === "number") return live;
+        } catch (error) {
+            // Fall back on the state; a frame of lag beats not working at all.
+        }
+        return (Calc.getState().expressions || {}).list || [];
     }
 
     /**
