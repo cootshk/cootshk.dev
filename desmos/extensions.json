@@ -86,6 +86,14 @@
             ],
             "css": true,
             "forceEnabled": true
+        },
+        "shapes": {
+            "name": "Shapes",
+            "description": "Enables the use of shapes outside the Geometry Calculator.",
+            "supports": [
+                "graphing",
+                "3d"
+            ]
         }
     },
     "defaultExtensions": [
