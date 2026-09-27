@@ -101,9 +101,15 @@
     background: #1e1e1e;
 }
 
-/* Monaco draws its own everything, so the box gets out of the way when it moves in. */
-.cde-lua__box--live {
-    overflow: visible;
+/* Monaco's own background and scrollbars have square corners, so they have to be clipped by
+ * the box rather than allowed over it - otherwise a focused cell shows the box's rounded edge
+ * and Monaco's square one at the same time. The completion popup still escapes: it is an
+ * overflow widget, and `fixedOverflowWidgets` in editor.js positions it against the viewport.
+ * Monaco's own layers take the radius too, so nothing square reaches the corners. */
+.cde-lua__box--live .monaco-editor,
+.cde-lua__box--live .monaco-editor .overflow-guard,
+.cde-lua__box--live .monaco-editor-background {
+    border-radius: inherit;
 }
 
 .cde-lua__live {

@@ -201,7 +201,7 @@ function cellWith(source, pragmas) {
     const id = String(++idc);
     const head =
         pragmas && pragmas.length ? "--!lua " + pragmas.join(" ") + "\n" : "";
-    list.push({ type: "lua", id, text: head + source });
+    list.push({ type: "text", id, text: head + source, lua: true });
     return id;
 }
 
@@ -419,7 +419,7 @@ async function main() {
     const converted = list.find((e) => e.id === trigId);
     ok(
         "typing lua converted the expression to a note",
-        converted && converted.type === "lua",
+        converted && converted.type === "text" && converted.lua === true,
         JSON.stringify(converted)
     );
     ok("and the note is a cell", !!lua.cell(trigId), "not discovered");
@@ -498,7 +498,10 @@ async function main() {
     const made = list[list.length - 1];
     ok(
         "and it is a cell",
-        made && made.type === "lua" && !!lua.cell(made.id),
+        made &&
+            made.type === "text" &&
+            made.lua === true &&
+            !!lua.cell(made.id),
         JSON.stringify(made)
     );
     ok(
@@ -546,7 +549,7 @@ async function main() {
         const got = list.find((e) => e.id === tid);
         ok(
             "trigger accepts " + JSON.stringify(spelling),
-            got && got.type === "lua",
+            got && got.type === "text" && got.lua === true,
             JSON.stringify(got)
         );
     }
@@ -640,14 +643,23 @@ async function main() {
         JSON.stringify(sampled)
     );
 
-    // 24. the saved shape: its own type, and the source is the text verbatim
+    // 24. the saved shape: a flagged note, source as the text verbatim
     id = cellWith("Desmos.j = 1");
     change();
     const saved = list.find((e) => e.id === id);
     ok(
-        "saved as its own item type",
-        saved.type === "lua",
+        "saved as a flagged note",
+        saved.type === "text" && saved.lua === true,
         JSON.stringify(saved)
+    );
+    ok(
+        "a plain note is not a cell",
+        !lua.isCell({ type: "text", id: "z", text: "hello" })
+    );
+    ok(
+        "and with the extension off it is still readable Lua",
+        saved.text === "Desmos.j = 1",
+        saved.text
     );
     ok(
         "the source is the text, verbatim",

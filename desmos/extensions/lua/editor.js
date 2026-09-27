@@ -202,26 +202,44 @@
     // the two forms of the box
     // -----------------------------------------------------------------------
 
-    /** Draw the resting form of the box: a coloured <pre>, or a textarea if that is all we have. */
+    /**
+     * Draw the resting form of the box: a coloured <pre>, or a textarea if that is all we have.
+     *
+     * The text goes in first and the colouring is layered over it. colorize() is a promise, and
+     * a promise that rejects - or resolves after this <pre> has been replaced by another paint -
+     * must not be the difference between showing the cell and showing nothing.
+     */
     function paint(cell) {
         if (!cell.box) return;
         if (active && active.id === cell.id) return;
 
-        if (api) {
-            var pre = ui.el("pre", { class: "cde-lua__static" });
-            pre.style.minHeight = height(cell.source) + "px";
-            cell.box.textContent = "";
-            cell.box.appendChild(pre);
-            api.editor
-                .colorize(cell.source || "", "lua", { tabSize: 4 })
-                .then(function (html) {
-                    pre.innerHTML = html;
-                });
+        // fit() leaves an explicit height on the box while the editor is in it. The resting
+        // box sizes itself from its text instead.
+        cell.box.style.height = "";
+
+        if (!api) {
+            plain(cell);
+            want();
             return;
         }
 
-        plain(cell);
-        want();
+        var pre = ui.el("pre", { class: "cde-lua__static" });
+        // The text, before anything asynchronous. Unstyled beats absent.
+        pre.textContent = cell.source || "";
+        pre.style.minHeight = height(cell.source) + "px";
+        cell.box.textContent = "";
+        cell.box.appendChild(pre);
+
+        api.editor.colorize(cell.source || "", "lua", { tabSize: 4 }).then(
+            function (html) {
+                // Another paint may have thrown this <pre> away in the meantime.
+                if (pre.parentNode === cell.box) pre.innerHTML = html;
+            },
+            function (error) {
+                // The text is already there; it just will not be coloured.
+                console.warn("desmos: couldn't colour a Lua cell", error);
+            }
+        );
     }
 
     /** The textarea. Also the way in, before Monaco has arrived. */

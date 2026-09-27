@@ -31,39 +31,37 @@ cannot type a longer name that passes through it on the way: `lua` converts befo
 The `+` menu is the route that does not depend on any of that, and
 `Extensions.lua.add()` from the console is a third.
 
-## How the item type works
+## How a cell is marked
 
-Desmos knows five item types and asks about them in eight places. All eight patches (see
-`index.js`) answer the same way: _do what you do for a note_. Same state-to-model conversion,
-same saved shape, same row component. A Lua cell is a note in every respect except its name and
-what this extension does with it - which is why a real item type costs eight one-line patches
-rather than an item model written from scratch.
+Two patches, both only about making the flag persist:
 
-| site                | what it needed                                                                                                                                         |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Hv`                | state -> item model. Falls through to the note's factory, which spreads the state over the note defaults, so `type` stays `"lua"`.                     |
-| the two normalisers | one is the incremental `setState` path, which **throws** rather than shrugging - that path is version-history restore.                                 |
-| `B0`                | handing out an id to an item that arrived without one.                                                                                                 |
-| `ZL`                | item model -> saved state. Without it the default returns the _model_, putting the controller and the guid into the saved graph.                       |
-| `sm`                | the projection the list keeps beside each item.                                                                                                        |
-| the row renderer    | routes to Desmos' note view, whose template hardcodes `dcg-expressiontext` - which is what `editor.js` finds rows by.                                  |
-| `V0`                | `setExpression`, which is how a cell's text is written back. The note builder hardcodes `type:"text"`, so the patch borrows it and puts the type back. |
+| site  | what it needed                                                               |
+| ----- | ---------------------------------------------------------------------------- |
+| `l0e` | a note's saved state is built from a fixed field list; `lua` is added to it. |
+| `s0e` | its undo restoration copies a fixed prop set; `lua` is added to that too.    |
 
-`text` carries the source rather than a field of its own because a note's saved state is built
-by one function from a fixed list of fields and its undo diffing by another. Putting the source
-anywhere else means patching both, for nothing but a nicer field name.
+Everything else is a note, natively. Three things make the flag survive on its own, and are
+worth knowing before moving it anywhere: the state normaliser is a deep clone; the
+strip-defaults pass iterates the _object_ rather than the defaults, so a key the defaults have
+never heard of is kept; and `setExpression` applies only the fields it is handed, so writing
+`text` back does not disturb `lua`. `text` carries the source for the same reason the flag is
+cheap - `text` is already in both of those lists.
 
-**desmos.com does not care.** The server stores `state` as an opaque JSON string and does no
-schema validation - a graph with a `lua` item posted to the endpoint behind
-`createSnapshotLink()` comes back byte for byte. The client was always the only obstacle.
+### Why not `type: "lua"`
 
-### The trade
+It was, briefly, and it is a trap worth writing down. Desmos asks what an item type is in some
+fifty places. A custom type has to answer seventeen of them, and **seven of those are `for`
+loops over every item model whose `switch` ends in `default: return`** - which do not skip a
+type they have not met, they end the loop, so every item _after_ a cell silently stops being
+updated. One of them is the per-frame update that populates `cachedViewState`, which is what
+`getState()` reads: unpatched, a cell rendered as an empty row and never appeared in the saved
+graph at all. Another is `requestParseForAllItems`, which is where this extension injects its
+own exports - so a cell broke its own statements.
 
-With this extension switched off, Desmos does not know what a `lua` item is: `Hv`'s default
-hands the list a raw state object in place of a model, and the incremental `setState` path
-throws. **A graph with cells in it wants this extension.** The note form this replaced degraded
-into readable text; a real item type does not. That is the price of the type, and
-`patches.test.js` is how you find out early that a Desmos deploy has moved one of the eight.
+Twenty-two patches versus eight, a failure mode that corrupts unrelated expressions, and no
+graceful degradation. desmos.com was never the obstacle either - the server stores `state` as an
+opaque JSON string and does no schema validation, so a custom type round-trips through a
+snapshot link byte for byte. The client was the whole problem.
 
 ## Reading the graph
 

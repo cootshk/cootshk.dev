@@ -169,26 +169,26 @@ ok(
     "the entry would render nothing"
 );
 
-// The item type, end to end: a cell has to convert, save and render.
+// The flag has to persist, which is the whole point of both patches.
 ok(
-    (js.match(/case"lua":case"text":return py\(/g) || []).length === 2,
-    "both state normalisers accept a lua item",
-    "the incremental setState path would throw on version-history restore"
+    /cachedViewState=\{type:\w+\.type,id:\w+\.id,folderId:\w+\.folderId,text:\w+\.text,lua:/.test(
+        js
+    ),
+    "the flag is in a note's saved state",
+    "a cell would come back from getState() as a plain note"
 );
 ok(
-    /case"lua":case"text":return \w+\(\w+,\w+\.controller\)/.test(js),
-    "state becomes an item model",
-    "the list would hold a raw state object instead of a model"
+    /\{id:!1,type:!1,folderId:!0,text:!0,secret:!0,readonly:!0,lua:!0\}/.test(
+        js
+    ),
+    "and in its undo restoration props",
+    "undo would drop the flag"
 );
-ok(
-    /else if\(\w+\.type==="text"\|\|\w+\.type==="lua"\)/.test(js),
-    "a lua item renders as a row",
-    "the cell would be invisible"
-);
-ok(
-    /case"lua":\{let l=iJ\(/.test(js),
-    "setExpression can write a lua item's text",
-    "typing in a cell would never reach the graph"
+
+console.log(
+    "\n" +
+        (js.match(/case"lua":/g) || []).length +
+        ' case"lua": arms in the patched bundle'
 );
 
 console.log(fails ? "\n" + fails + " FAILED" : "\nall patches good");

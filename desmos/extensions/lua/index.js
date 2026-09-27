@@ -10,28 +10,33 @@
 // type into). They hang themselves off `Extensions.lua`, which is why this file is first in
 // the manifest's `file` list.
 //
-// A cell is its own item type - `{ type: "lua", id, text }` - and `text` is the Lua source,
-// verbatim. Not a note with a marker in it, which is what this used to be.
+// A cell is one of Desmos' own notes with a `lua: true` flag on it, and `text` is the Lua
+// source, verbatim.
 //
-// Desmos knows five item types and asks about them in eight places, three of which throw on a
-// type they have not met. The patches below answer all eight, and every one of them answers by
-// pointing at what Desmos already does for a note: the same state-to-model conversion, the same
-// saved shape, the same row component. A Lua cell is a note in every respect except its name
-// and what this extension does with it, which is why the whole thing costs eight one-line
-// patches instead of an item model written from scratch.
+// Not a custom `type: "lua"` item, which this briefly was. Desmos asks what an item type is in
+// some fifty places; a custom type has to answer seventeen of them, and seven of those are `for`
+// loops over every item model whose `switch` ends in `default: return` - which do not skip a
+// type they have not met, they end the loop, so every item after a cell silently stops being
+// updated. One of them populates the saved state, so a cell was invisible to getState(); another
+// is the parse this extension injects its exports into, so a cell broke its own statements.
 //
-// `text` rather than a field of its own for the same reason. A note's saved state is built by
-// one function from a fixed list of fields, and its undo diffing from another; putting the
-// source anywhere but `text` means patching both, for nothing but a nicer field name.
+// A flag on a note costs two patches instead, both only about making the flag persist: a note's
+// saved state is built from a fixed field list, and its undo restoration copies a fixed prop
+// set. Everything else is a note, and all fifty of those places already know what a note is.
+//
+// The flag survives the rest untouched, which is worth knowing before moving it: the state
+// normaliser is a deep clone, and the strip-defaults pass iterates the object rather than the
+// defaults, so a key the defaults have never heard of is kept. setExpression merges the fields
+// it is given, so writing `text` back does not disturb `lua`.
+//
+// `text` carries the source rather than a field of its own for the same reason the flag is
+// cheap: `text` is already in both of those lists.
 //
 // The source is the chunk. Nothing is stripped from it, so Lua's line 3 is the editor's line 3.
 // A first line of `--!lua <pragmas>` is read for pragmas and then left exactly where it is -
 // it is a Lua comment, so the compiler does not care, and nothing has to count lines.
 //
-// The cost of a real type, stated plainly: with this extension switched off, Desmos does not
-// know what a `lua` item is. `Hv`'s default hands the raw state object to the list in place of
-// a model, and the incremental `setState` path throws outright. A graph with cells in it wants
-// this extension. That is the trade a real item type makes, and the note form did not.
+// With this extension off, a cell is a note with readable Lua in it. Nothing is lost.
 (function () {
     /**
      * A cell's optional first line: `--!lua <pragmas>`. Read for the pragmas and then left
@@ -84,59 +89,34 @@
 
             // Everything this extension changes about Desmos itself.
             patches: [
-                // --- the item type ------------------------------------------------
+                // --- what marks a cell ------------------------------------------
                 //
-                // Eight places Desmos asks what an item type is. Each answer is the one it
-                // already gives for a note, so a Lua cell converts, saves, undoes, re-renders
-                // and reloads exactly as a note does.
-
-                // State -> item model. Falls through to the note's own model factory, which
-                // spreads the state over the note defaults - so `type` stays "lua".
+                // A cell is one of Desmos' own notes carrying a `lua: true` flag. Two patches,
+                // both about making that flag persist:
+                //
+                //   - a note's saved state is built by one function from a fixed list of
+                //     fields, so `lua` is added to that list;
+                //   - and its undo restoration copies a fixed set of props, so `lua` is added
+                //     to that set too.
+                //
+                // Everything else about the item is a note, natively: Desmos asks what an item
+                // type is in some fifty places, and all fifty already know what a note is. A
+                // custom `type` would have had to answer seventeen of them, seven being loops
+                // over every item model whose `default:` is a `return` - which do not skip an
+                // unknown type, they end the loop, so every item after a cell would silently
+                // stop updating. None of that exists here.
+                //
+                // It also means a graph opened without this extension shows its cells as notes
+                // with readable Lua in them, rather than as items Desmos cannot model.
                 {
-                    match: /case"text":return (\i)\((\i),(\i)\.controller\);default:return \2\}/,
-                    replace: 'case"lua":$&',
+                    match: /(\i)\.cachedViewState=\{type:\1\.type,id:\1\.id,folderId:\1\.folderId,text:\1\.text,/,
+                    replace: "$&lua:$1.lua,",
                     count: 1
                 },
-                // The two state normalisers. One of them is the incremental setState path,
-                // which throws rather than shrugging - that is version-history restore.
                 {
-                    match: /case"text":return py\(\i\);/,
-                    replace: 'case"lua":$&',
-                    count: 2
-                },
-                // Handing out an id to an item that arrived without one.
-                {
-                    match: /case"text":return\{\.\.\.(\i),id:\((\i)=\1\.id\)!=null\?\2:(\i)\.generateId\(\)\};/,
-                    replace: 'case"lua":$&',
-                    count: 1
-                },
-                // Item model -> saved state. Without this the default returns the *model*,
-                // which would put the controller and the guid into the saved graph.
-                {
-                    match: /case"text":return (\i)\((\i),(\i)\);default:return \2\}/,
-                    replace: 'case"lua":$&',
-                    count: 1
-                },
-                // The projection the list keeps beside each item.
-                {
-                    match: /case"text":return (\i)\((\i)\)\}/,
-                    replace: 'case"lua":$&',
-                    count: 1
-                },
-                // The row. Desmos' own note view, whose template hardcodes
-                // "dcg-expressiontext" - which is what editor.js finds rows by.
-                {
-                    match: /else if\((\i)\.type==="text"\)(\i)=l\(XT,/,
+                    match: /\{id:!1,type:!1,folderId:!0,text:!0,secret:!0,readonly:!0\}/,
                     replace:
-                        'else if($1.type==="text"||$1.type==="lua")$2=l(XT,',
-                    count: 1
-                },
-                // setExpression, which is how a cell's text is written back. The note builder
-                // hardcodes `type:"text"`, so borrow it and put the type back.
-                {
-                    match: /case"text":return iJ\((\i),(\i)\);/,
-                    replace:
-                        'case"lua":{let l=iJ($1,$2);l.type="lua";return l}$&',
+                        "{id:!1,type:!1,folderId:!0,text:!0,secret:!0,readonly:!0,lua:!0}",
                     count: 1
                 },
 
@@ -329,7 +309,7 @@
     // -----------------------------------------------------------------------
 
     function isCell(item) {
-        return !!item && item.type === "lua";
+        return !!item && item.type === "text" && !!item.lua;
     }
 
     /** The pragmas a cell's source asks for, from its first line if it has such a line. */
@@ -457,9 +437,9 @@
         rescan();
     }
 
-    /** An empty cell, as an item. */
+    /** An empty cell, as an item: a note that says it is one. */
     function note(id, folderId) {
-        var item = { type: "lua", id: String(id), text: "" };
+        var item = { type: "text", id: String(id), text: "", lua: true };
         if (folderId) item.folderId = folderId;
         return item;
     }
@@ -577,7 +557,9 @@
 
         if (written.get(id) === cell.source) return;
         written.set(id, cell.source);
-        setExpression({ id: id, type: "lua", text: cell.source });
+        // `lua` is not resent: the reducer applies only the fields it is handed, so the flag
+        // on the model is left alone.
+        setExpression({ id: id, type: "text", text: cell.source });
     }
 
     /** Everything pending, now. Before a save, and on the way out. */
