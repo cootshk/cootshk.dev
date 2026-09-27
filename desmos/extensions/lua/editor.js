@@ -83,6 +83,9 @@
      */
     function attach(cell, node) {
         if (cell.node === node && node.contains(cell.host)) {
+            // Still ours, but the gutter button is a child of a tab React owns, so it is checked
+            // again rather than assumed - gutter() puts one back only if there is none.
+            gutter(cell, node);
             take(cell);
             return;
         }
@@ -90,6 +93,7 @@
         node.setAttribute("data-cde-lua", "");
         keys(cell, node);
         guard(cell, node);
+        gutter(cell, node);
 
         var anchor = node.querySelector(".dcg-displayTextarea");
         var parent = anchor ? anchor.parentNode : node;
@@ -215,6 +219,107 @@
     }
 
     /**
+     * The run button, where the note's own icon was.
+     *
+     * Built out of Desmos' own classes rather than styled from scratch, because a slider's play
+     * button is the thing it is meant to look like and there is no reason to guess at 29px and
+     * the theme's outline colour when the calculator will say. This is the slider's chain with
+     * its tooltip and popover wrappers - which are components, and not reachable from markup -
+     * left out:
+     *
+     *     span.dcg-tab                                <- Desmos', the note row's
+     *       div.dcg-tab-interior                      <- Desmos', empty in a note
+     *         div.dcg-expression-icon-container        (absolute, 29px, centred in the tab)
+     *           div.dcg-circular-icon-container
+     *             span.dcg-circular-icon.dcg-thick-outline   (the ring: 2px, themed, 50% opacity)
+     *               i.dcg-icon-play                          (or -pause)
+     *
+     * `dcg-action-drag`, `dcg-action-icon-touch`, `dcg-action-icon-mouse` and `dcg-tab-interior`
+     * are all in the slider's markup too and all have no CSS and no behaviour - they are inert
+     * markers, so they are not copied.
+     *
+     * A note's own `i.dcg-icon-text` is absolutely centred in the same tab; index.css hides it
+     * for a cell's row so the two do not sit on top of each other.
+     *
+     * Done from here rather than by patching the row's template. The row is already ours to
+     * decorate - the code box goes in the same way, and attach() is re-run whenever React
+     * rebuilds one - so a patch would be a ninth minified pattern to go stale for nothing.
+     *
+     * Taking the click needs `tapboundary`, not stopPropagation. Desmos' tap dispatcher walks the
+     * element chain outwards from the pointer and fires on the first element whose rect contains
+     * it, stopping at any element carrying that attribute; without it the tap lands on the tab
+     * and starts a drag. It is Desmos' own convention for a control nested inside another -
+     * `dcg-slider-container` and the inference footers all carry it.
+     */
+    function gutter(cell, node) {
+        var tab = node.querySelector("span.dcg-tab");
+        if (!tab) return;
+
+        var found = tab.querySelector(".cde-lua__icon");
+        if (found) {
+            cell.icon = found;
+            cell.ring = found.querySelector(".dcg-circular-icon-container");
+            cell.glyph = cell.ring && cell.ring.querySelector("i");
+            cell.fault = found.querySelector(".dcg-tooltipped-error");
+            return;
+        }
+
+        var glyph = ui.el("i", { "aria-hidden": "true" });
+        var ring = ui.el(
+            "div",
+            { class: "dcg-circular-icon-container", role: "button" },
+            ui.el(
+                "span",
+                {
+                    class: "dcg-circular-icon dcg-thick-outline dcg-forced-color-none"
+                },
+                glyph
+            )
+        );
+
+        // The error form is not a circled icon - in Desmos an expression's error *replaces* the
+        // icon in this container with exactly this pair, so the two swap rather than stack.
+        var fault = ui.el(
+            "div",
+            { class: "dcg-tooltipped-error" },
+            ui.el("i", { class: "dcg-icon-error", "aria-hidden": "true" })
+        );
+
+        var icon = ui.el(
+            "div",
+            {
+                class: "dcg-expression-icon-container cde-lua__icon",
+                tapboundary: "true",
+                onclick: function (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    // The row may have been rebuilt since; the cell is looked up, not closed over.
+                    var live = lua.cell(cell.id);
+                    if (live) lua.runner.toggle(live);
+                }
+            },
+            ring,
+            fault
+        );
+
+        // Belt and braces for the drag: tapboundary stops Desmos' tap, and this stops anything
+        // else on the row that listens the ordinary way.
+        ["mousedown", "pointerdown", "touchstart"].forEach(function (type) {
+            icon.addEventListener(type, function (event) {
+                event.stopPropagation();
+            });
+        });
+
+        // Inside .dcg-tab-interior, where the slider's is. That div is unstyled and static, so
+        // the container still positions itself against the tab either way.
+        (tab.querySelector(".dcg-tab-interior") || tab).appendChild(icon);
+        cell.icon = icon;
+        cell.ring = ring;
+        cell.glyph = glyph;
+        cell.fault = fault;
+    }
+
+    /**
      * Stand where the note's own text stands.
      *
      * Desmos insets everything in a note - `.dcg-fixed-width-element` is
@@ -240,10 +345,16 @@
         }
         if (cell.host && cell.host.parentNode)
             cell.host.parentNode.removeChild(cell.host);
+        if (cell.icon && cell.icon.parentNode)
+            cell.icon.parentNode.removeChild(cell.icon);
         if (cell.node) cell.node.removeAttribute("data-cde-lua");
         cell.host = null;
         cell.node = null;
         cell.box = null;
+        cell.icon = null;
+        cell.ring = null;
+        cell.glyph = null;
+        cell.fault = null;
     }
 
     /** The cell is gone for good. */
@@ -261,21 +372,7 @@
 
     function build(cell) {
         var host = ui.el("div", { class: "cde-lua" });
-
-        var run = ui.el("button", {
-            class: "cde-lua__run",
-            type: "button",
-            onclick: function (event) {
-                event.preventDefault();
-                event.stopPropagation();
-                lua.runner.toggle(cell);
-            }
-        });
-        var status = ui.el("span", { class: "cde-lua__status" });
-
         var box = ui.el("div", { class: "cde-lua__box" });
-        var out = ui.el("pre", { class: "cde-lua__out" });
-        var error = ui.el("div", { class: "cde-lua__error" });
 
         // Desmos tracks what the pointer is over by writing dcg-hovered onto every element
         // under it. Monaco decides what was clicked by comparing a line's className against
@@ -301,17 +398,9 @@
             });
         });
 
-        ui.el(
-            host,
-            null,
-            ui.el("div", { class: "cde-lua__bar" }, run, status),
-            box,
-            out,
-            error
-        );
+        ui.el(host, null, box);
 
         cell.box = box;
-        cell.parts = { run: run, status: status, out: out, error: error };
         return host;
     }
 
@@ -364,9 +453,9 @@
         editor.onDidFocusEditorText(function () {
             select(cell);
         });
+        // Flush, and only flush. Leaving a cell is not a request to run it.
         editor.onDidBlurEditorText(function () {
             lua.flush(cell.id);
-            if (cell.on) lua.runner.run(cell);
         });
         editor.addCommand(api.KeyMod.CtrlCmd | api.KeyCode.Enter, function () {
             lua.flush(cell.id);
@@ -416,7 +505,6 @@
             },
             onblur: function () {
                 lua.flush(cell.id);
-                if (cell.on) lua.runner.run(cell);
             },
             onkeydown: function (event) {
                 if (event.key !== "Enter") return;
@@ -576,31 +664,43 @@
     // the chrome
     // -----------------------------------------------------------------------
 
+    /**
+     * Repaint what the cell has to say: the gutter icon, and the squiggle in the editor.
+     *
+     * The ring and the error are two children of the icon container, shown one at a time, which
+     * is how Desmos does it - an expression's error *replaces* its icon rather than recolouring
+     * it, so the circle should not be there when there is an error to show.
+     *
+     * The message itself rides on `title`. Desmos' tooltip binds its listeners when it mounts and
+     * there is no way into it from markup alone, so a native tooltip is as close as this gets.
+     * The container stays clickable in either state, so a cell can be run again once its error is
+     * fixed.
+     */
     function render(cell) {
         guard(cell);
-        if (!cell.parts) return;
-        var p = cell.parts;
-
-        p.run.textContent = cell.on ? "■" : "▶";
-        p.run.title = cell.on ? "Stop this cell" : "Run this cell";
-        p.run.classList.toggle("cde-lua__run--on", !!cell.on);
-
-        // Nothing for "off": the button already says so, and a cell that has never run has
-        // nothing to report.
-        var note = "";
-        if (cell.syntax) note = "syntax error";
-        else if (cell.co && cell.parked) note = "waiting for the graph";
-        else if (cell.co) note = "running";
-        else if (cell.on && cell.exports.size)
-            note = cell.exports.size + " exported";
-        p.status.textContent = note;
-
-        p.out.textContent = (cell.output || []).join("\n");
-        p.out.classList.toggle("cde-lua--shown", !!(cell.output || []).length);
+        if (!cell.icon || !cell.ring || !cell.glyph || !cell.fault) return;
 
         var problem = cell.syntax || cell.error || "";
-        p.error.textContent = problem;
-        p.error.classList.toggle("cde-lua--shown", !!problem);
+        var busy = lua.runner.busy(cell);
+
+        cell.ring.style.display = problem ? "none" : "";
+        cell.fault.style.display = problem ? "" : "none";
+        // dcg-layered-icon is what Desmos' own icon component puts here; it is inert outside a
+        // coloured or image-backed icon, and kept so this is the same markup.
+        if (!problem)
+            cell.glyph.className =
+                (busy ? "dcg-icon-pause" : "dcg-icon-play") +
+                " dcg-layered-icon";
+
+        var title = problem
+            ? problem
+            : busy
+              ? cell.parked
+                  ? "Waiting for the graph - click to stop"
+                  : "Stop this cell"
+              : "Run this cell";
+        cell.icon.setAttribute("title", title);
+        cell.icon.setAttribute("aria-label", title);
 
         markers(cell, problem);
     }

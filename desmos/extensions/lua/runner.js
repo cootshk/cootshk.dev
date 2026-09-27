@@ -8,8 +8,13 @@
 // (libs/fengari/src/ldo.js:638-649), and luaG_traceexec does the rewind (ldebug.js:663-669);
 // that pair is the whole trick.
 //
-// Nothing runs until its toggle is on, and every toggle is off on every load. A graph you
-// have just opened is someone else's code, and `--!lua unsafe` hands that code the DOM.
+// A cell runs when the graph opens, when the play button in its gutter is clicked, and when a
+// value it read changes. It does *not* run because it was edited - typing is not a request to
+// execute, and the same keystroke would otherwise run a dozen half-written versions of a line.
+//
+// The one exception to running at load is `--!lua unsafe`, which grants the cell `js` and with it
+// the DOM on this origin. A graph you have just opened is someone else's code, so that pragma
+// keeps needing a deliberate click.
 //
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
@@ -32,9 +37,6 @@
     /** Re-runs of one cell in a single settling batch before we call it a loop. */
     var SPIN = 20;
 
-    /** Wait out a burst of typing before running. Longer than the flush - running costs more. */
-    var RUN_DELAY = 750;
-
     /** name -> Set of cell ids that read it on their last run. */
     var deps = new Map();
 
@@ -52,10 +54,10 @@
         check: check,
         edited: edited,
         forget: forget,
-        setOn: setOn,
-        toggle: toggle,
         run: start,
-        stop: stop
+        stop: stop,
+        toggle: toggle,
+        busy: busy
     };
 
     lua.bridge.onWake = wake;
@@ -65,24 +67,24 @@
     // when
     // -----------------------------------------------------------------------
 
-    /** The toggle. Off is the resting state, and the only state a page load can produce. */
-    function setOn(cell, on) {
-        if (cell.on === on) return;
-        cell.on = on;
-        if (on) {
-            start(cell);
-        } else {
-            stop(cell);
-            // Off contributes nothing. A definition with no running cell behind it and no item
-            // in the list to point at would be a value from nowhere.
-            cell.exports = new Map();
-            lua.reparse();
-        }
-        render(cell);
+    /** Is a run in flight - going, or parked on a value it is waiting for? */
+    function busy(cell) {
+        return !!cell.co;
     }
 
+    /**
+     * What the gutter button does. Run, or stop a run that is still going: the same play/pause
+     * a slider's button is, and the only way a cell starts other than the graph opening.
+     *
+     * Stopping drops what the part-finished run had exported, because a definition whose cell was
+     * interrupted is a value from nowhere.
+     */
     function toggle(cell) {
-        setOn(cell, !cell.on);
+        if (!busy(cell)) return start(cell);
+        stop(cell);
+        cell.exports = new Map();
+        lua.reparse();
+        render(cell);
     }
 
     /**
@@ -98,14 +100,14 @@
         return cell.syntax;
     }
 
-    /** The text changed. Check it parses, then run it once typing stops. */
+    /**
+     * The text changed. Check that it parses, and stop there.
+     *
+     * Editing a cell never runs it. The graph is still written to on ./index.js's own debounce -
+     * that is storage, and unrelated.
+     */
     function edited(cell) {
-        clearTimeout(cell.runTimer);
-        if (check(cell) || !cell.on) return;
-
-        cell.runTimer = setTimeout(function () {
-            start(cell);
-        }, RUN_DELAY);
+        check(cell);
     }
 
     /** Compile without running. Returns an error string, or null. */
@@ -122,13 +124,20 @@
         return message === null ? null : clean(cell, message);
     }
 
-    /** A value a cell read has changed, so everything that read it is out of date. */
-    function invalidate(name) {
+    /**
+     * A value a cell read has changed, so everything that read it is out of date.
+     *
+     * `from` is the cell that caused it, and it is skipped. A cell that writes a name it also
+     * reads - which `a = 2` next to `a * 2` now is, since a plain global write is an export -
+     * would otherwise invalidate itself on every run and spin until SPIN stopped it.
+     */
+    function invalidate(name, from) {
         var readers = deps.get(name);
         if (!readers) return;
         readers.forEach(function (id) {
+            if (from && from.id === id) return;
             var cell = lua.cell(id);
-            if (cell && cell.on) enqueue(cell);
+            if (cell) enqueue(cell);
         });
     }
 
@@ -158,8 +167,6 @@
     // -----------------------------------------------------------------------
 
     function start(cell) {
-        if (!cell.on) return;
-        clearTimeout(cell.runTimer);
         stop(cell);
 
         if (cell.syntax) return;
@@ -173,7 +180,6 @@
 
         cell.gen = (cell.gen || 0) + 1;
         cell.error = null;
-        cell.output = [];
         cell.reads = new Set();
         cell.exports = new Map();
         cell.stale = false;
@@ -198,11 +204,7 @@
             return fail(cell, message);
         }
 
-        lua.bridge.pushEnv(co);
-        if (cell.pragmas.has("unsafe")) {
-            lua.bridge.grantJs(co);
-            C.lua_setfield(co, -2, to_luastring("js"));
-        }
+        lua.bridge.pushEnv(co, cell.pragmas.has("unsafe"));
         C.lua_setupvalue(co, -2, 1);
 
         C.lua_sethook(co, watchdog, C.LUA_MASKCOUNT, BUDGET);
@@ -304,7 +306,6 @@
     function stop(cell) {
         if (cell.raf) cancelAnimationFrame(cell.raf);
         cell.raf = null;
-        clearTimeout(cell.runTimer);
         release(cell);
     }
 

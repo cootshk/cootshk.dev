@@ -15,9 +15,18 @@
 // and lua_isyieldable is the test; there the read gives nil and the cell is marked stale, to
 // be re-run from the top once the value lands.
 //
-// Writing is the dull direction on purpose. `Desmos.k = 5` records an export; a plain global
-// write does not. __newindex fires for every new global, so exporting them all would turn a
-// forgotten `local` into a definition on someone's graph.
+// Every cell shares one set of globals and keeps its own locals. The globals live in a table of
+// their own, and both `_G` and a cell's own environment are empty tables in front of it wearing
+// the same __index/__newindex - so a write is seen by the next cell to read, and a read is
+// recorded as a dependency even when an earlier cell put the value there. A metatable on a table
+// that also *holds* the values could not do that: a rawget hit never reaches __index.
+//
+// Writing exports. `a = 2` puts 2 in the globals and `a=2` on the graph, and so does
+// `_G.a = 2` and `Desmos.a = 2`. A value that has no Desmos spelling - a function, a string, a
+// table of neither points nor numbers - is stored and not exported, silently, because
+// `function f(x) ... end` is a global write and cross-cell functions are the point of sharing
+// globals at all. `Desmos.k = v` is the strict door: it errors rather than skipping, because it
+// asks for the graph outright instead of as a side effect of not writing `local`.
 //
 // An export never becomes an item in the expression list. It is handed straight to Desmos'
 // evaluator as a statement - see the patch in ./index.js - so it leaves nothing in the saved
@@ -36,20 +45,37 @@
     /** Registry keys. The Lua state is shared with anything else on the page, so namespace. */
     var STORE = "cde.lua.store";
     var THREADS = "cde.lua.threads";
+    var GLOBALS = "cde.lua.globals";
 
     /**
-     * A Desmos name, as Lua spells it: one letter, optionally a subscript. `a` is `a`, and
-     * `a_b` is `a_{b}`. This is Desmos' own identifier shape, which makes it both the right
-     * filter and a cheap one - `myhelper` is never mistaken for something to go asking the
-     * evaluator about.
+     * A Desmos name, as Lua spells it. A Desmos identifier is one letter and an optional
+     * subscript, so `a` is `a` and everything after the first letter is the subscript: `abcd`
+     * and `a_bcd` both mean `a_{bcd}`. A name that cannot be one - `_x`, `a_`, `x2y` is fine but
+     * `1x` is not - is never asked about, which is what keeps `pairs` and `_G` off the graph.
      */
-    var NAME = /^([A-Za-z])(?:_([A-Za-z0-9]+))?$/;
+    var NAME = /^([A-Za-z])(?:_?([A-Za-z0-9]+))?$/;
 
-    /** latex -> { h, ready, value, wake: [] }. One HelperExpression per name asked for. */
+    /** latex -> { h, ready, value, wake: [], used }. One HelperExpression per latex asked for. */
     var helpers = new Map();
 
-    /** Past this many live helpers we stop making new ones rather than leak without bound. */
+    /**
+     * Past this many live helpers the oldest unparked ones are let go. Reachable now that a call
+     * is keyed by its argument: `f(1)` and `f(2)` are two different latexes to watch.
+     */
     var HELPER_CAP = 500;
+
+    /** How many to let go at once, so eviction is not a scan of the whole map per new helper. */
+    var EVICT = 64;
+
+    /** Bumped on every read, so the least recently used helper is the one to drop. */
+    var clock = 0;
+
+    /**
+     * Desmos latex name -> "value" | "function". Filled by ./index.js on every graph change from
+     * the item list and from what the cells currently export, so a read knows whether a name is
+     * a number to wait for, something to call, or nothing at all.
+     */
+    var defs = new Map();
 
     /** The cell whose thread is running right now, so reads know whose dependency they are. */
     var current = null;
@@ -63,6 +89,7 @@
         begin: begin,
         finish: finish,
         names: names,
+        defs: defs,
 
         /** runner.js fills these in. */
         onWake: null,
@@ -77,14 +104,18 @@
                 "desmos: Calc.HelperExpression is missing, so Lua cells cannot read the graph"
             );
 
-        // The shared cross-cell table. Every cell's `_G` is this one, so a function cell 1
-        // defines is a function cell 2 can call.
+        // The shared globals. Not any cell's environment - those sit in front of this one - so
+        // that every read and write still goes through a metamethod.
         C.lua_createtable(L, 0, 0);
         C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(STORE));
 
         // Somewhere to anchor running threads, so they are not collected mid-yield.
         C.lua_createtable(L, 0, 0);
         C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(THREADS));
+
+        // And _G itself, once, so every cell is handed the same table.
+        C.lua_pushnil(L);
+        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
     }
 
     // -----------------------------------------------------------------------
@@ -92,17 +123,35 @@
     // -----------------------------------------------------------------------
 
     /**
-     * Push the environment table for a chunk. Empty, with a metatable, so *every* global read
-     * and write in the cell comes through us - which is what makes both "cell 2 sees what cell
-     * 1 defined" and "cell 2 re-runs when cell 1 changes it" fall out of the same hook.
+     * Push the environment table for a chunk. Empty apart from the standard library, with a
+     * metatable, so *every* global read and write in the cell comes through us - which is what
+     * makes both "cell 2 sees what cell 1 defined" and "cell 2 re-runs when cell 1 changes it"
+     * fall out of the same hook.
      *
-     * A metatable on the real _G could not do this: a rawget hit never reaches __index, so the
-     * second cell to read a name would be invisible.
+     * One table per chunk rather than _G itself, for one reason: `js` is granted per cell, by the
+     * `unsafe` pragma, and it must not be visible to the cell next door. Everything else about
+     * the table is shared, because everything else goes through the metatable.
+     *
+     * The order here is the whole of that guarantee. Everything seeded goes in *before* the
+     * metatable does, so it lands in this table and nowhere else. Setting any of it afterwards
+     * would go through __newindex into the shared globals instead - which is exactly what `js`
+     * used to do, handing the DOM to every cell on the graph the moment one asked for it, and
+     * spinning the asking cell against its own write until the loop guard stopped it.
      */
-    function pushEnv(co) {
+    function pushEnv(co, unsafe) {
         C.lua_createtable(co, 0, 16);
         seed(co);
+        if (unsafe) {
+            grantJs(co);
+            C.lua_setfield(co, -2, to_luastring("js"));
+        }
 
+        pushMeta(co);
+        C.lua_setmetatable(co, -2);
+    }
+
+    /** The metatable behind a cell's environment and behind _G. The same one, deliberately. */
+    function pushMeta(co) {
         C.lua_createtable(co, 0, 3);
         C.lua_pushcfunction(co, envIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
@@ -111,11 +160,11 @@
         // Not readable from Lua, so a cell cannot lift our functions out of it.
         C.lua_pushliteral(co, "lua");
         C.lua_setfield(co, -2, to_luastring("__metatable"));
-        C.lua_setmetatable(co, -2);
     }
 
     /**
-     * The standard library a cell starts with, raw-set so the metatable never sees it.
+     * The standard library a cell starts with. Set before the metatable is on, so none of it is
+     * seen by __newindex - see pushEnv.
      *
      * What is left out is left out on purpose. `debug` reaches upvalues and the registry and
      * so escapes any sandbox at all; `load`, `require` and `dofile` build an environment of
@@ -155,19 +204,36 @@
         });
         C.lua_pop(co, 1);
 
-        // `_G` is the shared store rather than the real globals table: a cell writing _G.x is
-        // talking to the other cells, not to the page.
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
+        // `_G` is the shared view rather than the real globals table: a cell writing _G.x is
+        // talking to the other cells and to the graph, not to the page. Same metatable as the
+        // cell's own environment, so `x = 1` and `_G.x = 1` are one mechanism.
+        pushGlobals(co);
         C.lua_setfield(co, -2, to_luastring("_G"));
 
         C.lua_pushcfunction(co, luaPrint);
         C.lua_setfield(co, -2, to_luastring("print"));
+        C.lua_pushcfunction(co, luaWarn);
+        C.lua_setfield(co, -2, to_luastring("warn"));
 
         pushDesmos(co);
         C.lua_setfield(co, -2, to_luastring("Desmos"));
     }
 
-    /** `js`, for a cell whose sentinel line says `unsafe`. */
+    /** The one _G, made on first use and kept in the registry. */
+    function pushGlobals(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 0);
+        pushMeta(co);
+        C.lua_setmetatable(co, -2);
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
+    }
+
+    /** `js`, for a cell whose sentinel line says `unsafe`. Only ever called from pushEnv. */
     function grantJs(co) {
         C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
         C.lua_getfield(co, -1, to_luastring("js"));
@@ -178,7 +244,14 @@
     // reads
     // -----------------------------------------------------------------------
 
-    /** env.__index: another cell's global, then the graph. */
+    /**
+     * __index, for both a cell's environment and _G: another cell's global, then the graph.
+     *
+     * A name the graph does not define at all is nil rather than a helper read. That is not only
+     * cheaper - it is the Lua-shaped answer. A helper for an undefined name reports NaN, and NaN
+     * is a number, so it is truthy: `if not cache then cache = {} end` would never run its
+     * body. The dependency is recorded anyway, so the cell still re-runs if the name appears.
+     */
     function envIndex(co) {
         if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
             C.lua_pushnil(co);
@@ -186,8 +259,8 @@
         }
         var name = C.lua_tojsstring(co, 2);
 
-        // Another cell's global. Recorded as a dependency the same way a Desmos name is, so
-        // cell 1 changing `x` re-runs cell 2.
+        // The shared globals. Recorded as a dependency the same way a Desmos name is, so cell 1
+        // changing `x` re-runs cell 2.
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         C.lua_getfield(co, -1, to_luastring(name));
         if (!C.lua_isnil(co, -1)) {
@@ -199,6 +272,17 @@
 
         var latex = toLatex(name);
         if (latex === null) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        if (current) current.reads.add(latex);
+
+        var kind = defs.get(latex);
+        if (kind === "function") {
+            pushCall(co, latex);
+            return 1;
+        }
+        if (kind === undefined) {
             C.lua_pushnil(co);
             return 1;
         }
@@ -239,14 +323,25 @@
 
     function helper(latex) {
         var e = helpers.get(latex);
-        if (e) return e;
+        if (e) {
+            e.used = ++clock;
+            return e;
+        }
+        if (helpers.size >= HELPER_CAP) evict();
         if (helpers.size >= HELPER_CAP) {
             console.warn("desmos: too many Lua reads, not watching " + latex);
             return null;
         }
         if (typeof Calc.HelperExpression !== "function") return null;
 
-        e = { h: null, ready: false, value: undefined, wake: [], latex: latex };
+        e = {
+            h: null,
+            ready: false,
+            value: undefined,
+            wake: [],
+            latex: latex,
+            used: ++clock
+        };
         helpers.set(latex, e);
 
         e.h = Calc.HelperExpression({ latex: latex });
@@ -256,6 +351,40 @@
         e.h.observe("numericValue", take);
         e.h.observe("listValue", take);
         return e;
+    }
+
+    /**
+     * Let go of the oldest helpers nothing is parked on.
+     *
+     * Desmos has an add for a helper expression and no remove, so the second half of this
+     * reaches past the API: the add stores the model in listModel.__helperIdToModel keyed by an
+     * id we were never told, so it is found by matching the proxy we were handed. Guarded, and
+     * dropping our own reference is most of the win either way - what is left behind is one
+     * statement the evaluator keeps recomputing, not a growing pile of observers.
+     */
+    function evict() {
+        var loose = [];
+        helpers.forEach(function (e) {
+            if (!e.wake.length) loose.push(e);
+        });
+        loose.sort(function (a, b) {
+            return a.used - b.used;
+        });
+
+        loose.slice(0, EVICT).forEach(function (e) {
+            helpers.delete(e.latex);
+            try {
+                if (e.h && e.h.unobserveAll) e.h.unobserveAll();
+                var models = Calc.controller.listModel.__helperIdToModel;
+                for (var id in models)
+                    if (models[id] && models[id].proxy === e.h) {
+                        delete models[id];
+                        break;
+                    }
+            } catch (error) {
+                // Our reference is gone, which is the part that was leaking.
+            }
+        });
     }
 
     /** What a HelperExpression is currently worth: a list if it has one, else a number. */
@@ -327,11 +456,56 @@
         C.lua_pushnil(co);
     }
 
-    /** `a` -> `a`, `a_b` -> `a_{b}`, anything else -> null. */
+    /** `a` -> `a`, `abcd` and `a_bcd` -> `a_{bcd}`, anything else -> null. */
     function toLatex(name) {
         var m = NAME.exec(name);
         if (!m) return null;
         return m[2] ? m[1] + "_{" + m[2] + "}" : m[1];
+    }
+
+    /** The other way, for the editor's completion list: `a_{bcd}` -> `abcd`. */
+    function toName(latex) {
+        var m = /^([A-Za-z])(?:_\{([A-Za-z0-9]+)\})?$/.exec(latex);
+        if (!m) return null;
+        return m[2] ? m[1] + m[2] : m[1];
+    }
+
+    // -----------------------------------------------------------------------
+    // calling a function the graph defines
+    // -----------------------------------------------------------------------
+
+    /** A Lua function standing for a Desmos one. The latex rides along as its upvalue. */
+    function pushCall(co, latex) {
+        C.lua_pushstring(co, to_luastring(latex));
+        C.lua_pushcclosure(co, callFn, 1);
+    }
+
+    /**
+     * `f(3)` -> the value of `f\left(3\right)`, by the same park-and-resume a plain read uses:
+     * yielding out of a C function with no continuation lets luaD_poscall make the resumed value
+     * its result, which is what Desmos.get has always relied on.
+     *
+     * Each distinct argument is its own latex, its own helper and its own trip to the evaluator,
+     * so a Lua loop over a hundred values costs a hundred of them. Desmos functions take lists,
+     * and a Lua list becomes one - so `f({1, 2, 3})` is a single trip that comes back a list.
+     * That is the way to do it in bulk.
+     */
+    function callFn(co) {
+        var base = C.lua_tojsstring(co, C.lua_upvalueindex(1));
+        var n = C.lua_gettop(co);
+        if (!n) return fail(co, base + " needs an argument");
+
+        var parts = [];
+        for (var i = 1; i <= n; i++) {
+            var arg = toDesmos(co, i);
+            if (arg.error)
+                return fail(
+                    co,
+                    "cannot pass that to " + base + ": " + arg.error
+                );
+            parts.push(arg.latex);
+        }
+        return read(co, base + "\\left(" + parts.join(",") + "\\right)");
     }
 
     // -----------------------------------------------------------------------
@@ -339,19 +513,43 @@
     // -----------------------------------------------------------------------
 
     /**
-     * env.__newindex: a plain global. Goes into the shared store and invalidates whoever read
-     * it - it does *not* become an expression. `function f() end` at the top of a cell is a
-     * global write, and a graph full of expressions named `f` would be nobody's idea of help.
+     * __newindex, for both a cell's environment and _G: the value goes into the shared globals,
+     * and onto the graph if it has a Desmos spelling.
+     *
+     * Best effort, on purpose. `function f(x) ... end` is a global write, and a function is the
+     * one thing Desmos cannot be handed - erroring here would take cross-cell functions with
+     * it. A value that cannot be expressed is stored and not exported; `Desmos.k = v` below is
+     * the door for saying so out loud.
      */
     function envNewIndex(co) {
+        var name =
+            C.lua_type(co, 2) === C.LUA_TSTRING
+                ? C.lua_tojsstring(co, 2)
+                : null;
+
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         C.lua_pushvalue(co, 2);
         C.lua_pushvalue(co, 3);
         C.lua_rawset(co, -3);
         C.lua_pop(co, 1);
 
-        if (C.lua_type(co, 2) === C.LUA_TSTRING && lua.bridge.onInvalidate)
-            lua.bridge.onInvalidate("_:" + C.lua_tojsstring(co, 2));
+        if (name === null) return 0;
+
+        var latex = toLatex(name);
+        if (latex !== null && current) {
+            var rhs = C.lua_isnil(co, 3) ? { error: "nil" } : toDesmos(co, 3);
+            if (rhs.error) current.exports.delete(key(latex));
+            else
+                current.exports.set(key(latex), {
+                    latex: latex + "=" + rhs.latex,
+                    plot: false
+                });
+        }
+
+        // `current` and not the name's readers: a cell that writes what it reads would otherwise
+        // invalidate itself every run and spin until the loop guard stopped it.
+        if (lua.bridge.onInvalidate)
+            lua.bridge.onInvalidate("_:" + name, current);
         return 0;
     }
 
@@ -412,8 +610,7 @@
         var n = C.lua_isnil(co, 5) ? 200 : Math.floor(C.lua_tonumber(co, 5));
 
         var base = toLatex(name || "");
-        if (base === null)
-            return fail(co, "Desmos.sample needs a one-letter name");
+        if (base === null) return fail(co, "Desmos.sample needs a name");
         if (!isFinite(from) || !isFinite(to))
             return fail(co, "Desmos.sample needs a range");
         if (!(n > 1) || n > 10000)
@@ -457,7 +654,7 @@
         return 0;
     }
 
-    /** Desmos.k = v. */
+    /** Desmos.k = v. Strict where a plain global write is forgiving; see envNewIndex. */
     function desmosNewIndex(co) {
         if (C.lua_type(co, 2) !== C.LUA_TSTRING)
             return fail(co, "a Desmos name has to be a string");
@@ -468,7 +665,7 @@
                 co,
                 'cannot export "' +
                     name +
-                    '": a Desmos name is one letter and an optional subscript, like k or a_1'
+                    '": a Desmos name is a letter and an optional subscript, like k or a1'
             );
         if (!current) return 0;
 
@@ -608,8 +805,16 @@
         current = null;
     }
 
-    /** print() goes to the cell's own output strip, not just the console. */
+    /** print() and warn(), straight to the console. The row has nowhere to show them. */
     function luaPrint(co) {
+        return say(co, "log");
+    }
+
+    function luaWarn(co) {
+        return say(co, "warn");
+    }
+
+    function say(co, level) {
         var n = C.lua_gettop(co);
         var parts = [];
         for (var i = 1; i <= n; i++) {
@@ -617,25 +822,21 @@
             parts.push(F.to_jsstring(lauxlib.luaL_tolstring(co, -1)));
             C.lua_pop(co, 2);
         }
-        var line = parts.join("\t");
-        if (current) current.output.push(line);
-        console.log("lua:", line);
+        // Looked up now rather than captured, so a console someone has replaced is still used.
+        (console[level] || console.log).call(console, "lua:", parts.join("\t"));
         return 0;
     }
 
-    /** Every name currently defined on the graph, for the editor's completion list. */
+    /**
+     * Every name a cell could read, as Lua spells it, for the editor's completion list. The
+     * index behind it is the same one reads go through, so the two cannot disagree.
+     */
     function names() {
-        var list = (Calc.getState().expressions || {}).list || [];
         var found = [];
-        list.forEach(function (item) {
-            if (item.type !== "expression" || !item.latex) return;
-            var m = /^\s*([A-Za-z])(?:_\{?([A-Za-z0-9]+)\}?)?\s*=/.exec(
-                item.latex
-            );
-            if (m) found.push(m[2] ? m[1] + "_" + m[2] : m[1]);
+        defs.forEach(function (kind, latex) {
+            var name = toName(latex);
+            if (name) found.push(name);
         });
         return found;
     }
-
-    lua.bridge.grantJs = grantJs;
 })();

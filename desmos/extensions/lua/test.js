@@ -56,7 +56,18 @@ global.extension = (def) => {
 
 // --- a stub Calc ---------------------------------------------------------------
 // Values arrive on a timer, which is the whole point: it forces the yield/resume path.
-const GRAPH = { a: 5, b: 3, L: [1, 2, 3] };
+// Names *and* items. A read is only answered for a name the graph defines - that is what the
+// definitions index is for - so a value the harness offers without an item behind it would read
+// nil, exactly as it would in the calculator.
+const GRAPH = { a: 5, b: 3, L: [1, 2, 3], f: (x) => x * x, S: 42 };
+const SEED = [
+    { type: "expression", id: "g1", latex: "a=5" },
+    { type: "expression", id: "g2", latex: "b=3" },
+    { type: "expression", id: "g3", latex: "L=\\left[1,2,3\\right]" },
+    { type: "expression", id: "g4", latex: "f\\left(x\\right)=x^{2}" },
+    // Read by exactly one test, which needs a name whose helper is not warm yet.
+    { type: "expression", id: "g5", latex: "S=42" }
+];
 const observers = [];
 let selected = null;
 const dispatched = [];
@@ -64,7 +75,7 @@ let reparsed = 0;
 // What Calc.observeEvent("change.cdeLua") would fire. Rescanning is how index.js notices a
 // note that has appeared, so the harness has to do it the same way the graph would.
 const change = () => observers.forEach((cb) => cb());
-let list = [];
+let list = SEED.slice();
 const helpers = [];
 
 const Calc = {
@@ -106,28 +117,52 @@ const Calc = {
     HelperExpression({ latex }) {
         const h = { numericValue: NaN, listValue: undefined, _cbs: [] };
         h.observe = (_k, cb) => h._cbs.push(cb);
+        h.unobserveAll = () => {
+            h._cbs = [];
+        };
         helpers.push({ latex, h });
         setTimeout(() => {
-            const plain = latex.replace(/_\{(\w+)\}/g, "_$1");
-            const v = GRAPH[plain];
-            if (Array.isArray(v)) h.listValue = v;
-            else h.numericValue = v === undefined ? NaN : v;
-            h._cbs.forEach((cb) => cb());
+            report(h, evaluate(latex));
         }, 10);
         return h;
     }
 };
 
+/** `a` -> 5, `a_{b}` -> GRAPH.a_b, `f\left(3\right)` -> 9, anything else -> NaN. */
+function evaluate(latex) {
+    const call = /^([A-Za-z])(?:_\{(\w+)\})?\\left\((.*)\\right\)$/.exec(latex);
+    if (call) {
+        const fn = GRAPH[call[1] + (call[2] || "")];
+        if (typeof fn !== "function") return NaN;
+        const arg = literal(call[3]);
+        // Desmos functions take lists, which is the whole reason one call can stand for many.
+        return Array.isArray(arg) ? arg.map(fn) : fn(arg);
+    }
+    const v = GRAPH[latex.replace(/_\{(\w+)\}/g, "_$1")];
+    return typeof v === "function" ? NaN : v === undefined ? NaN : v;
+}
+
+/** A latex argument back into a JS value: a number, or a list of them. */
+function literal(src) {
+    const listed = /^\\left\[(.*)\\right\]$/.exec(src);
+    if (listed) return listed[1].split(",").map(Number);
+    return Number(src);
+}
+
+function report(h, v) {
+    if (Array.isArray(v)) h.listValue = v;
+    else h.numericValue = v;
+    h._cbs.forEach((cb) => cb());
+}
+
 /** Change a graph value and tell whatever is watching it, the way the evaluator would. */
 function poke(name, value) {
     GRAPH[name] = value;
-    helpers
-        .filter((e) => e.latex.replace(/_\{(\w+)\}/g, "_$1") === name)
-        .forEach((e) => {
-            if (Array.isArray(value)) e.h.listValue = value;
-            else e.h.numericValue = value;
-            e.h._cbs.forEach((cb) => cb());
-        });
+    helpers.forEach((e) => {
+        const plain = e.latex.replace(/_\{(\w+)\}/g, "_$1");
+        if (plain === name || plain.indexOf(name + "\\left(") === 0)
+            report(e.h, evaluate(e.latex));
+    });
 }
 let idc = 100;
 
@@ -224,7 +259,7 @@ async function main() {
     change();
     let cell = lua.cell(id);
     ok("cell discovered", !!cell, "not found");
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok("number", exported("k") === "k=42", exported("k"));
     ok("list", exported("v") === "v=\\left[1,2,3\\right]", exported("v"));
@@ -237,7 +272,7 @@ async function main() {
     id = cellWith("Desmos.c = a * 2 + b");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     ok("parked on a cold read", cell.parked === true, "parked=" + cell.parked);
     await new Promise((r) => setTimeout(r, 80));
     ok(
@@ -257,7 +292,7 @@ async function main() {
     );
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 80));
     ok(
         "list read (1+2+3 = 6)",
@@ -267,10 +302,12 @@ async function main() {
 
     // 4. the reaper is Desmos' own diff: an export that stops being made is simply absent
     lua.edited(cell.id, "Desmos.s = 1");
-    await new Promise((r) => setTimeout(r, 900));
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
     ok("reaped nothing to reap", exported("s") === "s=1", exported("s"));
     lua.edited(cell.id, "-- nothing");
-    await new Promise((r) => setTimeout(r, 900));
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
     ok(
         "export reaped when it stops being made",
         exported("s") === undefined,
@@ -281,7 +318,7 @@ async function main() {
     id = cellWith("Desmos.q = nope()");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "runtime error captured",
@@ -298,7 +335,7 @@ async function main() {
     id = cellWith("Desmos.f = function(x) return x end");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "function export refused with advice",
@@ -306,15 +343,20 @@ async function main() {
         cell.error
     );
 
-    // 7. multi-letter name refused
-    id = cellWith("Desmos.total = 1");
+    // 7. a multi-letter name is a subscript: `total` means `t_{otal}`
+    id = cellWith('Desmos.total = 1\nDesmos["1x"] = 2');
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "multi-letter name refused",
-        !!cell.error && /one letter/.test(cell.error),
+        "multi-letter name becomes a subscript",
+        exported("total") === "t_{otal}=1",
+        exported("total") + " err=" + cell.error
+    );
+    ok(
+        "a name that cannot be a Desmos one is still refused",
+        !!cell.error && /a letter and an optional subscript/.test(cell.error),
         cell.error
     );
 
@@ -322,7 +364,7 @@ async function main() {
     id = cellWith("Desmos.z = (js == nil) and 1 or 0");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "js absent by default",
@@ -333,7 +375,7 @@ async function main() {
     id = cellWith("Desmos.y = (js ~= nil) and 1 or 0", ["unsafe"]);
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "js present with --!lua unsafe",
@@ -341,13 +383,26 @@ async function main() {
         exported("y") + " err=" + cell.error
     );
 
+    id = cellWith("Desmos.x = (js == nil) and 1 or 0");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "and it does not leak to the cell next door",
+        exported("x") === "x=1",
+        exported("x") +
+            " - js is seeded before the environment's metatable goes on, or it would " +
+            "be written into the globals every cell shares"
+    );
+
     // 9. cross-cell globals through the shared store
     const one = cellWith("shared = 7");
     const two = cellWith("Desmos.w = shared or 0");
     change();
-    lua.runner.setOn(lua.cell(one), true);
+    lua.runner.run(lua.cell(one));
     await new Promise((r) => setTimeout(r, 40));
-    lua.runner.setOn(lua.cell(two), true);
+    lua.runner.run(lua.cell(two));
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "cell 2 sees cell 1's global",
@@ -360,7 +415,7 @@ async function main() {
     change();
     cell = lua.cell(id);
     const t0 = Date.now();
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 300));
     ok(
         "runaway loop yielded instead of hanging",
@@ -381,7 +436,7 @@ async function main() {
     id = cellWith('Desmos.sample("g", function(x) return x * x end, 0, 2, 3)');
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "sample wrote xs",
@@ -394,24 +449,67 @@ async function main() {
         exported("gy")
     );
 
-    // 12. print reaches the cell's output
-    id = cellWith('print("hello", 1 + 1)');
+    // 12. print and warn reach the console, which is the only place they go now
+    const said = { log: [], warn: [] };
+    const realLog = console.log;
+    const realWarn = console.warn;
+    console.log = (...a) => said.log.push(a.join(" "));
+    console.warn = (...a) => said.warn.push(a.join(" "));
+    id = cellWith('print("hello", 1 + 1)\nwarn("careful")');
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
+    console.log = realLog;
+    console.warn = realWarn;
     ok(
-        "print captured",
-        cell.output.join("") === "hello\t2",
-        JSON.stringify(cell.output)
+        "print goes to console.log",
+        said.log.some((line) => line === "lua: hello\t2"),
+        JSON.stringify(said.log)
+    );
+    ok(
+        "warn goes to console.warn",
+        said.warn.some((line) => line === "lua: careful"),
+        JSON.stringify(said.warn)
     );
 
-    // 13. off by default
+    // 13. a cell runs itself when it is discovered, which at page load is all of them
     id = cellWith("Desmos.n = 1");
     change();
-    ok("a freshly discovered cell is off", lua.cell(id).on === false);
-    await new Promise((r) => setTimeout(r, 40));
-    ok("and it has not run", exported("n") === undefined, exported("n"));
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "a freshly discovered cell runs itself",
+        exported("n") === "n=1",
+        exported("n")
+    );
+
+    // 13b. except one asking for the DOM, which only ever runs on a click
+    id = cellWith("Desmos.o = 1", ["unsafe"]);
+    change();
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "--!lua unsafe does not run itself",
+        exported("o") === undefined,
+        exported("o")
+    );
+    lua.runner.run(lua.cell(id));
+    await new Promise((r) => setTimeout(r, 60));
+    ok("but does run when asked", exported("o") === "o=1", exported("o"));
+
+    // 13c. editing a cell never runs it
+    id = cellWith("Desmos.ed = 1");
+    change();
+    await new Promise((r) => setTimeout(r, 60));
+    lua.edited(id, "Desmos.ed = 2");
+    await new Promise((r) => setTimeout(r, 900));
+    ok(
+        "an edit does not re-run the cell",
+        exported("ed") === "e_{d}=1",
+        exported("ed")
+    );
+    lua.runner.run(lua.cell(id));
+    await new Promise((r) => setTimeout(r, 60));
+    ok("the run button does", exported("ed") === "e_{d}=2", exported("ed"));
 
     // 13b. the trigger: an expression that is just the word becomes a cell
     const trigId = String(++idc);
@@ -425,13 +523,12 @@ async function main() {
         JSON.stringify(converted)
     );
     ok("and the note is a cell", !!lua.cell(trigId), "not discovered");
-    ok("which starts off", lua.cell(trigId) && lua.cell(trigId).on === false);
 
     // 14. reactivity: a value the cell read changes, and the cell re-runs itself
     id = cellWith("Desmos.r = a + 1");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok("read a=5 -> r=6", exported("r") === "r=6", exported("r"));
     poke("a", 50);
@@ -459,21 +556,22 @@ async function main() {
         lua.runner.line(cell, cell.syntax) === 2,
         String(cell.syntax) + " -> " + lua.runner.line(cell, cell.syntax)
     );
-    lua.runner.setOn(cell, true);
+    lua.edited(cell.id, "Desmos.bad = 1\nlocal y = = 2");
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "a cell that does not parse never runs",
-        exported("q") === undefined,
-        exported("q")
+        exported("bad") === undefined,
+        exported("bad")
     );
 
     // 16. cross-cell reactivity through the shared store
     const up = cellWith("base = 10");
     const down = cellWith("Desmos.d = base or 0");
     change();
-    lua.runner.setOn(lua.cell(up), true);
+    lua.runner.run(lua.cell(up));
     await new Promise((r) => setTimeout(r, 40));
-    lua.runner.setOn(lua.cell(down), true);
+    lua.runner.run(lua.cell(down));
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "downstream cell read upstream global",
@@ -481,7 +579,8 @@ async function main() {
         exported("d")
     );
     lua.edited(up, "base = 99");
-    await new Promise((r) => setTimeout(r, 1000));
+    lua.runner.run(lua.cell(up));
+    await new Promise((r) => setTimeout(r, 200));
     ok(
         "upstream global changed -> downstream re-ran (d=99)",
         exported("d") === "d=99",
@@ -576,36 +675,36 @@ async function main() {
     };
     const area = rule("[data-cde-lua] textarea.dcg-smart-textarea");
     ok(
-        !!area && !/display:\s*none/.test(area),
         "Desmos' note textarea is not hidden",
+        !!area && !/display:\s*none/.test(area),
         "it is the element Desmos focuses for a note's row - hidden, Escape has nowhere to " +
             "hand the keyboard and the arrows stop working"
     );
     ok(
-        /pointer-events:\s*none/.test(area),
         "but it cannot be clicked",
+        /pointer-events:\s*none/.test(area),
         "at full size and clickable it swallows every click meant for the editor under it"
     );
     ok(
-        /width:\s*1px/.test(area) && /height:\s*1px/.test(area),
         "and is shrunk to a point",
+        /width:\s*1px/.test(area) && /height:\s*1px/.test(area),
         "Desmos sizes it to cover the whole container"
     );
     ok(
+        "and Monaco's input textarea is untouched",
         !/(^|[\s,>])textarea(?![.\w-])/.test(
             css
                 .split("}")
                 .filter((r) => /display\s*:\s*none/.test(r))
                 .join("}")
         ),
-        "and Monaco's input textarea is untouched",
         "a blanket `textarea` rule makes the box unclickable and untypable"
     );
     ok(
+        "the cell host is inset like the note's own text",
         /paddingLeft/.test(
             fs.readFileSync(path.join(__dirname, "editor.js"), "utf8")
         ),
-        "the cell host is inset like the note's own text",
         "without it the box sits under the row's icon gutter"
     );
 
@@ -613,7 +712,7 @@ async function main() {
     id = cellWith("Desmos.m = 3");
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     const map = injected();
     const entry = Object.values(map).find((v) => v.latex === "m=3");
@@ -637,16 +736,40 @@ async function main() {
     );
     ok("a re-parse was requested", reparsed > 0, "reparsed=" + reparsed);
 
-    // 22. switching a cell off withdraws its definitions
-    lua.runner.setOn(cell, false);
-    await new Promise((r) => setTimeout(r, 20));
-    ok("off withdraws the export", exported("m") === undefined, exported("m"));
+    // 22. stopping a run withdraws what it had exported. A definition whose cell was
+    // interrupted is a value from nowhere, so the gutter button dropping it is the point.
+    id = cellWith("Desmos.stopme = 1\nwhile true do end");
+    change();
+    cell = lua.cell(id);
+    await new Promise((r) => setTimeout(r, 60));
+    ok("still running", lua.runner.busy(cell), "busy=" + lua.runner.busy(cell));
+    ok(
+        "and had exported before it got stuck",
+        exported("stopme") === "s_{topme}=1",
+        exported("stopme")
+    );
+    lua.runner.toggle(cell);
+    await new Promise((r) => setTimeout(r, 40));
+    ok(
+        "stopping drops the part-finished exports",
+        exported("stopme") === undefined,
+        exported("stopme")
+    );
+    ok("and the run is over", !lua.runner.busy(cell), "still busy");
+    lua.edited(cell.id, "Desmos.stopme = 1");
+    lua.runner.toggle(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "and the same button runs it again",
+        exported("stopme") === "s_{topme}=1",
+        exported("stopme")
+    );
 
     // 23. Desmos.sample marks only the point list as something to plot
     id = cellWith('Desmos.sample("w", function(x) return x end, 0, 1, 2)');
     change();
     cell = lua.cell(id);
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     const sampled = Object.values(injected()).filter((v) =>
         /w_\{?[xy]\}?|w_/.test(v.latex)
@@ -698,7 +821,7 @@ async function main() {
         JSON.stringify(cell.source)
     );
     lua.edited(cell.id, "--!lua unsafe\nerror('x')");
-    lua.runner.setOn(cell, true);
+    lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
         "so an error on source line 2 is reported as line 2",
@@ -736,79 +859,263 @@ async function main() {
     // several clicks to get in; and leaving a cell rebuilt its box from `cell.source`, so any
     // bug near that value showed up as the text vanishing. One editor per cell has neither.
     const ed = fs.readFileSync(path.join(__dirname, "editor.js"), "utf8");
+    // editor.js with its commentary removed. Every check below is about what the code does, and
+    // a source-text assertion a *comment* can satisfy proves nothing: the first version of the
+    // gutter check passed against a doc comment describing the markup while the markup itself was
+    // hand-rolled and invisible. Block comments go, and so do whole-line `//` ones - not trailing
+    // ones, which would take the "//" out of the Monaco CDN URL with them.
+    const code = ed
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split("\n")
+        .filter((line) => !/^\s*\/\//.test(line))
+        .join("\n");
     ok(
-        !/colorize/.test(ed),
         "no cell is re-rendered from its source text",
+        !/colorize/.test(code),
         "a box rebuilt on blur turns any bug near cell.source into lost text"
     );
     ok(
-        /editors\.set\(cell\.id,/.test(ed),
         "there is an editor per cell, not one that moves",
+        /editors\.set\(cell\.id,/.test(code),
         "a moved editor replaces the element the click landed on"
     );
     ok(
+        "and no static stand-in for it",
         !/cde-lua__static/.test(
             ed + fs.readFileSync(path.join(__dirname, "index.css"), "utf8")
         ),
-        "and no static stand-in for it",
         "the static form is what went blank"
     );
 
     // 28. the keys, as far as they can be checked without a DOM: Escape hands the row back
     // through Desmos' own focus dispatches, and Shift+Enter adds a line at the selection.
     ok(
-        /move-focus-to-item/.test(ed) && /set-selected-id/.test(ed),
         "Escape hands the row to Desmos rather than only dropping focus",
+        /move-focus-to-item/.test(code) && /set-selected-id/.test(code),
         "Desmos keeps focus as state; blurring alone leaves no row focused"
     );
     ok(
-        /KeyMod\.Shift \| api\.KeyCode\.Enter/.test(ed),
         "Shift+Enter is bound",
+        /KeyMod\.Shift \| api\.KeyCode\.Enter/.test(code),
         "plain Enter must stay a newline, so the row shortcut needs its own binding"
     );
     ok(
-        /type: "new-expression"/.test(ed),
         "and adds an expression below, focused",
+        /type: "new-expression"/.test(code),
         "new-expression inserts at the selection with shouldFocus"
     );
 
     ok(
-        /onDidFocusEditorText/.test(ed) && /set-selected-id/.test(ed),
         "focusing a cell moves Desmos' selection marker to its row",
+        /onDidFocusEditorText/.test(code) && /set-selected-id/.test(code),
         "the editor is ours, so Desmos has no other way of knowing which row is in use"
     );
     ok(
-        /querySelector\("textarea\.dcg-smart-textarea"\)/.test(ed),
         "Escape hands the keyboard to the note's own textarea",
+        /querySelector\("textarea\.dcg-smart-textarea"\)/.test(code),
         "the row container's keydown only handles reorder mode, so focusing it leaves the " +
             "arrows dead"
     );
 
     ok(
-        /event\.key === "Tab"/.test(ed) && /getLineMaxColumn/.test(ed),
         "Tab from the row puts the caret at the end of the code",
+        /event\.key === "Tab"/.test(code) && /getLineMaxColumn/.test(code),
         "the same move Tab makes over an expression"
     );
     ok(
-        /host\.contains\(event\.target\)/.test(ed),
         "and keys from inside the editor are left to it",
+        /host\.contains\(event\.target\)/.test(code),
         "otherwise Tab could never indent"
     );
     ok(
-        /event\.key\.length === 1/.test(ed) &&
-            /trigger\("cde-lua", "type"/.test(ed),
         "a letter typed on the row goes into the code and is typed there",
+        /event\.key\.length === 1/.test(code) &&
+            /trigger\("cde-lua", "type"/.test(code),
         "the keystroke is cancelled, so the character has to be put in by hand"
     );
     ok(
-        /area\.readOnly = true/.test(ed),
         "and the row's own textarea cannot take text",
+        /area\.readOnly = true/.test(code),
         "it still holds the source, so a stray keystroke would be spliced into it"
     );
     ok(
-        /cell\.box\.contains\(document\.activeElement\)/.test(ed),
         "the keyboard survives Monaco replacing the fallback textarea",
+        /cell\.box\.contains\(document\.activeElement\)/.test(code),
         "the first cell is made before Monaco has loaded, and would lose its caret"
+    );
+
+    // 29. a plain global write is an export, and so is _G
+    id = cellWith("pp = 2\n_G.qq = 3");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "a plain global write exports",
+        exported("pp") === "p_{p}=2",
+        exported("pp") + " err=" + cell.error
+    );
+    ok(
+        "and so does one through _G",
+        exported("qq") === "q_{q}=3",
+        exported("qq")
+    );
+
+    // 30. a value with no Desmos spelling is stored and not exported. This is what keeps a
+    // cross-cell function working: `function f() end` is a global write like any other, and
+    // erroring on it would be erroring on the whole point of sharing globals.
+    const holder = cellWith("function helper1() return 11 end\nlabel = 'hi'");
+    const caller = cellWith("Desmos.hh = helper1()");
+    change();
+    lua.runner.run(lua.cell(holder));
+    await new Promise((r) => setTimeout(r, 40));
+    lua.runner.run(lua.cell(caller));
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "a function is stored, not exported",
+        exported("helper1") === undefined,
+        exported("helper1")
+    );
+    ok("nor is a string", exported("label") === undefined, exported("label"));
+    ok(
+        "and the holder did not error over either",
+        !lua.cell(holder).error,
+        lua.cell(holder).error
+    );
+    ok(
+        "another cell can call it",
+        exported("hh") === "h_{h}=11",
+        exported("hh") + " err=" + lua.cell(caller).error
+    );
+    ok(
+        "Desmos.k = <a string> still refuses out loud",
+        (() => {
+            const strict = cellWith('Desmos.k = "hi"');
+            change();
+            lua.runner.run(lua.cell(strict));
+            return true;
+        })()
+    );
+    await new Promise((r) => setTimeout(r, 60));
+
+    // 31. a function the graph defines is callable, and a list argument is one call
+    const calls = helpers.length;
+    id = cellWith("Desmos.ff = f(3)\nDesmos.fl = f({1, 2, 3})");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a Desmos function is callable from Lua (f(3) = 9)",
+        exported("ff") === "f_{f}=9",
+        exported("ff") + " err=" + cell.error
+    );
+    ok(
+        "and takes a list, coming back a list",
+        exported("fl") === "f_{l}=\\left[1,4,9\\right]",
+        exported("fl")
+    );
+    ok(
+        "three values cost one trip to the evaluator, not three",
+        helpers.length - calls === 2,
+        "made " + (helpers.length - calls) + " helpers"
+    );
+
+    // 32. a name nothing defines is nil, and costs nothing. NaN would be a number, and so
+    // truthy, which would quietly break `if not cache then cache = {} end`.
+    const cold = helpers.length;
+    id = cellWith("Desmos.un = (nothingdefined == nil) and 1 or 0");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "an undefined name reads nil",
+        exported("un") === "u_{n}=1",
+        exported("un") + " err=" + cell.error
+    );
+    ok(
+        "and asks the evaluator nothing",
+        helpers.length === cold,
+        "made " + (helpers.length - cold) + " helpers"
+    );
+
+    // 33. a cell that writes a name it also reads must not invalidate itself. Now that a plain
+    // write is an export, that is an ordinary thing to write rather than a curiosity.
+    //
+    // It takes three runs to reach the shape that loops, which is why this is not one. Run 1
+    // finds nothing in the globals, so it reads the *graph* for `spin` and only writes the
+    // globals; run 2 reads the globals but files that read at the end, after its own write has
+    // already gone by; run 3 is the first whose write meets a filed read of the same name. From
+    // there, unguarded, it re-runs itself until the loop guard calls it.
+    id = cellWith("spin = (spin or 0) + 1\nDesmos.sp = spin");
+    change();
+    cell = lua.cell(id);
+    await new Promise((r) => setTimeout(r, 80));
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 250));
+    ok(
+        "a cell does not re-run itself over its own write",
+        exported("sp") === "s_{p}=3" && !cell.error,
+        exported("sp") + " err=" + cell.error
+    );
+
+    // 34. the gutter button, which needs a DOM to press but not to look at
+    ok(
+        "the run button carries tapboundary",
+        /tapboundary/.test(code),
+        "Desmos' tap dispatcher walks outwards to the first element containing the pointer and " +
+            "stops at one of these; without it the tap lands on the drag handle"
+    );
+    ok(
+        "and wears Desmos' own play and pause glyphs",
+        /dcg-icon-play/.test(code) && /dcg-icon-pause/.test(code),
+        "a slider's button is the thing it is meant to look like"
+    );
+    // The first attempt drew this button itself - a bare glyph at a guessed size in a guessed
+    // colour, with no ring - and it came out invisible against the sheet. The whole chain is
+    // Desmos' now, so the circle, the 29px and the theme's outline colour are the real ones.
+    ok(
+        "and is placed and circled by Desmos' own icon chain",
+        /dcg-expression-icon-container/.test(code) &&
+            /dcg-circular-icon-container/.test(code) &&
+            /dcg-circular-icon dcg-thick-outline/.test(code),
+        "hand-rolling the ring, the size and the colour is what made it invisible"
+    );
+    ok(
+        "with no geometry of our own left over",
+        !/margin: -\d+px|font-size: 1\d0%/.test(
+            css.slice(css.indexOf(".cde-lua__icon"))
+        ),
+        "two sets of numbers for one button is how they drift apart"
+    );
+    // A selected row fills its tab with the accent colour, so an icon that stays dark vanishes
+    // into it. Desmos' icons take a `whiteIcon` prop from renderItemSelected(id), which is the
+    // same predicate that puts `dcg-selected` on the row - so the row's class is the hook, and
+    // nothing has to watch the selection to keep up with it.
+    ok(
+        "and turns white on a selected row, as Desmos' own icons do",
+        /\[data-cde-lua\]\.dcg-selected[\s\S]{0,200}color: #fff/.test(css),
+        "a selected row's tab is filled with the accent colour and a dark icon disappears in it"
+    );
+    ok(
+        "an error shows as Desmos shows one",
+        /dcg-tooltipped-error/.test(code) && /dcg-icon-error/.test(code),
+        "an expression's error in Desmos is its gutter icon, in that exact markup"
+    );
+    ok(
+        "and the note's own icon is out of its way",
+        /\[data-cde-lua\] \.dcg-tab \.dcg-icon-text/.test(css),
+        "both would otherwise sit in the same absolutely-positioned spot"
+    );
+    ok(
+        "nothing is left of the bar or the output strip",
+        !/cde-lua__run|cde-lua__status|cde-lua__out|cde-lua__error/.test(
+            ed + css
+        ),
+        "the button moved to the gutter and print goes to the console"
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");

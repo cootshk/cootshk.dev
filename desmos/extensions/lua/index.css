@@ -1,10 +1,10 @@
 /* A Lua cell's row.
  *
- * The chrome outside the box follows the calculator - Desmos' own custom properties, with
- * fallbacks, the way extensions/settings/index.css does it. The box itself does not: it is
- * Monaco's vs-dark, hard-coded to match, because an editor that restyles as you type into it
- * is hard to type into, and because the coloured <pre> and the live editor have to be the same
- * colour or focusing a cell would make it flinch. Same reasoning as the Themes tab. */
+ * There is no chrome outside the box any more - the run button is the row's own gutter icon and
+ * an error shows the way Desmos shows one, so both wear Desmos' classes rather than ours. The box
+ * is Monaco's vs-dark, hard-coded to match rather than following the calculator's theme, because
+ * an editor that restyles as you type into it is hard to type into. Same reasoning as the
+ * Themes tab. */
 
 /* A cell is a note, so Desmos has drawn note machinery we are standing in front of.
  *
@@ -44,10 +44,72 @@
     resize: none !important;
 }
 
+/* --- the gutter ---------------------------------------------------------- */
+
+/* The note's own icon goes; editor.js puts a run button where a slider's play button sits. Desmos
+ * draws the note icon as
+ *
+ *     .dcg-expressionitem.dcg-expressiontext .dcg-icon-text {
+ *         position: absolute; top: 50%; left: 50%; margin: -7px 0 0 -7px;
+ *         font-size: 140%; opacity: .25
+ *     }
+ *
+ * absolutely centred in the tab, which is where the button goes, so one of them has to stand
+ * down. */
+[data-cde-lua] .dcg-tab .dcg-icon-text {
+    display: none !important;
+}
+
+/* Almost nothing to do here: the button is built out of Desmos' own icon chain, so
+ * .dcg-expression-icon-container places it (absolute, 29px, centred in the 38px tab) and
+ * .dcg-circular-icon.dcg-thick-outline draws the ring in the theme's own text colour at 50%
+ * opacity. Guessing at either was the bug this replaces. */
+.cde-lua__icon {
+    cursor: pointer;
+}
+
+/* Desmos brightens its own icons by stamping `dcg-hovered` on whatever is under the pointer, and
+ * it only does that to elements it rendered - so the two states it defines for a thick outline,
+ * .dcg-hovered at .7 and .dcg-depressed at .9, have to be asked for by hand here. */
+.cde-lua__icon:hover .dcg-circular-icon.dcg-thick-outline {
+    opacity: 0.7;
+}
+
+.cde-lua__icon:active .dcg-circular-icon.dcg-thick-outline {
+    opacity: 0.9;
+}
+
+/* Selected, dragged or focused, Desmos fills the tab with the accent colour and turns its icons
+ * white. Its icon component gets that from a `whiteIcon` prop - `renderItemSelected(id)` - and
+ * that is the very predicate behind `dcg-selected` on the row itself:
+ *
+ *     getSharedItemClasses() { ... "dcg-selected": this.controller.renderItemSelected(t) ... }
+ *
+ * so the row's own class is enough and nothing has to watch the selection. (It would have to be
+ * watched: `paint()` runs on childList mutations, and this is a class change.) These two mirror
+ * `.dcg-circular-icon.dcg-thick-outline.dcg-white-icon` and `.dcg-tooltipped-error.dcg-white`,
+ * and they repeat the hover selector because Desmos' own white rule loses to it otherwise. */
+[data-cde-lua].dcg-selected .cde-lua__icon .dcg-circular-icon.dcg-thick-outline,
+[data-cde-lua].dcg-selected
+    .cde-lua__icon:hover
+    .dcg-circular-icon.dcg-thick-outline {
+    color: #fff;
+    border-color: #fff;
+    opacity: 0.9;
+}
+
+[data-cde-lua].dcg-selected
+    .cde-lua__icon:active
+    .dcg-circular-icon.dcg-thick-outline {
+    opacity: 1;
+}
+
+[data-cde-lua].dcg-selected .cde-lua__icon .dcg-tooltipped-error {
+    color: #fff;
+}
+
 .cde-lua {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: block;
     box-sizing: border-box;
     /* The left and right insets are copied from the sibling we stand next to, in editor.js:
      * Desmos' .dcg-fixed-width-element is `padding: 15px 35px 9px 53px`, and that 53px is what
@@ -62,47 +124,6 @@
     font-size: 13px;
 }
 
-/* --- the bar ------------------------------------------------------------- */
-
-.cde-lua__bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.cde-lua__run {
-    flex: none;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: 1px solid var(--dcg-custom-border-color, #d1d1d1);
-    border-radius: 50%;
-    background: var(--dcg-custom-background-color, #fff);
-    color: var(--dcg-custom-secondary-text-color, #666);
-    font-size: 10px;
-    line-height: 1;
-    cursor: pointer;
-}
-
-.cde-lua__run:hover {
-    color: var(--dcg-custom-text-color, #454545);
-    border-color: var(--dcg-custom-secondary-text-color, #888);
-}
-
-/* On is the loud state, because off is the resting one and nothing runs by accident. */
-.cde-lua__run--on {
-    background: var(--dcg-accent-color, #2f72dc);
-    border-color: var(--dcg-accent-color, #2f72dc);
-    color: #fff;
-}
-
-.cde-lua__status {
-    color: var(--dcg-custom-secondary-text-color, #888);
-    font-size: 11px;
-    font-style: italic;
-    user-select: none;
-}
-
 /* --- the box ------------------------------------------------------------- */
 
 .cde-lua__box {
@@ -111,8 +132,8 @@
     width: 100%;
     min-width: 0;
     max-width: 100%;
-    /* Long lines scroll inside the box - the <pre> and the textarea do their own, and Monaco
-     * brings its own scrollbars - rather than widening the cell. */
+    /* Long lines scroll inside the box - the textarea does its own and Monaco brings its own
+     * scrollbars - rather than widening the cell. */
     overflow: hidden;
     border: 1px solid #333;
     border-radius: 3px;
@@ -151,36 +172,4 @@
     line-height: 20px;
     tab-size: 4;
     white-space: pre;
-}
-
-/* --- what came out of it ------------------------------------------------- */
-
-.cde-lua__out,
-.cde-lua__error {
-    display: none;
-    margin: 0;
-    padding: 3px 6px;
-    border-radius: 3px;
-    font-family:
-        "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-    font-size: 11px;
-    line-height: 16px;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-.cde-lua--shown {
-    display: block;
-}
-
-.cde-lua__out {
-    max-height: 120px;
-    overflow: auto;
-    background: var(--dcg-custom-well-background-color, rgba(0, 0, 0, 0.04));
-    color: var(--dcg-custom-secondary-text-color, #666);
-}
-
-.cde-lua__error {
-    background: rgba(199, 68, 64, 0.12);
-    color: var(--dcg-error-color, #c74440);
 }

@@ -39,6 +39,14 @@
 // With this extension off, a cell is a note with readable Lua in it. Nothing is lost.
 (function () {
     /**
+     * A definition on the graph, as its latex reads: `a=5`, `a_{1}=5`, `f\left(x\right)=x^{2}`.
+     * The bracketed group is what separates a function from a value, and its absence is what
+     * separates `y=x^{2}` from `x^{2}+y^{2}=1` - the latter has no name on the left at all.
+     */
+    var DEFINE =
+        /^\s*([A-Za-z](?:_\{[A-Za-z0-9]+\}|_[A-Za-z0-9])?)\s*(\\left\([^=]*?\\right\))?\s*=/;
+
+    /**
      * A cell's optional first line: `--!lua <pragmas>`. Read for the pragmas and then left
      * alone - it is a Lua comment, so the compiler ignores it, and leaving it in means the
      * source is the chunk and no line numbers have to be adjusted.
@@ -240,12 +248,11 @@
              * Put every cell's exports into the map Desmos is about to turn into statements.
              * Called from the patch above, so `map` is Desmos' own.
              *
-             * Only cells that are switched on contribute: off means a cell is not running, and
-             * a definition with no visible source and no cell behind it would be a mystery.
+             * A cell that has not run has nothing in its exports, so there is nothing to gate on
+             * here - the reaper is Desmos' own diff either way.
              */
             inject: function (map) {
                 cells.forEach(function (cell) {
-                    if (!cell.on) return;
                     cell.exports.forEach(function (spec, name) {
                         var id = "cde-lua-" + cell.id + "-" + name;
                         map[id] = {
@@ -336,6 +343,11 @@
         var seen = new Set();
         var order = 0;
 
+        // Cells that were not on the graph a moment ago, in sheet order. Started below, once the
+        // whole list has been read and the definitions index is complete - a cell's first run
+        // has to be able to see the functions and values it is about to ask for.
+        var fresh = [];
+
         for (var i = 0; i < list.length; i++) {
             var item = list[i];
 
@@ -360,18 +372,13 @@
                     pragmas: pragmas(source),
                     order: order++,
 
-                    // Off on every load, always. A graph you have just opened is someone
-                    // else's code, and Lua reaches the DOM.
-                    on: false,
-
                     node: null,
                     host: null,
                     error: null,
 
-                    // what the last run read, exported, and printed
+                    // what the last run read and exported
                     reads: new Set(),
                     exports: new Map(),
-                    output: [],
 
                     co: null,
                     parked: false,
@@ -381,9 +388,10 @@
                 };
                 cells.set(item.id, cell);
                 written.set(item.id, item.text);
-                // A cell can arrive off the graph already broken; say so before it is ever
-                // switched on, rather than only once somebody types in it.
+                // A cell can arrive off the graph already broken; say so straight away, rather
+                // than only once somebody types in it.
                 if (lua.runner) lua.runner.check(cell);
+                fresh.push(cell);
             } else {
                 cell.order = order++;
                 cell.pragmas = pragmas(source);
@@ -406,7 +414,70 @@
             written.delete(id);
         });
 
+        index(list);
         paint();
+        if (fresh.length) wake(fresh);
+    }
+
+    /**
+     * Start cells that have just appeared - which at page load is all of them.
+     *
+     * Deferred out of the dispatch that brought us here: starting a run calls reparse(), and
+     * Desmos is in the middle of its own state change. A cell asking for `unsafe` is left alone;
+     * that pragma hands Lua `js`, and so the DOM on this origin, and a graph someone else wrote
+     * should not get that for the price of being opened.
+     */
+    function wake(fresh) {
+        setTimeout(function () {
+            fresh.forEach(function (cell) {
+                if (!cells.get(cell.id)) return;
+                if (cell.pragmas.has("unsafe")) return;
+                if (lua.runner) lua.runner.run(cell);
+            });
+        }, 0);
+    }
+
+    /**
+     * Rebuild the index a Lua read is answered from: every name the graph defines, and whether
+     * it is a value to wait for or a function to call.
+     *
+     * A cell's own exports go in too. They are statements rather than items, so they are not in
+     * the list - but `Desmos.k = 5` in one cell is exactly the sort of thing the next cell means
+     * to read, and without this it would read nil.
+     */
+    function index(list) {
+        if (!lua.bridge) return;
+        var defs = lua.bridge.defs;
+        defs.clear();
+
+        list.forEach(function (item) {
+            if (!item) return;
+            if (item.type === "expression") return mark(item.latex);
+            // A table's columns are definitions as much as an expression is.
+            if (item.type === "table" && item.columns)
+                item.columns.forEach(function (column) {
+                    if (column && column.latex) mark(column.latex + "=");
+                });
+        });
+
+        cells.forEach(function (cell) {
+            cell.exports.forEach(function (spec) {
+                mark(spec.latex);
+            });
+        });
+
+        function mark(latex) {
+            var m = DEFINE.exec(String(latex == null ? "" : latex));
+            if (!m) return;
+            defs.set(canonical(m[1]), m[2] ? "function" : "value");
+        }
+    }
+
+    /** `a_1` and `a_{1}` are the same name; the index holds the second spelling. */
+    function canonical(name) {
+        var m = /^([A-Za-z])(?:_\{?([A-Za-z0-9]+)\}?)?$/.exec(name);
+        if (!m) return name;
+        return m[2] ? m[1] + "_{" + m[2] + "}" : m[1];
     }
 
     /**

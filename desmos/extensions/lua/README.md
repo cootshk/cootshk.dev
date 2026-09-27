@@ -4,23 +4,38 @@ Lua cells in the expression sheet. Pick **lua** from the `+` menu - next to note
 type `lua` into an empty expression, and the row becomes an editor; a cell can read the graph's
 values as ordinary globals and hand values back by assigning to `Desmos`.
 
-Nothing runs until you press the ▶ on the cell, and **every cell is off on every page load**.
-A graph you have just opened is somebody else's code.
+## When a cell runs
+
+Three times, and no others:
+
+- when the graph opens;
+- when you click the ▶ in its gutter;
+- when a value it read changes.
+
+**Not when you edit it.** Typing is not a request to execute, and running on every keystroke would
+run a dozen half-written versions of a line. `Ctrl`/`Cmd`+`Enter` or the ▶ is how you say so.
+
+The one thing that does not run at load is a cell asking for `unsafe`, which is handed the page
+itself - see _What a cell can reach_. Everything else on a graph you have just opened runs, which
+means opening somebody else's graph runs their Lua.
 
 ## A cell
 
-A cell is a note whose text begins `--!lua`, which is why it survives saving, undo, version
-history, `.dcg` files and desmos.com without this extension having to teach Desmos a new item
-type - and why, with the extension off, you still see your Lua rather than losing it. `--!lua`
-is a Lua comment, so the note's text _is_ the chunk: nothing is reassembled and nothing is
-escaped.
+A cell is one of Desmos' own notes carrying a `lua: true` flag, and its `text` is the Lua source
+verbatim. That is why it survives saving, undo, version history, `.dcg` files and desmos.com
+without this extension teaching Desmos a new item type - and why, with the extension off, you
+still see your Lua rather than losing it. The note's text _is_ the chunk: nothing is reassembled
+and nothing is escaped, so Lua's line 3 is the editor's line 3.
+
+An optional first line names pragmas, and there is one pragma - `unsafe`:
 
 ```lua
---!lua
+--!lua unsafe
 Desmos.k = a * 2
 ```
 
-There is one pragma: `unsafe`.
+It is read and then left exactly where it is. `--!lua` is a Lua comment, so the compiler ignores
+it and no line numbers have to be adjusted.
 
 Desmos has no typed-word conversions of its own - `table` is not one either, whatever the
 folklore says - so the `lua` trigger is this extension's. It fires the moment an expression's
@@ -65,8 +80,21 @@ snapshot link byte for byte. The client was the whole problem.
 
 ## Reading the graph
 
-Any Desmos name is a global. `a` is `a`, and `a_b` is `a_{b}` - one letter and an optional
-subscript, which is what a Desmos name is.
+Any Desmos name is a global. A Desmos identifier is one letter and an optional subscript, so
+**everything after the first letter is the subscript**:
+
+| in Lua  | on the graph |
+| ------- | ------------ |
+| `a`     | `a`          |
+| `a1`    | `a_{1}`      |
+| `abcd`  | `a_{bcd}`    |
+| `a_bcd` | `a_{bcd}`    |
+
+The last two are the same name; write whichever reads better. A name that cannot be a Desmos one
+at all - `_x`, `1x` - is never asked about, which is what keeps `pairs` and `_G` off the graph.
+
+Desmos' own built-ins are **not** reachable this way: `sin` means `s_{in}`, not `\sin`. Use
+`math.sin`, or `Desmos.get("\\sin(2)")`.
 
 ```lua
 Desmos.c = a * 2 + b        -- numbers
@@ -80,6 +108,10 @@ A value the evaluator has not produced yet does not come back as `nil`: the cell
 waits**, then carries on when the value lands. So a cell can read a name defined below it, or
 on a graph that has only just opened, and still be correct.
 
+A name **nothing on the graph defines** is `nil`, straight away, and costs nothing. That matters
+more than it looks: waiting on it would report `NaN`, and `NaN` is a number and so truthy, which
+would quietly break `if not cache then cache = {} end`.
+
 Whatever a cell reads becomes what it watches. Change `a` and every cell that read `a` runs
 again by itself. That includes globals from other cells - one cell's `base = 10` is another
 cell's `base`, and changing it re-runs the reader.
@@ -91,9 +123,25 @@ Desmos.get("\\sin(2)")
 Desmos.get("\\left(P\\right).x")   -- a point's components; see Limits
 ```
 
+### Calling a function the graph defines
+
+A Desmos `f(x) = x^{2}` is a Lua function:
+
+```lua
+Desmos.y = f(3)             -- 9
+```
+
+Each distinct argument is its own trip to the evaluator, so a Lua loop over a hundred values is a
+hundred round trips and will feel like it. Desmos functions take lists, and a Lua table becomes
+one - so pass the lot at once and get a list back:
+
+```lua
+local ys = f({1, 2, 3})     -- {1, 4, 9}, in one trip
+```
+
 ## Writing to the graph
 
-Assign to `Desmos`. Each assignment becomes a **statement in Desmos' evaluator** - not an
+Assign to a global. Each assignment becomes a **statement in Desmos' evaluator** - not an
 expression in the list. Desmos resolves it exactly as it would a definition you had typed, but
 there is no item on the sheet, nothing in the saved graph, and nothing on the undo stack.
 
@@ -104,27 +152,45 @@ the last moment before the diff (`index.js`). The reaper comes free with it - an
 no longer makes is simply absent from the map, so Desmos removes the statement itself.
 
 ```lua
-Desmos.k = 42                      -- k=42
-Desmos.v = {1, 2, 3}               -- v=\left[1,2,3\right]
-Desmos.p = {x = 1, y = 2}          -- p=\left(1,2\right)
-Desmos.q = {{x=0,y=0}, {x=1,y=1}}  -- a list of points
-Desmos.k = nil                     -- and it is gone
+k = 42                      -- k=42
+v = {1, 2, 3}               -- v=\left[1,2,3\right]
+p = {x = 1, y = 2}          -- p=\left(1,2\right)
+q = {{x=0,y=0}, {x=1,y=1}}  -- a list of points
+total = 7                   -- t_{otal}=7
+k = nil                     -- and it is gone
 ```
 
-A plain global is **not** an export. `helper = function() end` at the top of a cell is a global
-write, and a graph full of expressions named `helper` would help nobody. Globals are how cells
-talk to each other; `Desmos` is how a cell talks to the graph.
+`_G.k = 42` and `Desmos.k = 42` do the same thing. All three go through one metatable, and
+`local` is how you say you meant none of it.
 
-Names are one letter and an optional subscript, because that is what Desmos will parse.
-`Desmos.total` is refused, with the reason.
+### Values with no Desmos spelling
+
+A function, a string, or a table that is neither a point nor a list of numbers is **stored and
+not exported**, quietly:
+
+```lua
+function fact(n) ... end    -- a global, shared with every cell, on the graph nowhere
+label = "hello"             -- likewise
+```
+
+That silence is deliberate. `function f(x) ... end` is a global write like any other, and
+erroring on it would error on cross-cell functions, which is most of the point of sharing globals.
+
+`Desmos.k = v` is the loud door. It asks for the graph outright rather than as a side effect of
+forgetting `local`, so it **errors** rather than skipping:
+
+```lua
+Desmos.k = "hello"          -- error: a string is not a value
+Desmos["1x"] = 1            -- error: not a name Desmos can parse
+```
 
 ### Functions
 
-**A Lua function cannot become a Desmos function.** Values are one thing - a statement's latex
-is just text, so a number or a list travels fine - but a _call_ is another: Desmos evaluates in
-a worker, and wants derivatives, interval arithmetic and list broadcasting from anything it
-calls. A closure gives it none of those, and it is on the wrong thread besides. Two things work
-instead.
+**A Lua function cannot become a Desmos function.** It works the other way round - a Desmos `f(x)`
+_is_ callable from Lua, see above - but not this way. Values are one thing: a statement's latex is
+just text, so a number or a list travels fine. A _call_ is another: Desmos evaluates in a worker,
+and wants derivatives, interval arithmetic and list broadcasting from anything it calls. A closure
+gives it none of those, and it is on the wrong thread besides. Two things work instead.
 
 Write the latex yourself - Lua is very good at this, and it is the reason to reach for a cell
 in the first place:
@@ -156,6 +222,7 @@ function on a Desmos graph.
 | `Shift`+`Enter`      | a new expression below the cell, focused |
 | `Ctrl`/`Cmd`+`Enter` | run the cell now                         |
 | `Esc`                | hand the row to Desmos                   |
+| ▶ in the gutter      | run the cell; ⏸ while it runs, to stop   |
 
 After `Esc` the row belongs to the expression sheet again, so Desmos' own keys work on it -
 `Enter` for a new line below, up and down to walk to the neighbouring ones. `Shift`+`Enter` is
@@ -186,15 +253,42 @@ straight into it by Desmos' note editing and turn up in the code box.
 Arrows, `Enter` and `Backspace` are otherwise held inside the editor, because Desmos binds all
 three to moving around the list.
 
-## `print`
+## The gutter, `print` and errors
 
-Goes to a strip under the cell, and to the console.
+The note's own icon is replaced by a run button, in the same place and the same size a slider's
+play button sits: ▶ while the cell is idle, ⏸ while a run is in flight. Clicking mid-run stops it
+and withdraws what the part-finished run had exported - a definition whose cell was interrupted is
+a value from nowhere.
+
+That button is not a bundle patch. The row is already this extension's to decorate, and
+`attach()` is re-run whenever React rebuilds one. Taking the click off the drag handle underneath
+it needs `tapboundary="true"` rather than `stopPropagation`: Desmos' tap dispatcher walks the
+element chain outwards from the pointer and fires on the first element whose rect contains it,
+stopping at any element carrying that attribute. It is Desmos' own convention for a control nested
+inside another.
+
+An error turns the same icon into Desmos' error icon, because it is Desmos' own markup -
+`div.dcg-tooltipped-error > i.dcg-icon-error`, which is exactly what an expression's error is - so
+the colour, the size and the fade-in come for free. The message is on the icon's `title` and, when
+Monaco loaded, squiggled under the line it names. The button stays clickable either way, so a cell
+can be run again once its error is fixed.
+
+`print` goes to `console.log` and `warn` to `console.warn`. There is no strip under the cell.
 
 ## What a cell can reach
 
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
-`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print` and `Desmos`. `_G` is a
-table the cells share, not the page's globals.
+`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print`, `warn` and `Desmos`.
+
+**Globals are shared; locals are not.** Every cell reads and writes one set of globals, so a
+function one cell defines is a function the next can call, and `_G` is a view of that set rather
+than the page's own globals. A `local` belongs to the cell that declared it and to nothing else.
+
+How, since it matters if you move any of it: the globals live in a table of their own, and both
+`_G` and each cell's environment are _empty_ tables in front of it wearing the same
+`__index`/`__newindex`. A metatable on the table that also held the values could not do the job -
+a `rawget` hit never reaches `__index`, so the second cell to read a name would be invisible and
+nothing would ever re-run.
 
 Left out: `debug` (it reaches upvalues and the registry, so it escapes any of this), `load`,
 `require`, `dofile` (they build an environment of their own), `io`, `os` and `package`.
@@ -207,8 +301,14 @@ js.global.console:log("hello")
 ```
 
 That is real: `js.global` is this page, same-origin, with its storage and its session. A cell
-with `unsafe` on it can do anything a script on cootshk.dev can do. It still will not run until
-you press ▶, which is the control that matters.
+with `unsafe` on it can do anything a script on cootshk.dev can do. So it is the one kind of cell
+that **does not run when the graph opens** - it waits for a click, which is the control that
+matters.
+
+`js` is seeded into the cell's own environment _before_ that environment's metatable goes on, and
+that ordering is the whole of the guarantee. Set afterwards it would go through `__newindex` into
+the shared globals, handing the DOM to every cell on the graph the moment one asked for it.
+`test.js` checks a safe cell next to an unsafe one for exactly that.
 
 ## Loops
 
@@ -246,11 +346,17 @@ swapped back.
 
 - Numbers and lists of numbers can be read. A point reads as `NaN`; use
   `Desmos.get("\\left(P\\right).x")`.
-- An undefined name and `NaN` look the same, because to the evaluator they are.
+- A name the graph defines but the evaluator cannot value reads as `NaN`. A name the graph does
+  not define at all reads as `nil`; the two are worth telling apart.
+- A Desmos function called from Lua costs one trip to the evaluator per distinct argument. Pass a
+  list to do many at once.
 - A cell that reads a value from somewhere it cannot pause - a `js` callback, `table.sort`'s
   comparator - takes `nil` that once and is re-run from the top when the value arrives.
 - An export is invisible: there is no row to click, so a wrong value has to be debugged from the
-  cell that made it. Switching a cell off withdraws everything it defined.
+  cell that made it. Stopping a run withdraws everything that run had defined.
+- Nothing watches for a name being read that a _later_ helper would answer differently once
+  evicted: past five hundred watched latexes the oldest unparked ones are let go, and a read of
+  one of those starts over.
 - Cells _start_ in sheet order. They do not finish in it, because any of them may pause on a
   read. "A later cell sees an earlier cell" is the rule that holds.
 - Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
@@ -283,5 +389,5 @@ interactive version, and where to go when this says something has moved.
 | `index.js`  | what a cell is, where its text lives, when it is written back, and the `lua` trigger |
 | `bridge.js` | the environment a cell runs in, reading the graph, and writing to it                 |
 | `runner.js` | when a cell runs, the loop watchdog, and errors                                      |
-| `editor.js` | Monaco - one instance, moved between cells - and the textarea it falls back to       |
+| `editor.js` | Monaco - one editor per cell - the gutter button, and the textarea it falls back to  |
 | `test.js`   | the above; not loaded in the browser                                                 |
