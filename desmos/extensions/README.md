@@ -9,9 +9,10 @@ extensions/
     index.css     optional; injected before they run
 ```
 
-A bigger one can be several scripts - see *Splitting one across several files*.
+A bigger one can be several scripts - see _Splitting one across several files_.
 
 ## Adding an extension
+
 - make `<id>/index.js` and hand an object to `extension()`
 - add it to `../extensions.json` - nothing is loaded that isn't declared there
 - give it an `index.css` and set `"css": true` if it draws anything
@@ -20,6 +21,7 @@ A bigger one can be several scripts - see *Splitting one across several files*.
 `index.css`; both are resolved inside the extension's own folder.
 
 ## Splitting one across several files
+
 `"file"` also takes a list, for an extension that has outgrown a single script:
 
 ```json
@@ -39,15 +41,20 @@ usual race - another extension is only certainly registered once a hook is
 running, never at the top level.
 
 ## Patching the Desmos bundle
+
 Put a `patches` list in the object you hand to `extension()`. Each patch is
 `{ match, replace }`, applied to the bundle in order:
 
 ```js
 extension({
-  id: "matrices",
-  patches: [
-    { match: /\i\.includes\(\i\)\|\|(?=\i\.restrictedFunctions)/g, replace: "", count: 1 },
-  ],
+    id: "matrices",
+    patches: [
+        {
+            match: /\i\.includes\(\i\)\|\|(?=\i\.restrictedFunctions)/g,
+            replace: "",
+            count: 1
+        }
+    ]
 });
 ```
 
@@ -69,11 +76,12 @@ that extension on and a tab of its own appears next to Examples, with a match an
 box over a diff of what the patch would do to the bundle. It compiles the pattern with the
 loader's own `canonicalizeMatch`, so `\i` and the implied `/g` behave exactly as they will
 in a real patch, and it shows every match with the bundle either side of it - which is how
-a pattern that is looser than it looks gives itself away. Turn *Regex* off and the box is
+a pattern that is looser than it looks gives itself away. Turn _Regex_ off and the box is
 the literal string a `match` written as one would be, found everywhere it occurs - each of
 them a place the patch would change, just as `count` counts them.
 
 ## Drawing UI
+
 Desmos owns the whole document, so an extension that wants to show something
 builds it out of what Desmos put there - stylesheet included. An `index.css`
 declared with `"css": true` is fetched with the script and injected before any of
@@ -95,11 +103,20 @@ card in the Extensions tab (the saved-graphs modal, next to "Examples"):
 
 ```js
 extension({
-  id: "matrices",
-  ui(root, data) {
-    const ui = window.__desmosExt.ui;
-    ui.el(root, null, ui.el("label", {}, ui.el("input", { type: "checkbox" }), " Auto-transpose"));
-  },
+    id: "matrices",
+    ui(root, data) {
+        const ui = window.__desmosExt.ui;
+        ui.el(
+            root,
+            null,
+            ui.el(
+                "label",
+                {},
+                ui.el("input", { type: "checkbox" }),
+                " Auto-transpose"
+            )
+        );
+    }
 });
 ```
 
@@ -114,8 +131,8 @@ fill that slot from `main()`:
 
 ```js
 window.__desmosExt.ui.slot("my-panel", (root, data) => {
-  root.textContent = "hello";
-  return () => {}; // optional teardown, run when Desmos unmounts the element
+    root.textContent = "hello";
+    return () => {}; // optional teardown, run when Desmos unmounts the element
 });
 ```
 
@@ -128,15 +145,16 @@ extension list, the toggles, `dirty`/`reload` - is documented at the top of
 `../ui.js`.
 
 ## A code box
+
 `window.__desmosExt.monaco` (see `../monaco.js`) is Monaco - the editor out of VS
 Code - loaded once and shared, because two copies is two loads: a second
 `loader.js` brings its own module registry and runs the whole editor again.
 
 ```js
 const monaco = window.__desmosExt.monaco;
-monaco.warm();                       // a load is probably coming; start it when idle
-const api = monaco.api();            // the api if it is already here, null until then
-if (!api) monaco.load().then(draw, fallback);  // and the load itself
+monaco.warm(); // a load is probably coming; start it when idle
+const api = monaco.api(); // the api if it is already here, null until then
+if (!api) monaco.load().then(draw, fallback); // and the load itself
 ```
 
 Nothing is fetched until the first `warm()` or `load()`. It comes from a CDN, so
@@ -144,18 +162,28 @@ Nothing is fetched until the first `warm()` or `load()`. It comes from a CDN, so
 fall back on - both `extensions/lua` and the Themes tab fall back to a textarea,
 so that a page broken by a theme is still a page the theme can be deleted from.
 
+One thing it does on everyone else's behalf: Monaco's `loader.js` installs an AMD
+`define` with a truthy `.amd` and leaves it there, and a UMD module evaluated
+afterwards takes the AMD branch and loses its export. That is not hypothetical -
+it is how DesModder came to report `moo.keywords is not a function`, its bundle
+carrying moo's UMD wrapper verbatim and its script being evaluated whenever the
+release zip happens to arrive. `monaco.js` takes `.amd` off the moment the loader
+lands, before editor.main is even requested, and puts `require` back when the load
+finishes. `node desmos/monaco.test.js` is the regression test.
+
 ## Tabs in the saved-graphs modal
+
 `extensions/settings` owns the tabs next to "Examples", and anything its manifest
 entry lists after `index.js` can add one:
 
 ```js
 Extensions.settings.tab({
-  key: "myTab",         // the tab id, CSS class and translation key are built from this
-  label: "My Tab",      // the heading
-  render: (root, controller) => {},  // the body; may return a teardown, like any other slot
-  when: () => true,     // optional - leave the tab out when this is false
-  main: () => {},       // optional - work that has to happen whether the tab is opened or not
-  opening: () => {},    // optional - the modal has been opened; this tab may be next
+    key: "myTab", // the tab id, CSS class and translation key are built from this
+    label: "My Tab", // the heading
+    render: (root, controller) => {}, // the body; may return a teardown, like any other slot
+    when: () => true, // optional - leave the tab out when this is false
+    main: () => {}, // optional - work that has to happen whether the tab is opened or not
+    opening: () => {} // optional - the modal has been opened; this tab may be next
 });
 ```
 
@@ -179,17 +207,19 @@ body is ours. That is what `settings/tabs/savedGraphs.js` does with
 of giving anyone.
 
 ## Fetching your own files
+
 Desmos runs in this document, which means the proxy's bootstrap has patched
 `fetch` and the `src`/`href` setters by the time `main()` and `ready()` run:
 anything root-relative it is handed picks up the `/_/desmos` prefix and goes to
 desmos.com. For a file of this site's own, use `ctx.fetch` (in `setup`) or
 `window.__desmosExt.fetch` (after the swap). See `../local.js`.
 
-Requests that *should* be rewritten - a third-party host that needs the proxy for
+Requests that _should_ be rewritten - a third-party host that needs the proxy for
 CORS, say - want the ordinary `fetch`; `extensions/oneko` and
 `extensions/desmodder` both rely on that.
 
 ## What decides which extensions load
+
 Two lists, added together:
 
 - a **base** - `?ext=` when the address has one, otherwise the toggles in the
@@ -232,6 +262,7 @@ neither `?ext=` nor a graph gets a say. It is for extensions that the UI itself
 depends on.
 
 ### Saying no to a graph
+
 An extension the graph requires shows as on in the Extensions tab, because it
 is, and carries a "Required by graph" line. Those switches start greyed out -
 the tab says "This graph requires certain extensions." and puts an "Unlock"
@@ -250,8 +281,9 @@ Nothing is written unless a toggle actually turned something down; applying
 after an unrelated change leaves the graph's list working.
 
 ## Toggles are a draft
+
 `ui.setEnabled()` only moves a switch. Nothing is written down until
-`ui.apply()` - "Apply and Reload" - which saves *every* toggle, not just the
+`ui.apply()` - "Apply and Reload" - which saves _every_ toggle, not just the
 flipped ones, and reloads onto them. `?ext=` is dropped from the address as it
 goes, since it would otherwise win again and the toggles would not have meant
 anything.

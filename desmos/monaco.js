@@ -81,6 +81,9 @@
 
     function fetchMonaco() {
         return new Promise(function (resolve, reject) {
+            // Before loader.js runs, so there is something to put back afterwards.
+            var had = window.require;
+
             var script = document.createElement("script");
             script.src = MONACO + "/vs/loader.js";
             script.onerror = function () {
@@ -91,18 +94,65 @@
                 // that was there. By now the Desmos bundle has long since run, so there is
                 // nothing left to confuse.
                 var amd = window.require;
+                hideAmd();
                 amd.config({ paths: { vs: MONACO + "/vs" } });
                 window.MonacoEnvironment = { getWorkerUrl: workerUrl };
                 amd(
                     ["vs/editor/editor.main"],
                     function () {
+                        restore(had);
                         resolve(window.monaco);
                     },
-                    reject
+                    function (error) {
+                        restore(had);
+                        reject(error);
+                    }
                 );
             };
             (document.head || document.documentElement).appendChild(script);
         });
+    }
+
+    /**
+     * Take `amd` off the `define` loader.js just installed.
+     *
+     * Not tidiness - correctness, for everyone else on the page. loader.js sets
+     * `window.define` with a truthy `.amd` and leaves it there, and a UMD module evaluated
+     * afterwards starts by asking exactly that:
+     *
+     *     if (typeof define === "function" && define.amd) define([], factory);
+     *     else if (typeof module === "object" && module.exports) module.exports = factory();
+     *
+     * The first branch registers an anonymous module nobody collects, so `module.exports` is
+     * never set and the value is simply lost. That is how DesModder came to report
+     * `moo.keywords is not a function`: its bundle carries moo's UMD wrapper verbatim, and its
+     * script is fetched out of a release zip and evaluated asynchronously - so whether it lands
+     * before or after Monaco is a race it should not have to win.
+     *
+     * Done here rather than once the load finishes, because the gap between loader.js running
+     * and editor.main arriving is a network round trip wide, and that gap is the race.
+     *
+     * `define` itself stays a working function: Monaco's own chunks call it, and they never ask
+     * about `.amd` - only code trying to detect an AMD environment does, which is the thing
+     * being hidden.
+     */
+    function hideAmd() {
+        try {
+            if (window.define && window.define.amd) delete window.define.amd;
+        } catch (error) {
+            // A property that will not go is not worth failing the load over; the editor
+            // still works, and the worst of it is the race above.
+        }
+    }
+
+    /** And put `require` back, which loader.js also wrote over. `define` has to stay - see above. */
+    function restore(had) {
+        try {
+            if (had === undefined) delete window.require;
+            else window.require = had;
+        } catch (error) {
+            // As above.
+        }
     }
 
     var worker = null;
