@@ -38,8 +38,7 @@
         },
         "lua": {
             "name": "Lua",
-            "description": "Lua scripting cells in the expression sheet. Add one from the + menu, or type \"lua\" into an empty expression. A cell reads the graph's values as globals and exports its own the same way, straight to the evaluator, so nothing is added to the graph. Cells run when the graph opens and when you click the play button in the gutter, but never because you typed in one. A cell whose first line reads \"--!lua unsafe\" is given the page itself and only ever runs on a click.",
-            "supports": ["graphing", "3d"],
+            "description": "Embed Lua into your graphs!",
             "file": [
                 "index.js",
                 "builtins.js",
