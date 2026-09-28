@@ -244,6 +244,31 @@ standing in as latex, so `n + 2` composes `L_{p0}+2` and what lands on the graph
 function - `A(3)` is `5`, it plots, and Desmos can differentiate it. There is no Lua left in it
 once it has been written down, and no round trip when it is called.
 
+**A name it reads stands for itself, not for what that name is worth right now.**
+
+```dcg
+b = 2
+```
+
+```lua
+function A() return b + 1 end   -- A\left(\right)=b+1
+```
+
+```dcg
+A()                  -- 3
+A() with b = 1       -- 2
+```
+
+Writing down `A()=3` would be writing down a constant that happens to equal the right thing
+today: `with` would have nothing to substitute into, and moving `b` would not move `A()` until the
+cell ran again. So a graph read inside a function body composes latex even where the number is
+already to hand.
+
+A body that cannot be latex falls back to the numbers rather than to silence. `if b > 1 then` has
+to know, and a fragment has no truth value, so the body is run a second time with the values it
+asked for and written down _as it stands_. `with` cannot reach that one, and it is re-exported
+whenever a name it read moves.
+
 **A function that hands back a function is an action**, and so is one that updates a Desmos value.
 The first is how you ask for an action outright; the second is what assigning to a Desmos name
 already meant. Neither can be written down as latex, so those keep a marker and run their Lua when
@@ -581,9 +606,11 @@ swapped back.
   body, where it runs on its own.
 - A value the evaluator has not produced yet is a latex fragment inside an action body, and
   comparing one errors. See _What a body can see_.
-- A function is written down by running it once with its parameters standing in as latex. A body
-  that compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported
-  at all unless it also updates something, in which case it is an action.
+- A function is written down by running it with its parameters standing in as latex. A body that
+  compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported at all
+  unless it also updates something, in which case it is an action. Comparing a _graph_ read is
+  different: that one has a number to fall back on, and the body is written down as it stands
+  today. `with` cannot substitute into it, and it is re-exported when the number moves.
 - An exported action's plumbing takes names of its own: `L_{uaN}` for the markers and `L_{p0}`,
   `L_{p1}` ... for the parameters. A graph that defines one of those itself has a duplicate
   definition, and Desmos will say so.

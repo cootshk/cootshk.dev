@@ -1546,6 +1546,51 @@ async function main() {
             " - a recursive helper is a Lua global, and nothing the graph can hold"
     );
 
+    // 43d. a function that reads the graph is a function *of* the graph. Folding the read to
+    // today's number would write down a constant, and `A() with b=1` has nothing to substitute
+    // into a constant. Run twice on purpose: after the first run the helper for `b_{9}` is warm
+    // and the number is right there, which is exactly when the fold used to happen.
+    GRAPH.b_9 = 2;
+    list.push({ type: "expression", id: "gb9", latex: "b_{9}=2" });
+    id = cellWith("function A9() return b9 + 1 end");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+    ok(
+        "a function that reads the graph keeps the name",
+        exported("A9") === "A_{9}\\left(\\right)=b_{9}+1",
+        exported("A9") + " err=" + cell.error
+    );
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+    ok(
+        "and still keeps it once the read is warm",
+        exported("A9") === "A_{9}\\left(\\right)=b_{9}+1",
+        exported("A9") + " - b_{9}+1 is a function of b, 3 is a constant"
+    );
+
+    // And where latex will not do, the numbers are the fallback rather than silence: a body that
+    // branches on what it read cannot be a formula, so it is written down as it stands today and
+    // re-exported when the number moves.
+    id = cellWith(
+        "function A8()\n" +
+            "    if b9 > 1 then return 10 end\n" +
+            "    return 20\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+    ok(
+        "a body that branches on a graph value falls back to the number",
+        exported("A8") === "A_{8}\\left(\\right)=10",
+        exported("A8") + " err=" + cell.error
+    );
+
     // --- actions ----------------------------------------------------------------
     //
     // 44. the worked example. `a=2` is on the sheet, so Lua's `a = n` moves it rather than

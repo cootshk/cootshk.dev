@@ -405,6 +405,16 @@
         if (current) current.reads.add(latex);
 
         var e = helper(latex);
+
+        // A symbolic pass wants the name, not what it is worth. Asked for anyway, and the
+        // answer thrown away, because the helper is the warming half of the probe: an action
+        // that fires later wants this one ready, and a second pass that needs numbers is about
+        // to ask for the same thing in earnest. See actions.probeBody.
+        if (lua.actions && lua.actions.symbolic()) {
+            lua.actions.pushLatex(co, latex);
+            return 1;
+        }
+
         if (!e) {
             C.lua_pushnil(co);
             return 1;

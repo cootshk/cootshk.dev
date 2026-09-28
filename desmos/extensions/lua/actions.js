@@ -62,6 +62,15 @@
             return !!recorder;
         },
 
+        /**
+         * Is this recording after latex rather than after numbers? bridge.js asks before it
+         * answers a graph read: a symbolic pass wants the name itself, warm helper or not, so
+         * what the body composes is a formula rather than today's arithmetic. See probeBody.
+         */
+        symbolic: function () {
+            return !!(recorder && recorder.symbolic);
+        },
+
         /** the two Lua value kinds this file adds */
         pushLatex: pushLatex,
         isLatex: isLatex,
@@ -437,9 +446,13 @@
      * not park, and bridge.js reads lua_isyieldable to know that - inside a pcall it is false, so
      * a read that has no value yet takes latex instead of suspending the fire.
      */
-    function record_body(co, idx, args, probe) {
+    function record_body(co, idx, args, probe, symbolic) {
         var outer = recorder;
-        recorder = { updates: new Map(), probe: !!probe };
+        recorder = {
+            updates: new Map(),
+            probe: !!probe,
+            symbolic: !!symbolic
+        };
 
         C.lua_pushvalue(co, idx);
         (args || []).forEach(function (value) {
@@ -598,11 +611,30 @@
      *
      * A fragment argument is what makes the Desmos-function case work at all: `n` has no value
      * yet and never will, so it stands for itself.
+     *
+     * **Symbolic first.** A graph name the body reads stands for itself too, even where the
+     * helper is warm and the number is right there. `function A() return b + 1 end` is
+     * `A\left(\right)=b+1` and not `A\left(\right)=3`, which is the difference between a
+     * function of `b` and a constant that happens to equal one today. Desmos treats the two
+     * very differently: `A() with b=1` substitutes into the first and has nothing to substitute
+     * in the second, and only the first moves when `b` does without waiting for the cell to run
+     * again.
+     *
+     * **Numbers second, where latex will not do.** A body that branches on what it read cannot
+     * be written down symbolically - a fragment has no truth value, so the comparison marks the
+     * recording blind (see latexCompare) and anything built after that branch is a guess. The
+     * same goes for a body that hands a fragment to something expecting a number and errors.
+     * Those get a second pass with the numbers, which writes down the function *as it is right
+     * now*; the read is filed as a dependency either way, so the cell re-runs and re-exports
+     * when the number changes. Less good than a formula, and better than nothing.
      */
     function probeBody(co, idx, params) {
         var args = [];
         for (var i = 0; i < params; i++) args.push({ latex: "L_{p" + i + "}" });
-        return record_body(co, idx, args, true);
+
+        var symbolic = record_body(co, idx, args, true, true);
+        if (!symbolic.error && !symbolic.blind) return symbolic;
+        return record_body(co, idx, args, true, false);
     }
 
     /**
