@@ -11,8 +11,19 @@
 //
 // Two kinds of value make that last point work. A *number*, when the name is already watched -
 // which is what lets Lua branch on it - and otherwise a *latex fragment*, which Desmos evaluates
-// during the fire against the same pre-action state. `b = f(sin(a))` is the second kind, and is
-// correct for exactly the reason the hand-written action is.
+// during the fire against the same pre-action state. `b = f(a)` with a cold `a` is the second
+// kind, and is correct for exactly the reason the hand-written action is.
+//
+// A fragment stands for a value nobody here has, and nothing else. It is not a way of putting
+// off arithmetic Lua could do - a builtin over numbers is computed during the body, see
+// builtins.js - and it is not where a read ends up just because the graph was slow: the probe
+// asks for what a body reads while the cell is still running, so by the time anything can fire
+// those are numbers. What is left is a value that depends on the action's own argument, which
+// nothing could have asked for in advance.
+//
+// So a body assigns values. `floor(random()*100)` is a number rolled once rather than a formula
+// rerolled every fire, and `b = f(a)` puts what `f(a)` is worth into `b` rather than a
+// definition that would follow `f` around afterwards.
 //
 // How a Lua body gets to run inside a fire at all: the action a cell exports is a marker,
 //
@@ -69,6 +80,14 @@
          */
         symbolic: function () {
             return !!(recorder && recorder.symbolic);
+        },
+
+        /**
+         * Is this a probe rather than a fire? A probe runs inside the cell's own run, so a read
+         * it could not answer is worth coming back for; a fire has no run to come back to.
+         */
+        probing: function () {
+            return !!(recorder && recorder.probe);
         },
 
         /** the two Lua value kinds this file adds */
@@ -566,6 +585,9 @@
         if (!cell) return false;
 
         var params = arity(co, idx);
+
+        // Emptied around the probe so what it reads is this body's, not the last one's.
+        if (cell.probeReads) cell.probeReads.clear();
         var probe = probeBody(co, idx, params);
 
         if (probe.error || (probe.gave === C.LUA_TNIL && !probe.updates.size)) {
@@ -588,6 +610,15 @@
             return false;
         }
 
+        // The one export built out of what the body read, rather than out of names standing for
+        // themselves: `A\left(\right)=3` where a symbolic pass would have said `b+1`. It is
+        // only right for as long as those numbers are, so this is where a probe's reads become
+        // the cell's - see bridge.read for why they are not filed anywhere else.
+        if (cell.probeReads)
+            cell.probeReads.forEach(function (latex) {
+                cell.reads.add(latex);
+            });
+
         release(cell, name);
         cell.exports.set(key(name), {
             latex: signature(name, params) + "=" + probe.latex,
@@ -599,9 +630,10 @@
     /**
      * Run the body once with its parameters as latex fragments.
      *
-     * Two jobs. It decides what the function is - see above - and it warms the graph: every name
-     * the body reads becomes a watched helper here, so by the time an action fires those are
-     * numbers rather than latex.
+     * Two jobs. It decides what the function is - see above - and it warms the graph: every value
+     * the body reads is asked for here, so by the time an action fires those are numbers rather
+     * than latex. A read that had no answer yet asks to be come back to (bridge.settle), so the
+     * cell runs again when it lands and the next probe gets further.
      *
      * That second job is why a body handing back a function is run *and then* the function it
      * handed back is run too. The reads that matter are usually in there - `function C(x) return
@@ -633,8 +665,17 @@
         for (var i = 0; i < params; i++) args.push({ latex: "L_{p" + i + "}" });
 
         var symbolic = record_body(co, idx, args, true, true);
-        if (!symbolic.error && !symbolic.blind) return symbolic;
-        return record_body(co, idx, args, true, false);
+        if (symbolic.error || symbolic.blind)
+            return record_body(co, idx, args, true, false);
+
+        // An action fires against numbers, so warm it against numbers. A composed read - `f(a)`,
+        // or anything Desmos.get is handed - has no helper until something asks for it with `a`'s
+        // value already in place, and the symbolic pass never does: there `a` stands for itself.
+        // Without this the first fire would have nothing to read and would write the formula.
+        if (symbolic.gave === C.LUA_TFUNCTION || symbolic.updates.size)
+            record_body(co, idx, args, true, false);
+
+        return symbolic;
     }
 
     /**
@@ -938,17 +979,31 @@
         } catch (error) {
             // Fall through to the direct write below.
         }
-        if (item.latex !== before) return true;
+        if (item.latex !== before) return landed();
 
         // Either that method has moved or our identifier spelling is not Desmos'. Setting the
         // latex is what it does; what is lost is the slider-bound widening, not the update.
         try {
             item.latex = whole;
-            lua.reparse();
-            return true;
+            return landed();
         } catch (error) {
             return false;
         }
+    }
+
+    /**
+     * An item's latex has been changed from outside a dispatch, which is where Desmos does its
+     * own tidying up afterwards. `updateLatexForIdentifier` writes the model and nothing else -
+     * the rebuild, the parse and the repaint are all still owed, and index.js' reparse() is
+     * where those three live. Without it the change is real and invisible, and the next thing
+     * that dispatches - a click anywhere on the sheet - is what makes it appear.
+     *
+     * A fire does not come through here. There Desmos is applying its own updates inside its own
+     * dispatch, which does all of this already; this is the cell-body path, which is outside one.
+     */
+    function landed() {
+        lua.reparse();
+        return true;
     }
 
     /** The item defining `name`, if one does. ./index.js keeps the index that knows. */

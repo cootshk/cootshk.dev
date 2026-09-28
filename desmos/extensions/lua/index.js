@@ -353,15 +353,42 @@
         })
     );
 
-    /** Re-run Desmos' parse, which is what calls inject(). Coalesced into one per turn. */
+    /**
+     * Re-run Desmos' parse, which is what calls inject(). Coalesced into one per turn.
+     *
+     * The end of a dispatch, by hand. Desmos does three things there and all three are needed,
+     * because a cell runs on a timer rather than inside a dispatch:
+     *
+     *   - **updateTheComputedWorld** rebuilds every item's `cachedParsableState`. This is the one
+     *     that is easy to miss and the one that matters most: `requestParseForAllItems` reads
+     *     that cache rather than the item's latex, and compares it against what the evaluator was
+     *     last given. Stale cache, no difference to spot, nothing sent - so a cell that moved `a`
+     *     moved it in the model and nowhere else, and the graph went on believing the old value
+     *     until the next click rebuilt the cache. The same staleness is why an action on the
+     *     sheet then looked like it did nothing: it set `a` to what the evaluator already thought
+     *     `a` was, so no value changed and nothing watching it heard.
+     *   - **requestParseForAllItems** hands the changed statements, and inject()'s exports, to
+     *     the evaluator.
+     *   - **triggerRender** updates the views, so the rows show what they now say.
+     *
+     * Each is asked for only if it is there. A build that moved one costs that much and not the
+     * rest; ./patches.test.js is where a rename would be noticed.
+     */
     var parsing = null;
 
     function reparse() {
         if (parsing || !Calc) return;
         parsing = setTimeout(function () {
             parsing = null;
+            var controller = Calc.controller;
             try {
-                Calc.controller.requestParseForAllItems();
+                if (typeof controller.updateTheComputedWorld === "function")
+                    controller.updateTheComputedWorld();
+                controller.requestParseForAllItems();
+                if (typeof controller.triggerRender === "function")
+                    controller.triggerRender();
+                else if (typeof controller.updateViews === "function")
+                    controller.updateViews();
             } catch (error) {
                 console.error(
                     "desmos: couldn't hand Lua's exports to the evaluator",

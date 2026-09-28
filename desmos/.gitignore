@@ -4,3 +4,4 @@ test.js
 
 # Desmos itself
 desmos*.js
+!desmos.js

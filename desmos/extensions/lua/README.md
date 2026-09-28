@@ -94,19 +94,19 @@ The last two are the same name; write whichever reads better. A name that cannot
 at all - `_x`, `1x` - is never asked about, which is what keeps `pairs` and `_G` off the graph.
 
 Desmos' own functions are reachable too, as a **fallback**: a name the graph does not define at
-all is looked for among them, so `sin(2)` is `\sin\left(2\right)` and `arctan(1)` is
-`\arctan\left(1\right)`. `Desmos.sin(2)` is the same thing said explicitly.
+all is looked for among them, so `sin(2)` and `arctan(1)` are Desmos' `\sin` and `\arctan`.
+`Desmos.sin(2)` is the same thing said explicitly.
 
 The fallback is only ever reached for a name that would otherwise be `nil`, so **the graph always
 wins**: define `s_{in}` and `sin` means your value again, until you delete it.
 
-| in Lua             | what it is                                     |
-| ------------------ | ---------------------------------------------- |
-| `sin(2)`           | `\sin\left(2\right)`, via the fallback         |
-| `Desmos.mod(a, 3)` | `\operatorname{mod}\left(a,3\right)`           |
-| `sqrt(x)`          | `\sqrt{x}`                                     |
-| `log(x, 2)`        | `\log_{2}\left(x\right)` - the base is second  |
-| `math.sin(2)`      | Lua's own, which never asks the graph anything |
+| in Lua             | what it is                                                  |
+| ------------------ | ----------------------------------------------------------- |
+| `sin(2)`           | `0.909...`, via the fallback                                |
+| `Desmos.mod(a, 3)` | `\operatorname{mod}\left(a,3\right)`, `a` being the graph's |
+| `sqrt(x)`          | `\sqrt{x}`, `x` being a parameter                           |
+| `log(x, 2)`        | `\log_{2}\left(x\right)` - the base is second               |
+| `math.sin(2)`      | Lua's own, which never asks the graph anything              |
 
 The list is Desmos' rather than one written down here: it is MathQuill's `autoOperatorNames`, read
 through `Calc.controller.getMathquillConfig` the way `extensions/matrices` does. So a geometry
@@ -114,8 +114,15 @@ graph gets the geometry functions, the names `extensions/matrices` adds come alo
 of it goes stale when Desmos ships a build. `Desmos.get(latex)` is still there for anything the
 list does not have.
 
-A builtin costs one trip to the evaluator, exactly as calling a graph function does - so
-`math.sin` is the cheaper way to do arithmetic that does not need the graph.
+**A builtin over numbers is a number.** `floor(random()*100)` is computed where it is written,
+not written down as a formula for Desmos to evaluate later - which matters inside an action
+body, where a formula would be re-evaluated on every fire. A builtin only becomes latex when one
+of its arguments is not a number yet: a graph name a body read cold, or a parameter during the
+export probe. `sqrt(x)` in a function being written down is `\sqrt{x}`; `sqrt(9)` is `3`.
+
+A few are left to Desmos even over numbers, because their meaning is not one obvious line - the
+distributions, `quantile`, `quartile`, `mad`, `erf`, `cov`, `corr`, `nCr`, `nPr`, `nthroot`, the
+colour spaces. Those cost one trip to the evaluator, exactly as calling a graph function does.
 
 ```lua
 Desmos.c = a * 2 + b        -- numbers
@@ -290,18 +297,19 @@ f(n) = n + arctan(n)
 ```lua
 function X(n)
     a = n                   -- updates the a above, so X is an action
-    b = f(sin(a))           -- a is still 2 here
+    b = f(a)                -- a is still 2 here
     return 3                -- ignored: an action has no value
 end
 ```
 
 ```dcg
-X(4)                        -- click it: a becomes 4, b becomes f(sin(2))
+X(4)                        -- click it: a becomes 4, b becomes the value of f(2)
 ```
 
 Everything surprising about that example is the same one thing: **an action is simultaneous.**
-Every right-hand side is computed against the state from before anything moved, so `b` is
-`f(sin(2))` and not `f(sin(4))` even though `a = n` is written first. That is Desmos' rule, not
+Every right-hand side is computed against the state from before anything moved, so `b` is `f(2)`
+and not `f(4)` even though `a = n` is written first - and `b` holds that as a number, not as the
+expression that produced it. That is Desmos' rule, not
 this extension's - `A = a\to a+1, b\to a` behaves the same way - and it is why the two lines can
 be written in either order.
 
@@ -310,7 +318,9 @@ Two consequences follow from it:
 - **a variable can only be updated once.** Adding `Y()` to the body above is an error naming `a`,
   because `Y` updates `a` too. The body stops there and the action applies _nothing_ - a
   half-moved graph is not a state anything gets to observe.
-- **a value the graph has not produced yet cannot be branched on.** See below.
+- **a value the graph has not produced yet cannot be branched on.** Rare, because the probe
+  warms what a body reads before anything can fire, but it still holds for a value that depends
+  on the action's own argument. See below.
 
 An action a cell exports is reached from anywhere an action can be: a button, a ticker, another
 cell. It runs at full speed under a ticker, because the Lua runs _inside_ Desmos' own fire rather
@@ -321,18 +331,31 @@ about it reaches the graph - neither as an action nor as a function.
 
 ### What a body can see
 
-A body runs during the fire, which is the one moment the evaluator cannot be waited for. So a
-value inside a body is one of two things:
+**A body assigns values, not formulas.** Every right-hand side is computed at the moment it is
+assigned, which is what a Desmos action does - `b\to f(\sin a)` puts the _number_ in `b`, and so
+does the Lua that stands in for it. An assignment that left a formula behind would not be a
+snapshot at all: edit `f` afterwards and `b` would move, which no action does.
 
-- **a number**, when the graph has already said what it is. Ordinary Lua: compare it, branch on
-  it, loop over it.
-- **a latex fragment**, when it has not. Arithmetic on it composes more latex, and assigning it
-  hands Desmos an expression to evaluate during the same fire - which is exactly what
-  `b\to\arctan(1)` is, so nothing is lost.
+Three things make that hold inside a fire, where the evaluator cannot be waited for:
 
-`b = f(sin(a))` is the second kind and is right either way. There is one place it is not, and it
-is guarded rather than allowed: if the fragment names the variable being assigned, the update
-would read as a definition in terms of itself.
+- **arithmetic is Lua's.** `n + num`, and everything `math.*` does.
+- **a builtin over numbers is computed where it is written**, by Desmos' own evaluator, running
+  on this thread. `floor(random()*100)` is a number rolled once - not a formula rerolled on
+  every fire.
+- **a read of the graph is a number, because it was asked for in advance.** Exporting the
+  function probes it, and the probe warms every value the body reaches for - `a`, and `f` at the
+  argument the body gives it. By the time anything can fire, those have answers.
+
+What is left over is **a latex fragment**: a value the graph has not produced _and_ was not
+asked for in advance, which in practice means one that depends on the action's own argument.
+`function X(n) b = f(n) end` cannot know `f(n)` until `n` arrives, so the first fire assigns the
+expression and warms it, and later fires with that same argument assign the number. Arithmetic
+on a fragment composes more latex, and assigning it hands Desmos something to evaluate during
+the same fire - which is exactly what `b\to f(4)` is, so the value is right either way.
+
+There is one place a fragment is not right, and it is guarded rather than allowed: if the
+fragment names the variable being assigned, the update would read as a definition in terms of
+itself.
 
 ```lua
 function C(x)
@@ -520,6 +543,12 @@ Desmos' own functions, as a fallback for any name the graph does not define. `De
 function one cell defines is a function the next can call, and `_G` is a view of that set rather
 than the page's own globals. A `local` belongs to the cell that declared it and to nothing else.
 
+**A name the graph defines is the graph's.** Assigning one keeps a copy in the globals, so the
+rest of that run reads what it just set - but the copy is dropped the moment the graph says the
+name has moved, and the cell watches the graph for that whether or not it has a copy. Otherwise
+a name Lua had once written would be a name Lua stopped watching, and an `a\to1` on the sheet
+would move an `a` no cell ever heard about again.
+
 How, since it matters if you move any of it: the globals live in a table of their own, and both
 `_G` and each cell's environment are _empty_ tables in front of it wearing the same
 `__index`/`__newindex`. A metatable on the table that also held the values could not do the job -
@@ -550,8 +579,11 @@ the shared globals, handing the DOM to every cell on the graph the moment one as
 
 A cell that never finishes does not take the tab with it - it yields every few million
 instructions and picks up on the next frame, and gives up after ten seconds. A cell that
-re-runs more than twenty times while the graph settles is called a dependency loop and stopped;
-that is easy to build by exporting a value the same cell reads.
+re-runs more than twenty times while the graph settles is called a dependency loop and stopped.
+
+A cell that writes a name it also reads is not one of those. `a = sin(a)` steps `a` once each
+time the cell runs - the change it makes is its own doing, so it is not news to it, and the run
+button is what applies it again.
 
 What this does not catch is a single expensive call - `string.rep("x", 1e9)` is one Lua
 instruction and will still hurt.
@@ -600,12 +632,23 @@ swapped back.
   from anywhere.
 - A cell that both defines a name and exports an action updating it puts the name back to what the
   cell body says whenever the cell re-runs. The cell body is the definition; the action is a
-  change to it.
+  change to it - so firing the action is not one of the things that re-runs the cell, and
+  `function a() n = sin(n) end` next to `n = 1` steps `n` on every `a()` and returns it to 1
+  when the cell is run.
+- What a body reads while it is being probed is warmed, not depended on. The exception is the
+  one body written down with those numbers - `A()=10` for a body that branched on a graph value
+    - which is re-exported when they move, because it is only right for as long as they are.
 - A graph action _function_ cannot be called with arguments from inside another action's body -
   Desmos substitutes a function's arguments, and it has not started yet. Call it from the cell
   body, where it runs on its own.
 - A value the evaluator has not produced yet is a latex fragment inside an action body, and
-  comparing one errors. See _What a body can see_.
+  comparing one errors. Exporting the body probes it and warms what it reads, so this is left
+  to values that depend on the action's own argument - `f(n)` is unknown until `n` arrives. The
+  first fire with a given argument assigns the expression and asks for it; the next one with
+  that argument assigns the number. See _What a body can see_.
+- A probe warms what a body reads, so a cell can run a few times over while those land. It is
+  bounded: a body whose reads are different every run - `f(random())` - stops being waited for
+  rather than looping.
 - A function is written down by running it with its parameters standing in as latex. A body that
   compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported at all
   unless it also updates something, in which case it is an action. Comparing a _graph_ read is
@@ -639,12 +682,12 @@ interactive version, and where to go when this says something has moved.
 
 ## The files
 
-|               |                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `index.js`    | what a cell is, where its text lives, when it is written back, and the `lua` trigger |
-| `builtins.js` | Desmos' own functions: the list, read off Desmos, and how each one is spelled        |
-| `bridge.js`   | the environment a cell runs in, reading the graph, and writing to it                 |
-| `actions.js`  | actions both ways - recording a body, the markers, and applying updates              |
-| `runner.js`   | when a cell runs, the loop watchdog, and errors                                      |
-| `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to  |
-| `test.js`     | the above; not loaded in the browser                                                 |
+|               |                                                                                            |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| `index.js`    | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
+| `builtins.js` | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
+| `bridge.js`   | the environment a cell runs in, reading the graph, and writing to it                       |
+| `actions.js`  | actions both ways - recording a body, the markers, and applying updates                    |
+| `runner.js`   | when a cell runs, the loop watchdog, and errors                                            |
+| `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |
+| `test.js`     | the above; not loaded in the browser                                                       |

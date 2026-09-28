@@ -37,6 +37,9 @@
     /** Re-runs of one cell in a single settling batch before we call it a loop. */
     var SPIN = 20;
 
+    /** How many times a cell may be re-run just to wait for a read it could not answer. */
+    var SETTLE = 6;
+
     /** name -> Set of cell ids that read it on their last run. */
     var deps = new Map();
 
@@ -63,6 +66,7 @@
 
     lua.bridge.onWake = wake;
     lua.bridge.onInvalidate = invalidate;
+    lua.bridge.onSettle = revisit;
 
     // -----------------------------------------------------------------------
     // when
@@ -142,6 +146,24 @@
         });
     }
 
+    /**
+     * A value a probe waited for has landed: run that cell again so its export is built from
+     * the number rather than the name. Ignored if the cell has been re-run since - that run
+     * asked for whatever it still needs on its own.
+     *
+     * Bounded, because a body whose reads are different every run - `f(random())` composes a
+     * latex nobody has ever asked for each time round - would otherwise never settle. Past the
+     * bound the cell keeps whatever it has, which is the fragment it would have had anyway;
+     * giving up quietly is better than SPIN calling it a dependency loop and dropping it.
+     */
+    function revisit(id, gen) {
+        var cell = lua.cell(id);
+        if (!cell || cell.gen !== gen) return;
+        cell.settles = (cell.settles || 0) + 1;
+        if (cell.settles > SETTLE) return;
+        enqueue(cell);
+    }
+
     function enqueue(cell) {
         queue.add(cell);
         if (draining) return;
@@ -182,6 +204,8 @@
         cell.gen = (cell.gen || 0) + 1;
         cell.error = null;
         cell.reads = new Set();
+        // What a probe read, kept apart from what the cell read. See bridge.read.
+        cell.probeReads = new Set();
         cell.exports = new Map();
         cell.stale = false;
         cell.parked = false;
@@ -360,6 +384,7 @@
         settle = setTimeout(function () {
             lua.cells.forEach(function (cell) {
                 cell.runs = 0;
+                cell.settles = 0;
             });
         }, 250);
     }

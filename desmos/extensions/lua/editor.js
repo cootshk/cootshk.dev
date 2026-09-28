@@ -306,7 +306,11 @@
                     event.stopPropagation();
                     // The row may have been rebuilt since; the cell is looked up, not closed over.
                     var live = lua.cell(cell.id);
-                    if (live) lua.runner.toggle(live);
+                    if (!live) return;
+                    // What Ctrl+Enter does, for the same reason: running a cell is a good moment
+                    // for what you typed to be the cell the graph has.
+                    lua.flush(live.id);
+                    lua.runner.toggle(live);
                 }
             },
             ring,

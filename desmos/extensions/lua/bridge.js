@@ -56,6 +56,13 @@
      */
     var NAME = /^([A-Za-z])(?:_?([A-Za-z0-9]+))?$/;
 
+    /**
+     * A name ./actions.js made up rather than one the graph has: `L_{p0}` for a parameter a
+     * probe is standing in for, `L_{ua3}` for an action's own marker. Nothing defines either,
+     * so nothing is worth asking about a latex that mentions one.
+     */
+    var MARKER = /L_\{(?:p|ua)\d+\}/;
+
     /** latex -> { h, ready, value, wake: [], used }. One HelperExpression per latex asked for. */
     var helpers = new Map();
 
@@ -105,7 +112,8 @@
 
         /** runner.js fills these in. */
         onWake: null,
-        onInvalidate: null
+        onInvalidate: null,
+        onSettle: null
     };
 
     function init(calc) {
@@ -297,22 +305,39 @@
             return 1;
         }
 
+        var latex = toLatex(name);
+        var kind = latex === null ? undefined : defs.get(latex);
+
         // The shared globals. Recorded as a dependency the same way a Desmos name is, so cell 1
         // changing `x` re-runs cell 2.
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         C.lua_getfield(co, -1, to_luastring(name));
         if (!C.lua_isnil(co, -1)) {
             C.lua_remove(co, -2);
-            if (current) current.reads.add("_:" + name);
+            if (current) {
+                current.reads.add("_:" + name);
+                // A name an expression also defines: this copy is a cell's own write from a
+                // moment ago, kept so the rest of that cell reads what it just set. The graph is
+                // what outlives it, so watch the graph too - otherwise a name Lua has ever
+                // written is a name Lua stops watching, and `a\to1` on the sheet moves an `a`
+                // that no cell ever hears about again. forget() drops the copy when that lands.
+                //
+                // The dependency is not enough on its own: nothing reports a change until there
+                // is a helper watching for it, and the copy answering here is exactly the case
+                // where read() never made one.
+                if (kind !== undefined) {
+                    note(latex);
+                    helper(latex);
+                }
+            }
             return 1;
         }
         C.lua_pop(co, 2);
 
-        var latex = toLatex(name);
         if (latex === null) return builtin(co, name);
-        if (current) current.reads.add(latex);
-
-        var kind = defs.get(latex);
+        // Which *kind* of thing this name is - a value, a function, an action, nothing at all -
+        // is itself something to re-run for, so it is filed whether or not a value is read.
+        note(latex);
         if (kind === "function") {
             pushCall(co, latex);
             return 1;
@@ -349,14 +374,27 @@
     }
 
     /**
-     * `Desmos.arctan(1)` - or just `arctan(1)`, since `_G` falls back. The latex comes from
-     * ./builtins.js; what happens to it is the one place the two modes differ.
+     * `Desmos.arctan(1)` - or just `arctan(1)`, since `_G` falls back.
+     *
+     * **Numbers first.** A call whose arguments are all numbers Lua already holds is closed
+     * form - it names nothing the graph has to look up - so it is arithmetic, and ./builtins.js
+     * does it here, on this thread. The answer is a number, in a cell body and in an action body
+     * alike. That is what keeps `floor(random()*100)` a number: written down as latex it would
+     * be Desmos' arithmetic at fire time, which for `random` is a different roll every fire and
+     * for everything else is a formula where a value was asked for.
+     *
+     * **Latex is what is left.** An argument that is a fragment - a graph name a body read cold,
+     * a parameter during the symbolic probe - has no number to compute with, and the call is a
+     * formula because it genuinely is one. That is the case value() is for.
      */
     function callBuiltin(co) {
         var name = C.lua_tojsstring(co, C.lua_upvalueindex(1));
         var n = C.lua_gettop(co);
 
+        // Both spellings at once: the latex Desmos takes, and the numbers behind it where there
+        // are any. `numbers` goes null at the first argument that is not one.
         var parts = [];
+        var numbers = [];
         for (var i = 1; i <= n; i++) {
             var arg = toDesmos(co, i);
             if (arg.error)
@@ -365,6 +403,11 @@
                     "cannot pass that to " + name + ": " + arg.error
                 );
             parts.push(arg.latex);
+
+            if (!numbers) continue;
+            var known = toJS(co, i);
+            if (known === undefined) numbers = null;
+            else numbers.push(known);
         }
 
         var latex = lua.builtins.latex(name, parts);
@@ -376,6 +419,14 @@
                     n +
                     (n === 1 ? " argument" : " arguments")
             );
+
+        if (numbers) {
+            var computed = lua.builtins.compute(name, numbers, latex);
+            if (computed) {
+                pushValue(co, computed.value);
+                return 1;
+            }
+        }
         return value(co, latex);
     }
 
@@ -384,15 +435,30 @@
      *
      * A body cannot park. It also has no reason to: Desmos evaluates an update's right-hand side
      * itself, during the fire, against the same pre-action state the rest of the body sees. So
-     * `b = f(sin(a))` hands Desmos `f\left(\sin\left(2\right)\right)` and is right for the
-     * same reason the hand-written action is.
+     * `b = f(a)` with `a` cold hands Desmos `f\left(a\right)` and is right for the same reason
+     * the hand-written action is.
+     *
+     * What gets here is what has no number behind it. A builtin over numbers Lua already holds
+     * never reaches this - callBuiltin computes it - so a fragment always stands for something
+     * genuinely unknown rather than for arithmetic put off until the fire.
+     *
+     * Everything else is asked of the graph, warm helper or not, so that the *next* time round
+     * there is a number. A marker is the exception: it is our own name, the graph has never
+     * heard of it, and NaN is not an answer worth branching on. See ./actions.js for both
+     * spellings.
      */
     function value(co, latex) {
         if (lua.actions && lua.actions.recording()) {
-            lua.actions.pushLatex(co, latex);
-            return 1;
+            if (lua.actions.symbolic() || MARKER.test(latex)) {
+                lua.actions.pushLatex(co, latex);
+                return 1;
+            }
         }
-        return read(co, latex);
+        // Speculative inside a probe: the body ran with made-up arguments, so what it composed
+        // is worth *warming* but not worth depending on. `f(random())` composes a latex nobody
+        // has ever asked for on every run, and filing that as a dependency would re-run the
+        // cell every time the new helper answered - for ever.
+        return read(co, latex, !!(lua.actions && lua.actions.probing()));
     }
 
     /**
@@ -400,9 +466,19 @@
      *
      * This is the yield described at the top of the file. lua_yieldk does not return - it
      * throws LUA_YIELD and unwinds - so the `return` below is for form.
+     *
+     * `speculative` says the latex was composed by a probe rather than asked for outright: warm
+     * it, but do not file it as anything at all. See value().
+     *
+     * A probe's other reads are held aside rather than filed. A probe runs a body that has not
+     * been asked to run - the export it produces is usually a marker, which depends on nothing,
+     * so a name the body reads is warmed and not depended on. `function a() n = sin(n) end`
+     * next to `n = 1` is the case that matters: filed as a dependency, firing `a()` moves `n`,
+     * which re-runs the cell, which puts `n` back to 1. Only a body *written down* with the
+     * numbers it read depends on them, and exportFunction files those itself.
      */
-    function read(co, latex) {
-        if (current) current.reads.add(latex);
+    function read(co, latex, speculative) {
+        if (!speculative) note(latex);
 
         var e = helper(latex);
 
@@ -428,6 +504,12 @@
         // during the fire against the pre-action state, which is the value the body wanted. The
         // helper has been made either way, so the next fire has a number and can branch on it.
         if (lua.actions && lua.actions.recording()) {
+            // A *probe* runs inside the cell's own run, and one that read cold learned nothing
+            // worth keeping - it has only just asked. Come back when there is an answer. Each
+            // round resolves one layer (`a`, then `f\left(5\right)`), so it settles rather than
+            // spins, and by the time anything fires the reads are numbers.
+            if (current && lua.actions.probing())
+                waitFor(e, current.id, current.gen);
             lua.actions.pushLatex(co, latex);
             return 1;
         }
@@ -443,6 +525,63 @@
         if (current) current.stale = true;
         C.lua_pushnil(co);
         return 1;
+    }
+
+    /**
+     * File `latex` as something this run looked at.
+     *
+     * Where it is filed is the whole of it. A cell's own reads are what the cell depends on, and
+     * a change to one re-runs it. A *probe's* are held aside: a probe runs a body nobody asked
+     * to run, and the export it produces is usually a marker, which depends on nothing. The case
+     * that matters is `function a() n = sin(n) end` next to `n = 1` - filed as the cell's, firing
+     * `a()` moves `n`, which re-runs the cell, which puts `n` straight back to 1. Only a body
+     * *written down* with the numbers it read depends on them, and actions.exportFunction moves
+     * them across itself when that is what happened.
+     */
+    function note(latex) {
+        if (!current) return;
+        if (lua.actions && lua.actions.probing()) current.probeReads.add(latex);
+        else current.reads.add(latex);
+    }
+
+    /**
+     * Drop the shared globals' copy of whatever `latex` names, both spellings of it: `abcd` and
+     * `a_bcd` are the same `a_{bcd}` and either could be what was written.
+     */
+    function forget(latex) {
+        var m = /^([A-Za-z])(?:_\{([A-Za-z0-9]+)\})?$/.exec(latex);
+        if (!m) return;
+        var names = m[2] ? [m[1] + m[2], m[1] + "_" + m[2]] : [m[1]];
+
+        var co = L;
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
+        names.forEach(function (name) {
+            C.lua_pushnil(co);
+            C.lua_setfield(co, -2, to_luastring(name));
+        });
+        C.lua_pop(co, 1);
+    }
+
+    /**
+     * Note that `current` is what moved `latex`, so the invalidation that comes back when the
+     * evaluator agrees is not read as somebody else's news. One write only: anything after that
+     * really is news.
+     */
+    function wrote(latex) {
+        var e = helpers.get(latex);
+        if (e && current) e.writer = { id: current.id };
+    }
+
+    /**
+     * Ask to be re-run when `e` first has a value. Not the same list as `wake`: that one resumes
+     * a parked coroutine, and this cell is not parked - it ran to the end with a fragment and
+     * wants another go from the top.
+     */
+    function waitFor(e, id, gen) {
+        if (!e || e.ready) return;
+        for (var i = 0; i < e.waiting.length; i++)
+            if (e.waiting[i].id === id && e.waiting[i].gen === gen) return;
+        e.waiting.push({ id: id, gen: gen });
     }
 
     function helper(latex) {
@@ -463,6 +602,8 @@
             ready: false,
             value: undefined,
             wake: [],
+            waiting: [],
+            writer: null,
             latex: latex,
             used: ++clock
         };
@@ -541,7 +682,29 @@
                 lua.bridge.onWake(parked.cell, value, parked.gen);
             });
 
-        if (!first && lua.bridge.onInvalidate) lua.bridge.onInvalidate(e.latex);
+        // A probe that read this cold asked to come back; this is the answer it waited for.
+        // Only on the first value - after that a change is an invalidation, which re-runs the
+        // same cells by the ordinary route.
+        var again = e.waiting.splice(0);
+        if (first && again.length && lua.bridge.onSettle)
+            again.forEach(function (waiting) {
+                lua.bridge.onSettle(waiting.id, waiting.gen);
+            });
+
+        // The graph has moved this name, so a cell's copy of it is out of date. Dropping it is
+        // what puts the graph back in charge of a name a cell once assigned; the copy only ever
+        // existed so the rest of *that* run could read what it had just set.
+        if (!first) forget(e.latex);
+
+        // One write, one suppressed invalidation - and only when there is one to suppress.
+        // Clearing this on a report that does not invalidate (the first, or one the evaluator
+        // has not caught up to) would spend the guard on nothing and let the real change come
+        // back as somebody else's news, which is the cell re-running on its own write.
+        if (!first && lua.bridge.onInvalidate) {
+            var writer = e.writer;
+            e.writer = null;
+            lua.bridge.onInvalidate(e.latex, writer);
+        }
     }
 
     function same(a, b) {
@@ -718,6 +881,12 @@
         }
 
         if (lua.defining(latex) && lua.actions) {
+            // The cell's own doing, so the change it causes is not news to it. Without this a
+            // cell that writes a name it also reads - `a = sin(a)` - re-runs on its own write
+            // and keeps applying itself until SPIN calls it a loop. runner.invalidate already
+            // skips the writer for a Lua-owned name; this is the same rule for a name an
+            // expression defines, where the change comes back through the helper instead.
+            wrote(latex);
             lua.actions.apply(latex, rhs.latex);
             return true;
         }
@@ -851,6 +1020,35 @@
 
         put(co, latex, 3, true);
         return 0;
+    }
+
+    /**
+     * A Lua value at `idx` as a JavaScript one, for a builtin to compute with: a number, or a
+     * list of them. Undefined for anything else - a latex fragment above all, which stands for a
+     * number nobody here has.
+     *
+     * Deliberately narrower than toDesmos: a point and a list of points have a latex spelling
+     * but no arithmetic in this file, and undefined sends them back to it.
+     */
+    function toJS(co, idx) {
+        if (lua.actions && lua.actions.isLatex(co, idx)) return undefined;
+
+        var t = C.lua_type(co, idx);
+        if (t === C.LUA_TNUMBER) return C.lua_tonumber(co, idx);
+        if (t !== C.LUA_TTABLE) return undefined;
+
+        var n = C.lua_rawlen(co, idx);
+        if (!n) return undefined;
+
+        var out = [];
+        for (var i = 1; i <= n; i++) {
+            C.lua_rawgeti(co, idx, i);
+            var number = C.lua_type(co, -1) === C.LUA_TNUMBER;
+            if (number) out.push(C.lua_tonumber(co, -1));
+            C.lua_pop(co, 1);
+            if (!number) return undefined;
+        }
+        return out;
     }
 
     /** A Lua value at `idx` as the right-hand side of an expression. */
