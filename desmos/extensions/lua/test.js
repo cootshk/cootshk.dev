@@ -423,10 +423,8 @@ async function main() {
     lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "a one-parameter function exports an action function",
-        /^a_\{ct1\}\\left\(L_\{p0\}\\right\)=\\left\(L_\{ua\d+\}\\to L_\{p0\}\\right\)$/.test(
-            exported("act1") || ""
-        ),
+        "a function that only computes is a Desmos function, not an action",
+        exported("act1") === "a_{ct1}\\left(L_{p0}\\right)=L_{p0}",
         exported("act1") + " err=" + cell.error
     );
     ok("and did not error doing it", !cell.error, cell.error);
@@ -1089,10 +1087,11 @@ async function main() {
         exported("qq")
     );
 
-    // 30. a global function is an action on the graph - and still an ordinary Lua function to
-    // the cell next door, because the shared globals hold the real thing and only the graph gets
-    // the marker. A value with no Desmos spelling at all is still stored and said nothing about:
-    // erroring on it would error on the whole point of sharing globals.
+    // 30. a global function that only computes is written down as one - and it is still an
+    // ordinary Lua function to the cell next door, because the shared globals hold the real
+    // thing and only the graph gets the latex. A value with no Desmos spelling at all is still
+    // stored and said nothing about: erroring on it would error on the whole point of sharing
+    // globals.
     const holder = cellWith("function helper1() return 11 end\nlabel = 'hi'");
     const caller = cellWith("Desmos.hh = helper1()");
     change();
@@ -1101,16 +1100,9 @@ async function main() {
     lua.runner.run(lua.cell(caller));
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "a function exports an action, with a marker to update",
-        /^h_\{elper1\}=\\left\(L_\{ua\d+\}\\to L_\{ua\d+\}\+1\\right\)$/.test(
-            exported("helper1") || ""
-        ),
+        "a no-argument function that computes is a value",
+        exported("helper1") === "h_{elper1}=11",
         exported("helper1")
-    );
-    ok(
-        "and the marker is published too, or the action has nothing to update",
-        Object.keys(injected()).some((id) => /-Lua\d+$/.test(id)),
-        Object.keys(injected()).join(" ")
     );
     ok("nor is a string", exported("label") === undefined, exported("label"));
     ok(
@@ -1366,6 +1358,155 @@ async function main() {
         "_G.Desmos is Desmos",
         exported("dg") === "d_{g}=1",
         exported("dg") + " err=" + cell.error
+    );
+
+    // --- function or action ------------------------------------------------------
+    //
+    // 43b. the distinction, which is decided by what the body hands back. A function that only
+    // computes is written down as a Desmos function - a real one, that Desmos can evaluate,
+    // plot and differentiate, with nothing of Lua left in it. It is a function that hands back
+    // a *function* that is an action.
+    id = cellWith("function A1(n)\n    return n + 2\nend");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a function that returns a value is a Desmos function",
+        exported("A1") === "A_{1}\\left(L_{p0}\\right)=L_{p0}+2",
+        exported("A1") + " err=" + cell.error
+    );
+    // A cell's exports reach the definitions index on the next scan, not the moment they are
+    // made, so ask the graph to look again before reading it back.
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "and is indexed as one, not as an action",
+        lua.bridge.defs.get("A_{1}") === "function",
+        String(lua.bridge.defs.get("A_{1}"))
+    );
+    ok(
+        "so calling it from Lua is a value, not a run",
+        await (async () => {
+            const caller2 = cellWith("Desmos.a2 = A1(3)");
+            change();
+            await new Promise((r) => setTimeout(r, 120));
+            return exported("a2") === "a_{2}=5";
+        })(),
+        exported("a2") + " - A1(3) is 5"
+    );
+
+    id = cellWith(
+        "function A3(n)\n" +
+            "    return function()\n" +
+            "        return n + 2\n" +
+            "    end\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a function that returns a function is an action",
+        /^A_\{3\}\\left\(L_\{p0\}\\right\)=\\left\(L_\{ua\d+\}\\to L_\{p0\}\\right\)$/.test(
+            exported("A3") || ""
+        ),
+        exported("A3") + " err=" + cell.error
+    );
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "and is indexed as an action function",
+        lua.bridge.defs.get("A_{3}") === "actionFunction",
+        String(lua.bridge.defs.get("A_{3}"))
+    );
+
+    // And the inner function is what running it runs: this one updates, so the update lands.
+    id = cellWith(
+        "function A4(n)\n" +
+            "    return function()\n" +
+            "        b = n + 1\n" +
+            "    end\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    const inner = /L_\{ua\d+\}/.exec(exported("A4"))[0];
+    const ran = fire({ [inner.replace(/[{}]/g, "")]: inner + "=6" });
+    ok(
+        "running it runs the function it handed back",
+        (ran.b || "") === "b=7",
+        (ran.b || "(nothing)") + " err=" + cell.error
+    );
+
+    // 43b-ii. the reads that matter are usually inside the function that was handed back, so the
+    // probe runs that one too. Without it `n` and `m` are never watched, and the fire has no
+    // numbers for them - it would hand Desmos `m=n+m+3`, a definition in terms of itself.
+    GRAPH.n = 0;
+    GRAPH.m = 1;
+    list.push({ type: "expression", id: "gn", latex: "n=0" });
+    list.push({ type: "expression", id: "gm", latex: "m=1" });
+    id = cellWith(
+        "function C(x)\n" +
+            "    return function()\n" +
+            "        m = n+m+x\n" +
+            "    end\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+    const cm = /L_\{ua\d+\}/.exec(exported("C"))[0];
+    const moved = fire({ [cm.replace(/[{}]/g, "")]: cm + "=3" });
+    ok(
+        "C(3) is the same as C(x)=m\\to n+m+x",
+        (moved.m || "") === "m=4",
+        (moved.m || "(nothing)") +
+            " - n=0, m=1, x=3, and the update is a value rather than an expression"
+    );
+    ok(
+        "which is a number, not a definition in terms of itself",
+        !/[A-Za-z]/.test(((moved.m || "").split("=")[1] || "x").trim()),
+        moved.m + " - `m=n+m+3` would be read by Desmos as m defining itself"
+    );
+    ok("and the cell said nothing about it", !cell.error, cell.error);
+
+    // 43c. a body that branches on a value the graph has not produced is still an action - the
+    // probe takes the branch to find that out, and then refuses to write the body down as a
+    // function, because a branch taken on a guess is a different function.
+    id = cellWith(
+        "function A5()\n" +
+            "    if Desmos.get('\\\\notyet') > 1 then b = 1 end\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a conditional update is still found, and still an action",
+        /\\to/.test(exported("A5") || ""),
+        exported("A5") + " err=" + cell.error
+    );
+    ok(
+        "and a helper that branches on its own argument is neither",
+        await (async () => {
+            const helper = cellWith(
+                "function fact(n)\n" +
+                    "    if n <= 1 then return 1 end\n" +
+                    "    return n * fact(n - 1)\n" +
+                    "end"
+            );
+            change();
+            await new Promise((r) => setTimeout(r, 150));
+            return exported("fact") === undefined;
+        })(),
+        exported("fact") +
+            " - a recursive helper is a Lua global, and nothing the graph can hold"
     );
 
     // --- actions ----------------------------------------------------------------

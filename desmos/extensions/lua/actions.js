@@ -70,7 +70,7 @@
 
         /** bridge.js calls these from __newindex */
         write: write,
-        export: exportAction,
+        export: exportFunction,
         release: release,
         apply: apply,
 
@@ -213,7 +213,24 @@
         return 1;
     }
 
+    /**
+     * Comparing a fragment. Two different situations, and they want opposite things.
+     *
+     * During a **probe** the answer does not matter and getting past the comparison does: the
+     * probe is asking what this function *is*, and a body that only updates something inside an
+     * `if` would otherwise look like a body that updates nothing. So it takes the branch and
+     * marks the recording blind - which costs the probe its right to be written down as latex,
+     * because a branch taken on a guess is not the function anyone wrote. See exportFunction.
+     *
+     * During a **fire** the answer is the answer, and there isn't one: the graph has not said
+     * what this is yet, and the fire cannot wait. That is worth stopping for.
+     */
     function latexCompare(co) {
+        if (recorder && recorder.probe) {
+            recorder.blind = true;
+            C.lua_pushboolean(co, true);
+            return 1;
+        }
         return fail(
             co,
             "this is a Desmos value, not a number - the graph has not been asked for it yet, " +
@@ -389,9 +406,18 @@
         return record(co, latex, rhs.latex);
     }
 
-    /** One update, with the rule that makes an action an action. */
+    /**
+     * One update, with the rule that makes an action an action.
+     *
+     * The rule is not enforced during a probe. A probe is asking *what this function is*, not
+     * whether it is correct - and the answer it needs, "it updates something", is already known
+     * by the time the second update to the same name arrives. Erroring here would drop the
+     * function from the graph entirely and say nothing about why; the fire is where a duplicate
+     * matters and where there is somewhere to report it.
+     */
     function record(co, name, latex) {
         if (!recorder) return false;
+        if (recorder.updates.has(name) && recorder.probe) return true;
         if (recorder.updates.has(name))
             return fail(
                 co,
@@ -417,31 +443,157 @@
 
         C.lua_pushvalue(co, idx);
         (args || []).forEach(function (value) {
-            lua.bridge.pushValue(co, value);
+            push(co, value);
         });
 
-        var status = C.lua_pcall(co, (args || []).length, 0, 0);
-        var done = recorder;
-        recorder = outer;
-
+        var status = C.lua_pcall(co, (args || []).length, 1, 0);
         if (status !== C.LUA_OK) {
+            recorder = outer;
             var why = C.lua_tojsstring(co, -1);
             C.lua_pop(co, 1);
             return { error: why || "error" };
         }
-        return { updates: done.updates };
+
+        // What it handed back decides what it *is* - see exportFunction. A function means an
+        // action, and running the action means running that one too, so it happens here while
+        // the recording is still open and the one-target-once rule still spans both.
+        var gave = C.lua_type(co, -1);
+        var result = {
+            updates: null,
+            gave: gave,
+            latex: null,
+            blind: !!recorder.blind
+        };
+
+        if (gave === C.LUA_TFUNCTION) {
+            var inner = C.lua_pcall(co, 0, 0, 0);
+            if (inner !== C.LUA_OK) {
+                var bad = C.lua_tojsstring(co, -1);
+                C.lua_pop(co, 1);
+                if (!probe) {
+                    recorder = outer;
+                    return { error: bad || "error" };
+                }
+                // A probe is discovery. It already knows what this is - a function was handed
+                // back - and it ran the inner only to find out what that one reads.
+            }
+        } else {
+            if (gave !== C.LUA_TFUNCTION && gave !== C.LUA_TNIL) {
+                var value = lua.bridge.toDesmos(co, C.lua_gettop(co));
+                result.latex = value.error ? null : value.latex;
+            }
+            C.lua_pop(co, 1);
+        }
+
+        result.updates = recorder.updates;
+        result.blind = !!recorder.blind;
+        recorder = outer;
+        return result;
+    }
+
+    /** A JS value as a Lua one, latex fragments included. bridge.pushValue knows the rest. */
+    function push(co, value) {
+        if (
+            value &&
+            typeof value === "object" &&
+            typeof value.latex === "string"
+        )
+            return pushLatex(co, value.latex);
+        lua.bridge.pushValue(co, value);
     }
 
     // -----------------------------------------------------------------------
-    // exporting a Lua function as an action
+    // exporting a Lua function
     // -----------------------------------------------------------------------
 
     /**
-     * `function X(n) ... end` - a global write whose value is a function - becomes the graph's
-     * action `X`.
+     * A global write whose value is a function. Which of the two things it becomes is decided by
+     * running it once, here, and looking at what comes back:
      *
-     * The exported latex is a marker rather than the body, because the body is Lua and Desmos
-     * evaluates in a worker:
+     *     function A(n) return n + 2 end                 ->  A\left(L_{p0}\right)=L_{p0}+2
+     *     function A(n) return function() ... end end    ->  an action
+     *     function X(n) a = n end                        ->  an action
+     *
+     * **A function that only computes is a Desmos function.** It is run with its parameters
+     * standing in as latex fragments, so `n + 2` composes `L_{p0}+2` and the export is a real
+     * Desmos function - `A(3)` is 5, it can be plotted, and Desmos can differentiate it. Nothing
+     * about it is Lua once it has been written down.
+     *
+     * **A function that hands back a function, or that updates anything, is an action.** The
+     * first is how you ask for one outright; the second is what an assignment to a Desmos name
+     * already means. Neither can be written down as latex, so those get the marker below.
+     *
+     * A body that cannot be run this way at all - one that compares a fragment, say, or a
+     * recursive helper that branches on its argument - is neither, and is left as what it always
+     * was: a Lua global the cell next door can call. That silence is the same one a string gets.
+     */
+    function exportFunction(co, cell, name, idx) {
+        if (!cell) return false;
+
+        var params = arity(co, idx);
+        var probe = probeBody(co, idx, params);
+
+        if (probe.error || (probe.gave === C.LUA_TNIL && !probe.updates.size)) {
+            // Nothing to say about it. Drop any action it used to be, so a body that stops
+            // updating stops being an action too.
+            release(cell, name);
+            cell.exports.delete(key(name));
+            return false;
+        }
+
+        if (probe.gave === C.LUA_TFUNCTION || probe.updates.size)
+            return asAction(co, cell, name, params, idx);
+
+        // A probe that guessed its way past a comparison found out whether the body updates
+        // anything - which is all the line above needed - but not what it computes. Writing
+        // down the branch it happened to take would be writing down a different function.
+        if (probe.blind || probe.latex === null) {
+            release(cell, name);
+            cell.exports.delete(key(name));
+            return false;
+        }
+
+        release(cell, name);
+        cell.exports.set(key(name), {
+            latex: signature(name, params) + "=" + probe.latex,
+            plot: false
+        });
+        return true;
+    }
+
+    /**
+     * Run the body once with its parameters as latex fragments.
+     *
+     * Two jobs. It decides what the function is - see above - and it warms the graph: every name
+     * the body reads becomes a watched helper here, so by the time an action fires those are
+     * numbers rather than latex.
+     *
+     * That second job is why a body handing back a function is run *and then* the function it
+     * handed back is run too. The reads that matter are usually in there - `function C(x) return
+     * function() m = n + m + x end end` reads nothing at all until the inner one runs - and a
+     * name still cold when the action fires comes back as latex, which for `m = n + m + x` would
+     * hand Desmos `m=n+m+3`: a definition in terms of itself, which is not an update at all.
+     *
+     * A fragment argument is what makes the Desmos-function case work at all: `n` has no value
+     * yet and never will, so it stands for itself.
+     */
+    function probeBody(co, idx, params) {
+        var args = [];
+        for (var i = 0; i < params; i++) args.push({ latex: "L_{p" + i + "}" });
+        return record_body(co, idx, args, true);
+    }
+
+    /** `A` with no parameters, `A\left(L_{p0}\right)` with one. */
+    function signature(name, params) {
+        if (!params) return name;
+        var names = [];
+        for (var i = 0; i < params; i++) names.push("L_{p" + i + "}");
+        return name + "\\left(" + names.join(",") + "\\right)";
+    }
+
+    /**
+     * The action half. The exported latex is a marker rather than the body, because the body is
+     * Lua and Desmos evaluates in a worker:
      *
      *     X\left(L_{p0}\right) = \left(L_{ua3}\to L_{p0}\right)
      *
@@ -454,10 +606,8 @@
      * The slot is keyed by cell and name rather than allocated per run, so re-running a cell
      * exports the same latex and Desmos sees nothing change.
      */
-    function exportAction(co, cell, name, idx) {
-        if (!cell) return false;
-
-        var slot = slotFor(cell, name, arity(co, idx));
+    function asAction(co, cell, name, params, idx) {
+        var slot = slotFor(cell, name, params);
         hold(co, slot, idx);
 
         var updates = slot.markers.map(function (marker, i) {
@@ -466,12 +616,12 @@
                 : marker + "\\to " + marker + "+1";
         });
 
-        var head = slot.params.length
-            ? name + "\\left(" + slot.params.join(",") + "\\right)"
-            : name;
-
         cell.exports.set(key(name), {
-            latex: head + "=\\left(" + updates.join(",") + "\\right)",
+            latex:
+                signature(name, params) +
+                "=\\left(" +
+                updates.join(",") +
+                "\\right)",
             plot: false
         });
         // The markers need definitions of their own, or the action has nothing to update. They
@@ -483,11 +633,6 @@
                 plot: false
             });
         });
-
-        // The probe: run the body once now, with parking allowed to the extent that a pcall
-        // allows it, so every graph name the body reads becomes a watched helper. By the time it
-        // fires those are numbers, which is what lets the body branch on them.
-        record_body(co, idx, [], true);
         return true;
     }
 
@@ -514,6 +659,7 @@
         var n = params || 1;
         for (var i = 0; i < n; i++) slot.markers.push(marker());
         for (var j = 0; j < params; j++) slot.params.push("L_{p" + j + "}");
+        // Same spelling signature() uses, and the same one probeBody() stands in with.
         cell.actions.set(name, slot);
         return slot;
     }
@@ -645,6 +791,24 @@
                 'this action updates "' +
                     clash +
                     '" more than once - the action it was run from updates it too'
+            );
+
+        // An update whose right-hand side still names its own target is not an update - it is a
+        // definition in terms of itself, and writing it would replace a working expression with a
+        // broken one. It means a value the body read was not warm yet, so the read became latex
+        // rather than a number; see probeBody. Say so rather than corrupt the graph.
+        var circular = null;
+        result.updates.forEach(function (latex, target) {
+            if (mentions(latex, target)) circular = circular || target;
+        });
+        if (circular)
+            return broke(
+                slot,
+                'this action sets "' +
+                    circular +
+                    '" to an expression that still mentions it, which Desmos would read as a ' +
+                    "definition in terms of itself. The graph had not said what it was worth yet - " +
+                    "run it again"
             );
 
         var missing = null;
@@ -803,6 +967,17 @@
             else if (text.startsWith("\\right", i)) level--;
         }
         return level;
+    }
+
+    /**
+     * Does `latex` use the Desmos name `name`? The lookahead keeps `m` from matching `m_{1}`,
+     * and the lookbehind-by-hand keeps it from matching the tail of a longer name.
+     */
+    function mentions(latex, name) {
+        var escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(
+            "(^|[^A-Za-z_])" + escaped + "(?![A-Za-z0-9_{])"
+        ).test(String(latex));
     }
 
     /** `a_{bcd}` and `a_bcd` both reduce to `a_bcd`, so the two spellings compare equal. */

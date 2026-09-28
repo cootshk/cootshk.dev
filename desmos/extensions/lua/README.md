@@ -219,9 +219,29 @@ Desmos["1x"] = 1            -- error: not a name Desmos can parse
 
 ### Functions
 
-**A Lua function is a Desmos action.** Write one as a global and it appears on the graph under
-that name; `X(4)` on the sheet then renders Desmos' own run-action button, and clicking it runs
-the Lua.
+A global function reaches the graph, and **what it becomes depends on what it hands back**:
+
+```lua
+function A(n) return n + 2 end              -- A\left(L_{p0}\right)=L_{p0}+2, a function
+function A(n) return function() ... end end -- an action
+function X(n) a = n end                     -- an action: it updates something
+```
+
+**A function that only computes is a Desmos function.** It is run once with its parameters
+standing in as latex, so `n + 2` composes `L_{p0}+2` and what lands on the graph is a real Desmos
+function - `A(3)` is `5`, it plots, and Desmos can differentiate it. There is no Lua left in it
+once it has been written down, and no round trip when it is called.
+
+**A function that hands back a function is an action**, and so is one that updates a Desmos value.
+The first is how you ask for an action outright; the second is what assigning to a Desmos name
+already meant. Neither can be written down as latex, so those keep a marker and run their Lua when
+they fire.
+
+A body that can be neither - a recursive helper that branches on its own argument, say - is left
+as what it already was: a Lua global the cell next door can call, and nothing on the graph. That
+silence is the same one a string gets.
+
+### An action
 
 ```dcg
 a = 2
@@ -232,9 +252,9 @@ f(n) = n + arctan(n)
 
 ```lua
 function X(n)
-    a = n                   -- updates the a above
+    a = n                   -- updates the a above, so X is an action
     b = f(sin(a))           -- a is still 2 here
-    return 3                -- X is an action; the return value is ignored
+    return 3                -- ignored: an action has no value
 end
 ```
 
@@ -260,7 +280,7 @@ cell. It runs at full speed under a ticker, because the Lua runs _inside_ Desmos
 than a frame behind it.
 
 `local function` is how you say you meant none of this. A local is the cell's own, and nothing
-about it reaches the graph.
+about it reaches the graph - neither as an action nor as a function.
 
 ### What a body can see
 
@@ -273,8 +293,22 @@ value inside a body is one of two things:
   hands Desmos an expression to evaluate during the same fire - which is exactly what
   `b\to\arctan(1)` is, so nothing is lost.
 
-`b = f(sin(a))` is the second kind and is right either way. What the second kind cannot do is be
-compared:
+`b = f(sin(a))` is the second kind and is right either way. There is one place it is not, and it
+is guarded rather than allowed: if the fragment names the variable being assigned, the update
+would read as a definition in terms of itself.
+
+```lua
+function C(x)
+    return function()
+        m = n + m + x       -- with m cold this is `m=n+m+3`, which is not an update at all
+    end
+end
+```
+
+So a cold read on that line is an error saying to run it again, not a broken `m`. It is rare,
+because the probe below warms `n` and `m` before anyone can click.
+
+What a fragment cannot do at all is be compared:
 
 ```lua
 function X(n)
@@ -294,6 +328,11 @@ end
 In practice this rarely comes up: a cell that exports an action has its body run once at export
 time, which is enough to start the graph computing everything the body reads. By the time anyone
 clicks, those are numbers.
+
+That run follows the function through. A body that hands back a function reads nothing itself -
+everything is in the one it handed back - so that one is run too, and its reads are what get
+warmed. `C` above reads `n` and `m` only on the inside, and they are watched from the moment the
+cell runs.
 
 ### An action from the graph, in Lua
 
@@ -331,11 +370,12 @@ past.
 
 The marker itself is taken back out of the map. It exists to be noticed, not to be applied.
 
-### Still true
+### When the function is too Lua to write down
 
-Neither of these went away, and both are still the answer when what you want is a _function_
-rather than an action - Desmos calls a function from its worker and wants derivatives, interval
-arithmetic and list broadcasting from it, which a Lua closure on the main thread cannot give:
+A body that branches on its argument, builds a string, or loops a variable number of times has no
+latex, so it cannot be exported as a Desmos function - it stays a Lua global and the graph never
+sees it. These two are the way to get such a thing onto the graph anyway, and both work by
+producing latex up front rather than asking Desmos to call Lua:
 
 ```lua
 local terms = {}
@@ -521,6 +561,9 @@ swapped back.
   body, where it runs on its own.
 - A value the evaluator has not produced yet is a latex fragment inside an action body, and
   comparing one errors. See _What a body can see_.
+- A function is written down by running it once with its parameters standing in as latex. A body
+  that compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported
+  at all unless it also updates something, in which case it is an action.
 - An exported action's plumbing takes names of its own: `L_{uaN}` for the markers and `L_{p0}`,
   `L_{p1}` ... for the parameters. A graph that defines one of those itself has a duplicate
   definition, and Desmos will say so.
