@@ -881,6 +881,19 @@
                     });
                 });
 
+                // Desmos' own functions. Reachable unqualified, because a name the graph does
+                // not define falls back to `Desmos` - so `arctan` is offered, not `Desmos.arctan`.
+                if (lua.builtins)
+                    lua.builtins.names().forEach(function (name) {
+                        items.push({
+                            label: name,
+                            kind: api.languages.CompletionItemKind.Function,
+                            detail: "a Desmos function",
+                            insertText: name,
+                            range: range
+                        });
+                    });
+
                 return { suggestions: items };
             }
         });

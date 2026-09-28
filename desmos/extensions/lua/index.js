@@ -47,6 +47,16 @@
         /^\s*([A-Za-z](?:_\{[A-Za-z0-9]+\}|_[A-Za-z0-9])?)\s*(\\left\([^=]*?\\right\))?\s*=/;
 
     /**
+     * What makes a definition an *action* rather than a value: a `\to` on the right of the `=`.
+     * `Y=a\to3` is something to run, not a number to wait for, and reading it as the second is
+     * how a Lua cell used to get `NaN` out of it.
+     *
+     * The lookahead keeps `\to` from matching the start of a longer macro; Desmos has none, but
+     * the same guard is on Desmos' own reader of this.
+     */
+    var ACTION = /\\to(?![a-zA-Z])/;
+
+    /**
      * A cell's optional first line: `--!lua <pragmas>`. Read for the pragmas and then left
      * alone - it is a Lua comment, so the compiler ignores it, and leaving it in means the
      * source is the chunk and no line numbers have to be adjusted.
@@ -67,6 +77,14 @@
                 .toLowerCase() === "lua"
         );
     }
+
+    /**
+     * Desmos name -> the id of the *item* defining it. Rebuilt with the definitions index.
+     *
+     * Items only, never a cell's exports: this is what tells a Lua write whether it is moving
+     * something of Desmos' or holding something of its own.
+     */
+    var sites = new Map();
 
     /**
      * Our graph observer. Desmos' unobserveEvent takes an event name and not a callback, so an
@@ -145,6 +163,28 @@
                     count: 1
                 },
 
+                // --- actions ----------------------------------------------------
+                //
+                // The one line where Desmos applies an action's updates. They arrive from the
+                // evaluator keyed by identifier and valued with the whole new latex of each
+                // assignment (`a=4`), and this loop hands each to updateLatexForIdentifier.
+                //
+                // Getting in front of that loop is what lets a Lua function *be* an action. A
+                // cell exports a marker - see ../lua/actions.js - and seeing that marker here
+                // means the body runs now, inside this fire, with its updates folded into the
+                // same map. So Desmos applies its updates and Lua's together: no frame of lag,
+                // one pre-action state behind every right-hand side, and a target named twice is
+                // caught before anything moves.
+                //
+                // Nothing else is touched, and an action with no Lua in it walks straight past.
+                {
+                    match: /if\((\i)\.eventUpdates\)\{for\(let (\i) of /,
+                    replace:
+                        "if($1.eventUpdates){$self.actionUpdates($1.eventUpdates.updates);" +
+                        "for(let $2 of ",
+                    count: 1
+                },
+
                 // "lua" in the + menu, beside table - the comparison people reach for.
                 //
                 // Desmos builds each entry of that menu with one component, so the cheapest way
@@ -196,7 +236,9 @@
 
                 menu();
 
+                if (lua.builtins) lua.builtins.init(calc);
                 if (lua.bridge) lua.bridge.init(calc);
+                if (lua.actions) lua.actions.init(calc);
                 if (lua.editor) lua.editor.init(calc);
 
                 scan();
@@ -263,13 +305,51 @@
                         };
                     });
                 });
+                // An action being stepped right now, for the one parse that has to see it. See
+                // step(): it is gone again before the next.
+                steps.forEach(function (latex, id) {
+                    map[id] = {
+                        id: id,
+                        type: "statement",
+                        latex: latex,
+                        shouldGraph: false
+                    };
+                });
             },
 
             /**
              * Ask Desmos to look again. Everything a cell exported reaches the graph through
              * this - inject() is only called from inside the parse.
              */
-            reparse: reparse
+            reparse: reparse,
+
+            /**
+             * The id of the expression defining `name`, or null when nothing on the sheet does.
+             *
+             * This is the whole of "who owns a value". A name a real item defines is Desmos' -
+             * Lua updates it the way an action would - and a name nothing defines is Lua's to
+             * publish and to hold. Only items count: a cell's own exports are statements, and a
+             * statement has no latex of Desmos' to rewrite.
+             */
+            defining: function (name) {
+                return sites.get(canonical(name)) || null;
+            },
+
+            /**
+             * Hold a new value for a Lua-owned name - one with no item behind it - by rewriting
+             * the export that publishes it. One statement per name either way, so Desmos' own
+             * reaper still works and there is never a second definition to collide with.
+             */
+            own: own,
+
+            /** Run a Desmos action by its latex. See actions.js's call(). */
+            step: step,
+
+            /** The applier patch above lands here. */
+            actionUpdates: function (updates) {
+                if (lua.actions) lua.actions.updates(updates);
+                return updates;
+            }
         })
     );
 
@@ -450,27 +530,117 @@
         var defs = lua.bridge.defs;
         defs.clear();
 
+        sites.clear();
+
         list.forEach(function (item) {
             if (!item) return;
-            if (item.type === "expression") return mark(item.latex);
+            if (item.type === "expression") return mark(item.latex, item.id);
             // A table's columns are definitions as much as an expression is.
             if (item.type === "table" && item.columns)
                 item.columns.forEach(function (column) {
-                    if (column && column.latex) mark(column.latex + "=");
+                    if (column && column.latex)
+                        mark(column.latex + "=", item.id);
                 });
         });
 
+        // After the items, and never over them. A cell exporting a name the sheet already
+        // defines is a duplicate definition either way - Desmos will say so - but the item is
+        // the real one, so a read must not be answered as if the export had replaced it.
         cells.forEach(function (cell) {
             cell.exports.forEach(function (spec) {
-                mark(spec.latex);
+                // No id: an export is a statement, so there is no latex of Desmos' behind it.
+                mark(spec.latex, null);
             });
         });
 
-        function mark(latex) {
-            var m = DEFINE.exec(String(latex == null ? "" : latex));
+        function mark(latex, id) {
+            var text = String(latex == null ? "" : latex);
+            var m = DEFINE.exec(text);
             if (!m) return;
-            defs.set(canonical(m[1]), m[2] ? "function" : "value");
+
+            var name = canonical(m[1]);
+            if (!id && sites.has(name)) return;
+
+            var isFunction = !!m[2];
+            var isAction = ACTION.test(text.slice(m[0].length));
+
+            defs.set(
+                name,
+                isAction
+                    ? isFunction
+                        ? "actionFunction"
+                        : "action"
+                    : isFunction
+                      ? "function"
+                      : "value"
+            );
+            if (id) sites.set(name, id);
         }
+    }
+
+    /**
+     * A new value for a Lua-owned name: find the export that publishes it and rewrite it.
+     *
+     * This is where an action's update lands when the name it names has no item - a `k` a cell
+     * brought into being rather than one the sheet declares. Rewriting the export rather than
+     * keeping a value of our own means there is still exactly one statement per name, so Desmos'
+     * own reaper takes it away when the cell stops exporting it.
+     */
+    function own(name, latex) {
+        var target = canonical(name);
+        var found = false;
+
+        cells.forEach(function (cell) {
+            var spec = cell.exports.get(key(target));
+            if (!spec) return;
+            spec.latex = target + "=" + latex;
+            found = true;
+        });
+
+        if (found) reparse();
+        return found;
+    }
+
+    /**
+     * Run a Desmos action by its latex.
+     *
+     * An action the sheet has as an item is Desmos' own to step, and `action-single-step` is what
+     * its button dispatches - so that path is Desmos', undo behaviour and all. Anything else is a
+     * call no item spells, so it is handed to the evaluator as a statement of ours and stepped the
+     * same way. The parse is synchronous here rather than on reparse()'s timeout, because the
+     * statement has to exist before the event naming it does.
+     */
+    var steps = new Map();
+    var stepId = 0;
+
+    function step(latex) {
+        if (!Calc) return false;
+
+        var id = sites.get(canonical(latex));
+        if (id) {
+            Calc.controller.dispatch({ type: "action-single-step", id: id });
+            return true;
+        }
+
+        var mine = "cde-lua-step-" + stepId++;
+        steps.set(mine, latex);
+        try {
+            Calc.controller.requestParseForAllItems();
+            Calc.controller.evaluator.addActionStepEvent(mine);
+            return true;
+        } catch (error) {
+            console.error("desmos: couldn't step the action " + latex, error);
+            return false;
+        } finally {
+            // One step, then gone: a transient statement that outlived its event would be a
+            // definition nobody asked for.
+            steps.delete(mine);
+        }
+    }
+
+    /** An export map key, the same way bridge.js spells one. */
+    function key(latex) {
+        return latex.replace(/[^A-Za-z0-9]/g, "");
     }
 
     /** `a_1` and `a_{1}` are the same name; the index holds the second spelling. */

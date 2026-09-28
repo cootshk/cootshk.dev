@@ -57,7 +57,8 @@
         run: start,
         stop: stop,
         toggle: toggle,
-        busy: busy
+        busy: busy,
+        blame: blame
     };
 
     lua.bridge.onWake = wake;
@@ -323,7 +324,22 @@
             readers.delete(cell.id);
         });
         cell.exports = new Map();
+        if (lua.actions) lua.actions.forget(cell);
         lua.reparse();
+    }
+
+    /**
+     * An error from outside a run: a body that failed while its action was firing.
+     *
+     * There is no thread to unwind and no run to fail, but the cell that exported the body is
+     * still where the message belongs - so it goes on the gutter icon like any other, and a fix
+     * plus a re-run clears it.
+     */
+    function blame(cell, message) {
+        if (!cell) return;
+        cell.error = clean(cell, message);
+        console.error("lua:", cell.error);
+        render(cell);
     }
 
     /** File this run's reads, so a change to any of them comes back to this cell. */

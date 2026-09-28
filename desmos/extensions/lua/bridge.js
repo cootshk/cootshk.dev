@@ -46,6 +46,7 @@
     var STORE = "cde.lua.store";
     var THREADS = "cde.lua.threads";
     var GLOBALS = "cde.lua.globals";
+    var DESMOS = "cde.lua.desmos";
 
     /**
      * A Desmos name, as Lua spells it. A Desmos identifier is one letter and an optional
@@ -91,6 +92,14 @@
         names: names,
         defs: defs,
 
+        /** actions.js needs these: it spells Lua values as latex too. */
+        toDesmos: toDesmos,
+        num: num,
+        toLatex: toLatex,
+        current: function () {
+            return current;
+        },
+
         /** runner.js fills these in. */
         onWake: null,
         onInvalidate: null
@@ -116,6 +125,13 @@
         // And _G itself, once, so every cell is handed the same table.
         C.lua_pushnil(L);
         C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
+
+        // Likewise `Desmos`, which used to be a fresh table per cell. One table, because
+        // `Desmos` and `_G.Desmos` have to be the same object - a cell that reaches the second
+        // one is asking for the first - and because a single object is a single place to look
+        // when a builtin has to behave differently inside an action body.
+        C.lua_pushnil(L);
+        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
     }
 
     // -----------------------------------------------------------------------
@@ -219,6 +235,18 @@
         C.lua_setfield(co, -2, to_luastring("Desmos"));
     }
 
+    /** The one `Desmos`, made on first use and kept in the registry. See init(). */
+    function pushDesmos(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        buildDesmos(co);
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
+    }
+
     /** The one _G, made on first use and kept in the registry. */
     function pushGlobals(co) {
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
@@ -259,6 +287,13 @@
         }
         var name = C.lua_tojsstring(co, 2);
 
+        // `Desmos` itself, so `_G.Desmos` is the table the cell was seeded with rather than the
+        // graph's `D_{esmos}`. One object, so there is one thing to reach for either way.
+        if (name === "Desmos") {
+            pushDesmos(co);
+            return 1;
+        }
+
         // The shared globals. Recorded as a dependency the same way a Desmos name is, so cell 1
         // changing `x` re-runs cell 2.
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
@@ -271,10 +306,7 @@
         C.lua_pop(co, 2);
 
         var latex = toLatex(name);
-        if (latex === null) {
-            C.lua_pushnil(co);
-            return 1;
-        }
+        if (latex === null) return builtin(co, name);
         if (current) current.reads.add(latex);
 
         var kind = defs.get(latex);
@@ -282,8 +314,79 @@
             pushCall(co, latex);
             return 1;
         }
-        if (kind === undefined) {
-            C.lua_pushnil(co);
+        // An action is not a value to wait for, it is something to run.
+        if (lua.actions && (kind === "action" || kind === "actionFunction")) {
+            lua.actions.pushAction(co, latex, kind === "actionFunction");
+            return 1;
+        }
+        if (kind === undefined) return builtin(co, name);
+        return read(co, latex);
+    }
+
+    /**
+     * A name the graph does not define: Desmos' own functions, then nil.
+     *
+     * `_G` falling back to `Desmos` is what makes a top-level `sin` mean `\sin` rather than
+     * `s_{in}`. It is only reached once `defs` has had its say, so a graph that really does
+     * define `s_{in}` still wins - the fallback is for a name that would otherwise be nil.
+     */
+    function builtin(co, name) {
+        if (lua.builtins && lua.builtins.has(name)) {
+            pushBuiltin(co, name);
+            return 1;
+        }
+        C.lua_pushnil(co);
+        return 1;
+    }
+
+    /** A Lua function standing for one of Desmos', with the name riding along as its upvalue. */
+    function pushBuiltin(co, name) {
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_pushcclosure(co, callBuiltin, 1);
+    }
+
+    /**
+     * `Desmos.arctan(1)` - or just `arctan(1)`, since `_G` falls back. The latex comes from
+     * ./builtins.js; what happens to it is the one place the two modes differ.
+     */
+    function callBuiltin(co) {
+        var name = C.lua_tojsstring(co, C.lua_upvalueindex(1));
+        var n = C.lua_gettop(co);
+
+        var parts = [];
+        for (var i = 1; i <= n; i++) {
+            var arg = toDesmos(co, i);
+            if (arg.error)
+                return fail(
+                    co,
+                    "cannot pass that to " + name + ": " + arg.error
+                );
+            parts.push(arg.latex);
+        }
+
+        var latex = lua.builtins.latex(name, parts);
+        if (latex === null)
+            return fail(
+                co,
+                name +
+                    " does not take " +
+                    n +
+                    (n === 1 ? " argument" : " arguments")
+            );
+        return value(co, latex);
+    }
+
+    /**
+     * The latex `latex` as a Lua value: a number, or - inside an action body - a fragment.
+     *
+     * A body cannot park. It also has no reason to: Desmos evaluates an update's right-hand side
+     * itself, during the fire, against the same pre-action state the rest of the body sees. So
+     * `b = f(sin(a))` hands Desmos `f\left(\sin\left(2\right)\right)` and is right for the
+     * same reason the hand-written action is.
+     */
+    function value(co, latex) {
+        if (lua.actions && lua.actions.recording()) {
+            lua.actions.pushLatex(co, latex);
             return 1;
         }
         return read(co, latex);
@@ -305,6 +408,14 @@
         }
         if (e.ready) {
             pushValue(co, e.value);
+            return 1;
+        }
+
+        // An action body has nothing to park on. Take the latex instead: Desmos evaluates it
+        // during the fire against the pre-action state, which is the value the body wanted. The
+        // helper has been made either way, so the next fire has a number and can branch on it.
+        if (lua.actions && lua.actions.recording()) {
+            lua.actions.pushLatex(co, latex);
             return 1;
         }
 
@@ -505,7 +616,7 @@
                 );
             parts.push(arg.latex);
         }
-        return read(co, base + "\\left(" + parts.join(",") + "\\right)");
+        return value(co, base + "\\left(" + parts.join(",") + "\\right)");
     }
 
     // -----------------------------------------------------------------------
@@ -526,6 +637,13 @@
             C.lua_type(co, 2) === C.LUA_TSTRING
                 ? C.lua_tojsstring(co, 2)
                 : null;
+        var latex = name === null ? null : toLatex(name);
+
+        // Inside an action body a Desmos name is not a global at all - it is the target of an
+        // update, and the graph is where it lives. Writing it to the shared store too would
+        // leave the assignment behind as a global that shadows the graph on the next read.
+        if (latex !== null && lua.actions && lua.actions.recording())
+            return lua.actions.write(co, latex, 3) ? 0 : 0;
 
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         C.lua_pushvalue(co, 2);
@@ -535,16 +653,7 @@
 
         if (name === null) return 0;
 
-        var latex = toLatex(name);
-        if (latex !== null && current) {
-            var rhs = C.lua_isnil(co, 3) ? { error: "nil" } : toDesmos(co, 3);
-            if (rhs.error) current.exports.delete(key(latex));
-            else
-                current.exports.set(key(latex), {
-                    latex: latex + "=" + rhs.latex,
-                    plot: false
-                });
-        }
+        if (latex !== null && current) put(co, latex, 3, false);
 
         // `current` and not the name's readers: a cell that writes what it reads would otherwise
         // invalidate itself every run and spin until the loop guard stopped it.
@@ -553,8 +662,58 @@
         return 0;
     }
 
-    /** The `Desmos` table: reads like a global, writes become expressions. */
-    function pushDesmos(co) {
+    /**
+     * `latex = <the value at idx>`, from a cell body rather than from inside an action.
+     *
+     * Three outcomes, and which one it is depends on who owns the name:
+     *
+     *   - a **function** is an action. It is exported under this name, and running it is Desmos'
+     *     to ask for - a button, a ticker, or another cell calling it.
+     *   - a name a graph **item** defines is Desmos'. The value is handed over as an update, the
+     *     way an action would, so `a = 5` moves the `a=2` that is already there instead of
+     *     colliding with it.
+     *   - anything else is **ours**: it is published as a statement, which is the definition
+     *     appearing if it was missing, and the value being replaced if it was not.
+     *
+     * `strict` is the difference between `k = v` and `Desmos.k = v`: the first stores a value
+     * with no Desmos spelling and says nothing, because `function f() end` is a global write and
+     * erroring on it would take cross-cell functions with it; the second asks for the graph
+     * outright, so it says so.
+     */
+    function put(co, latex, idx, strict) {
+        if (C.lua_type(co, idx) === C.LUA_TFUNCTION)
+            return lua.actions
+                ? lua.actions.export(co, current, latex, idx)
+                : false;
+
+        if (C.lua_isnil(co, idx)) {
+            current.exports.delete(key(latex));
+            if (lua.actions) lua.actions.release(current, latex);
+            return true;
+        }
+
+        var rhs = toDesmos(co, idx);
+        if (rhs.error) {
+            if (strict)
+                return fail(co, 'cannot export "' + latex + '": ' + rhs.error);
+            current.exports.delete(key(latex));
+            return false;
+        }
+
+        if (lua.defining(latex) && lua.actions) {
+            lua.actions.apply(latex, rhs.latex);
+            return true;
+        }
+
+        current.exports.set(key(latex), {
+            latex: latex + "=" + rhs.latex,
+            plot: false
+        });
+        return true;
+    }
+
+    /** The `Desmos` table itself: reads like a global, writes reach the graph. */
+    function buildDesmos(co) {
         C.lua_createtable(co, 0, 8);
 
         C.lua_pushcfunction(co, desmosGet);
@@ -581,7 +740,7 @@
             C.lua_pushnil(co);
             return 1;
         }
-        return read(co, latex);
+        return value(co, latex);
     }
 
     /** Desmos.define("g(x)", "x^{2}+1") - Lua writing latex, which is what it is good at. */
@@ -667,26 +826,23 @@
                     name +
                     '": a Desmos name is a letter and an optional subscript, like k or a1'
             );
-        if (!current) return 0;
-
-        if (C.lua_isnil(co, 3)) {
-            current.exports.delete(key(latex));
+        if (lua.actions && lua.actions.recording()) {
+            lua.actions.write(co, latex, 3);
             return 0;
         }
+        if (!current) return 0;
 
-        var rhs = toDesmos(co, 3);
-        if (rhs.error)
-            return fail(co, 'cannot export "' + name + '": ' + rhs.error);
-        current.exports.set(key(latex), {
-            latex: latex + "=" + rhs.latex,
-            plot: false
-        });
+        put(co, latex, 3, true);
         return 0;
     }
 
     /** A Lua value at `idx` as the right-hand side of an expression. */
     function toDesmos(co, idx) {
         var t = C.lua_type(co, idx);
+
+        // A fragment from inside an action body is already the answer.
+        if (lua.actions && lua.actions.isLatex(co, idx))
+            return { latex: lua.actions.latexOf(co, idx) };
 
         if (t === C.LUA_TNUMBER) {
             var s = num(C.lua_tonumber(co, idx));
@@ -697,8 +853,8 @@
         if (t === C.LUA_TFUNCTION)
             return {
                 error:
-                    "Desmos has no way to call a Lua function. Use Desmos.define to write " +
-                    "the latex yourself, or Desmos.sample to plot it as points"
+                    "a function is an action, not a value. Assign it to a name of its own - " +
+                    "`function X(n) ... end` - and use that name where the action goes"
             };
         if (t === C.LUA_TSTRING)
             return {

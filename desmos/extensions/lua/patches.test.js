@@ -185,6 +185,15 @@ ok(
     "undo would drop the flag"
 );
 
+// And the applier hook, which is what makes a Lua function an action at all.
+ok(
+    /if\(\w+\.eventUpdates\)\{window\.Extensions\["lua"\]\.actionUpdates\(\w+\.eventUpdates\.updates\);for\(let /.test(
+        js
+    ),
+    "a Lua body gets to run inside an action's fire",
+    "without this a Lua function cannot be an action"
+);
+
 console.log(
     "\n" +
         (js.match(/case"lua":/g) || []).length +

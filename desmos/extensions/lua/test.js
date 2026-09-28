@@ -107,11 +107,43 @@ const Calc = {
         generateId: () => String(++idc),
         // What scan() reads: the live models, which unlike getState() have no cache lag.
         getAllItemModels: () => list,
+        getItemModel: (id) => list.find((i) => i.id === id) || null,
         getSelectedItem: () => selected,
         dispatch: (action) => dispatched.push(action),
         // Exports reach the graph only through Desmos' parse, which calls lua.inject().
         requestParseForAllItems: () => {
             reparsed++;
+        },
+        // The builtin list is Desmos', read the way extensions/matrices reads it. Short on
+        // purpose: what matters is that it is *this* list and not one written down in builtins.js.
+        // Piped on purpose: Desmos writes `name|mq-narration-op-name`, and a reader that took
+        // the entry whole would offer `arctan|mq-narration-op-arctan` as a function name. Two
+        // entries are left bare, the way extensions/matrices appends its own.
+        getMathquillConfig: () => ({
+            autoOperatorNames:
+                "sin|mq-narration-op-sin cos|mq-narration-op-cos " +
+                "arctan|mq-narration-op-arctan mod|mq-narration-op-mod " +
+                "total|mq-narration-op-total floor and|mq-narration-op-and for"
+        }),
+        // Desmos' own applier, which a Lua write to an item-defined name goes through.
+        updateLatexForIdentifier(identifier, latex) {
+            const plain = identifier.replace(/[{}]/g, "");
+            const item = list.find(
+                (i) =>
+                    i.type === "expression" &&
+                    (DEFINE.exec(i.latex) || [])[1] &&
+                    canonical(DEFINE.exec(i.latex)[1]) === plain
+            );
+            if (item) {
+                item.latex = latex;
+                applied.push([identifier, latex]);
+                poke(plain, literal(latex.slice(latex.indexOf("=") + 1)));
+            }
+        },
+        evaluator: {
+            // A step the graph asks for. The worker is not here, so the updates a real evaluator
+            // would compute are worked out by fire() below.
+            addActionStepEvent: (id) => stepped.push(id)
         }
     },
     HelperExpression({ latex }) {
@@ -128,8 +160,30 @@ const Calc = {
     }
 };
 
+/**
+ * Desmos' own functions, as latex, so a builtin read is answered rather than NaN. Only the few
+ * the tests use: the point is that builtins.js spelled them the way Desmos does, not that this
+ * stub is a calculator.
+ */
+const MATH = {
+    "\\sin": Math.sin,
+    "\\cos": Math.cos,
+    "\\tan": Math.tan,
+    "\\arctan": Math.atan,
+    "\\operatorname{floor}": Math.floor,
+    "\\operatorname{total}": (v) => [].concat(v).reduce((a, b) => a + b, 0)
+};
+
 /** `a` -> 5, `a_{b}` -> GRAPH.a_b, `f\left(3\right)` -> 9, anything else -> NaN. */
 function evaluate(latex) {
+    for (const head of Object.keys(MATH)) {
+        if (latex.indexOf(head + "\\left(") !== 0) continue;
+        const inner = latex.slice(head.length + 6, -7);
+        const arg = literal(inner);
+        if (Array.isArray(arg) && head === "\\operatorname{total}")
+            return MATH[head](arg);
+        return Array.isArray(arg) ? arg.map(MATH[head]) : MATH[head](arg);
+    }
     const call = /^([A-Za-z])(?:_\{(\w+)\})?\\left\((.*)\\right\)$/.exec(latex);
     if (call) {
         const fn = GRAPH[call[1] + (call[2] || "")];
@@ -166,8 +220,39 @@ function poke(name, value) {
 }
 let idc = 100;
 
+/** The same two the extension uses, so the stub agrees with it about what a definition is. */
+const DEFINE =
+    /^\s*([A-Za-z](?:_\{[A-Za-z0-9]+\}|_[A-Za-z0-9])?)\s*(\\left\([^=]*?\\right\))?\s*=/;
+function canonical(name) {
+    const m = /^([A-Za-z])(?:_\{?([A-Za-z0-9]+)\}?)?$/.exec(name);
+    if (!m) return name;
+    return m[2] ? m[1] + "_" + m[2] : m[1];
+}
+
+/** Every update Desmos' applier was asked to make, and every action stepped. */
+const applied = [];
+const stepped = [];
+
+/**
+ * Stand in for a fire: hand the extension the updates Desmos would have computed, and apply
+ * whatever comes back - which is what the patched applier does in the calculator.
+ */
+function fire(updates) {
+    lua.actionUpdates(updates);
+    Object.keys(updates).forEach((id) => {
+        Calc.controller.updateLatexForIdentifier(id, updates[id]);
+    });
+    return updates;
+}
+
 // --- load the extension -------------------------------------------------------
-for (const f of ["index.js", "bridge.js", "runner.js"]) {
+for (const f of [
+    "index.js",
+    "builtins.js",
+    "bridge.js",
+    "actions.js",
+    "runner.js"
+]) {
     const src = fs.readFileSync(
         path.join(ROOT, "desmos/extensions/lua", f),
         "utf8"
@@ -331,17 +416,20 @@ async function main() {
         String(lua.runner.line(cell, cell.error))
     );
 
-    // 6. a function cannot be exported, and says so usefully
-    id = cellWith("Desmos.f = function(x) return x end");
+    // 6. a function is an action, and its parameters ride in on markers of their own
+    id = cellWith("Desmos.act1 = function(x) return x end");
     change();
     cell = lua.cell(id);
     lua.runner.run(cell);
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "function export refused with advice",
-        !!cell.error && /Desmos.sample/.test(cell.error),
-        cell.error
+        "a one-parameter function exports an action function",
+        /^a_\{ct1\}\\left\(L_\{p0\}\\right\)=\\left\(L_\{ua\d+\}\\to L_\{p0\}\\right\)$/.test(
+            exported("act1") || ""
+        ),
+        exported("act1") + " err=" + cell.error
     );
+    ok("and did not error doing it", !cell.error, cell.error);
 
     // 7. a multi-letter name is a subscript: `total` means `t_{otal}`
     id = cellWith('Desmos.total = 1\nDesmos["1x"] = 2');
@@ -1001,9 +1089,10 @@ async function main() {
         exported("qq")
     );
 
-    // 30. a value with no Desmos spelling is stored and not exported. This is what keeps a
-    // cross-cell function working: `function f() end` is a global write like any other, and
-    // erroring on it would be erroring on the whole point of sharing globals.
+    // 30. a global function is an action on the graph - and still an ordinary Lua function to
+    // the cell next door, because the shared globals hold the real thing and only the graph gets
+    // the marker. A value with no Desmos spelling at all is still stored and said nothing about:
+    // erroring on it would error on the whole point of sharing globals.
     const holder = cellWith("function helper1() return 11 end\nlabel = 'hi'");
     const caller = cellWith("Desmos.hh = helper1()");
     change();
@@ -1012,9 +1101,16 @@ async function main() {
     lua.runner.run(lua.cell(caller));
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "a function is stored, not exported",
-        exported("helper1") === undefined,
+        "a function exports an action, with a marker to update",
+        /^h_\{elper1\}=\\left\(L_\{ua\d+\}\\to L_\{ua\d+\}\+1\\right\)$/.test(
+            exported("helper1") || ""
+        ),
         exported("helper1")
+    );
+    ok(
+        "and the marker is published too, or the action has nothing to update",
+        Object.keys(injected()).some((id) => /-Lua\d+$/.test(id)),
+        Object.keys(injected()).join(" ")
     );
     ok("nor is a string", exported("label") === undefined, exported("label"));
     ok(
@@ -1156,6 +1252,324 @@ async function main() {
             ed + css
         ),
         "the button moved to the gutter and print goes to the console"
+    );
+
+    // --- builtins ---------------------------------------------------------------
+    //
+    // 40. the name list is Desmos', not one written down here. The stub's autoOperatorNames is
+    // short and made up, so a builtin that only works because builtins.js has its own copy of
+    // the real list would fail this.
+    ok(
+        "the builtin list comes off getMathquillConfig",
+        lua.builtins.has("arctan") &&
+            lua.builtins.has("mod") &&
+            !lua.builtins.has("erf"),
+        "erf is real but not in the stub's list, so a hard-coded table would have it"
+    );
+    ok(
+        "syntax in that list is not a function",
+        !lua.builtins.has("and") && !lua.builtins.has("for"),
+        "and/for are operator names but they are Desmos' syntax"
+    );
+    ok(
+        "the narration key is trimmed off each name",
+        !lua.builtins
+            .names()
+            .some((name) => name.indexOf("|") !== -1 || /^mq-/.test(name)),
+        lua.builtins
+            .names()
+            .filter((name) => name.indexOf("|") !== -1)
+            .join(" ") +
+            " - an entry is `name|mq-narration-op-name`, and the name is the first half"
+    );
+    ok(
+        "and a bare entry still lands",
+        lua.builtins.has("floor"),
+        "extensions/matrices appends names with no narration key at all"
+    );
+    ok(
+        "a name LaTeX has a command for spells itself",
+        lua.builtins.latex("sin", ["2"]) === "\\sin\\left(2\\right)",
+        lua.builtins.latex("sin", ["2"])
+    );
+    ok(
+        "and everything else is an operatorname",
+        lua.builtins.latex("mod", ["a", "3"]) ===
+            "\\operatorname{mod}\\left(a,3\\right)",
+        lua.builtins.latex("mod", ["a", "3"])
+    );
+    ok(
+        "the shaped few are shaped",
+        lua.builtins.latex("sqrt", ["x"]) === "\\sqrt{x}" &&
+            lua.builtins.latex("log", ["x", "2"]) ===
+                "\\log_{2}\\left(x\\right)" &&
+            lua.builtins.latex("abs", ["x"]) === "\\left|x\\right|",
+        [
+            lua.builtins.latex("sqrt", ["x"]),
+            lua.builtins.latex("log", ["x", "2"]),
+            lua.builtins.latex("abs", ["x"])
+        ].join(" ")
+    );
+
+    // 41. a builtin in a cell body is a number: one trip to the evaluator, parking the cell,
+    // exactly as calling a graph function does.
+    id = cellWith("Desmos.bi = arctan(1)\nDesmos.bj = Desmos.cos(0)");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "an unqualified builtin resolves through _G",
+        exported("bi") === "b_{i}=" + Math.atan(1),
+        exported("bi") + " err=" + cell.error
+    );
+    ok(
+        "and the same one qualified is the same thing",
+        exported("bj") === "b_{j}=1",
+        exported("bj")
+    );
+
+    // 42. but a name the graph really defines still wins. `S=42` is on the sheet, so `S` is 42
+    // and not some builtin - the fallback is only for a name that would otherwise be nil.
+    GRAPH.s_in = 3;
+    list.push({ type: "expression", id: "gsin", latex: "s_{in}=3" });
+    id = cellWith("Desmos.si = sin");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a defined s_{in} beats the builtin sin",
+        exported("si") === "s_{i}=3",
+        exported("si") + " err=" + cell.error
+    );
+    // And put it back: everything after this wants `sin` to mean Desmos' own again, which is
+    // itself the point - the shadowing lasts exactly as long as the item does.
+    list = list.filter((i) => i.id !== "gsin");
+    delete GRAPH.s_in;
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "and stops beating it once the item is gone",
+        lua.bridge.defs.get("s_{in}") === undefined,
+        String(lua.bridge.defs.get("s_{in}"))
+    );
+
+    // 43. `Desmos` and `_G.Desmos` are one object, so a cell reaching for either gets the same
+    // thing. They used to be a fresh table per cell, and `_G.Desmos` was the graph's D_{esmos}.
+    id = cellWith("Desmos.dg = (_G.Desmos == Desmos) and 1 or 0");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 60));
+    ok(
+        "_G.Desmos is Desmos",
+        exported("dg") === "d_{g}=1",
+        exported("dg") + " err=" + cell.error
+    );
+
+    // --- actions ----------------------------------------------------------------
+    //
+    // 44. the worked example. `a=2` is on the sheet, so Lua's `a = n` moves it rather than
+    // redefining it; `b = f(sin(a))` uses the *old* a, because every right-hand side in an
+    // action is computed against the state before anything moved.
+    const beforeA = list.find((i) => i.id === "g1").latex;
+    id = cellWith(
+        "function X(n)\n" +
+            "    a = n\n" +
+            "    b = f(sin(a))\n" +
+            "    return 3\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 150));
+
+    ok(
+        "a Lua function exports an action taking its argument",
+        /^X\\left\(L_\{p0\}\\right\)=\\left\(L_\{ua\d+\}\\to L_\{p0\}\\right\)$/.test(
+            exported("X") || ""
+        ),
+        exported("X") + " err=" + cell.error
+    );
+    ok(
+        "and the sheet's own a was left alone until it fires",
+        list.find((i) => i.id === "g1").latex === beforeA,
+        list.find((i) => i.id === "g1").latex
+    );
+
+    // Fire it the way the patched applier does: the marker carries the argument.
+    const marker = /L_\{ua\d+\}/.exec(exported("X"))[0];
+    const fired = fire({ [marker.replace(/[{}]/g, "")]: marker + "=4" });
+
+    ok(
+        "the marker is not left in the map as an update of its own",
+        !Object.keys(fired).some((k) => /^L_ua\d+$/.test(k)),
+        Object.keys(fired).join(" ")
+    );
+    ok(
+        "a = n moved the sheet's own a",
+        list.find((i) => i.id === "g1").latex === "a=4",
+        list.find((i) => i.id === "g1").latex
+    );
+    ok(
+        "through Desmos' own applier, latex and all",
+        applied.some(([id, latex]) => id === "a" && latex === "a=4"),
+        JSON.stringify(applied.slice(-2)) +
+            " - the update is the whole assignment, which is what widens a slider to fit"
+    );
+    ok(
+        "and b used the a from before the action, not after",
+        (fired.b || "") === "b=f\\left(\\sin\\left(5\\right)\\right)",
+        (fired.b || "(nothing)") +
+            " - a was 5 when the action fired, so sin(5) and not sin(4)"
+    );
+    ok(
+        "the body's return value is ignored, as an action's is",
+        !("3" in fired),
+        Object.keys(fired).join(" ")
+    );
+
+    // 45. updating the same variable twice is the error Desmos says it is, and it aborts: the
+    // action applies nothing at all rather than half of itself.
+    id = cellWith("function X2()\n" + "    a = 1\n" + "    a = 2\n" + "end");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    const twice = /L_\{ua\d+\}/.exec(exported("X2"))[0];
+    const wasA = list.find((i) => i.id === "g1").latex;
+    const out = fire({ [twice.replace(/[{}]/g, "")]: twice + "=1" });
+    ok(
+        "a target updated twice is refused",
+        !!cell.error && /more than once/.test(cell.error),
+        cell.error
+    );
+    ok(
+        "and nothing moved",
+        list.find((i) => i.id === "g1").latex === wasA && !("a" in out),
+        list.find((i) => i.id === "g1").latex
+    );
+
+    // 46. a Desmos action read into Lua is callable. Calling one inside a body folds its updates
+    // into the same action - which is how `Y()` next to `a = n` becomes the collision above.
+    GRAPH.Y = undefined;
+    list.push({ type: "expression", id: "gY", latex: "Y=a\\to3" });
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "an action on the sheet is indexed as one",
+        lua.bridge.defs.get("Y") === "action",
+        String(lua.bridge.defs.get("Y"))
+    );
+
+    id = cellWith("function X3()\n" + "    a = 9\n" + "    Y()\n" + "end");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    const nested = /L_\{ua\d+\}/.exec(exported("X3"))[0];
+    fire({ [nested.replace(/[{}]/g, "")]: nested + "=1" });
+    ok(
+        "a nested action that updates the same name is the same error",
+        !!cell.error && /more than once/.test(cell.error),
+        cell.error
+    );
+
+    // 47. and calling one from a cell body, where there is no fire to join, steps it.
+    id = cellWith("Y()");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 80));
+    ok(
+        "calling an action from a cell body runs it",
+        dispatched.some(
+            (a) => a.type === "action-single-step" && a.id === "gY"
+        ),
+        "dispatched " + JSON.stringify(dispatched.slice(-2))
+    );
+
+    // 47b. an action *function* called with an argument is a call no item spells, so there is
+    // nothing for action-single-step to name: it is handed to the evaluator as a statement of
+    // ours and stepped that way instead.
+    list.push({
+        type: "expression",
+        id: "gYf",
+        latex: "Y_{f}\\left(n\\right)=a\\to n"
+    });
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "an action function on the sheet is indexed as one",
+        lua.bridge.defs.get("Y_{f}") === "actionFunction",
+        String(lua.bridge.defs.get("Y_{f}"))
+    );
+
+    // Woken by change() rather than run() here, so the count below is one run's worth: a cell
+    // that steps an action twice has stepped it twice, and that is not what is being checked.
+    const steps = stepped.length;
+    id = cellWith("Yf(2)");
+    change();
+    await new Promise((r) => setTimeout(r, 80));
+    cell = lua.cell(id);
+    ok(
+        "calling it steps a statement of our own",
+        stepped.length === steps + 1 &&
+            /^cde-lua-step-\d+$/.test(stepped[stepped.length - 1]),
+        "stepped " + JSON.stringify(stepped.slice(-2)) + " err=" + cell.error
+    );
+
+    ok(
+        "and calling it with none says so",
+        await (async () => {
+            const bad = cellWith("Yf()");
+            change();
+            await new Promise((r) => setTimeout(r, 80));
+            return /takes arguments/.test(lua.cell(bad).error || "");
+        })(),
+        "an action function called with no arguments is not an action"
+    );
+
+    // 48. a latex fragment is not a number, and says so rather than comparing as one. This is
+    // the honest half of "two kinds of value": Lua can branch on what is known and not on what
+    // is not.
+    id = cellWith(
+        "function X4()\n" +
+            "    if Desmos.get('\\\\notyet') > 1 then a = 1 end\n" +
+            "end"
+    );
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    const cold2 = /L_\{ua\d+\}/.exec(exported("X4"))[0];
+    fire({ [cold2.replace(/[{}]/g, "")]: cold2 + "=1" });
+    ok(
+        "comparing a fragment errors, and names the way out",
+        !!cell.error && /cell body/.test(cell.error),
+        cell.error
+    );
+
+    // 49. a Lua-owned name has no item, so an action's update to it rewrites the statement that
+    // publishes it instead.
+    id = cellWith("kk = 1\nfunction X5()\n    kk = 7\nend");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a Lua-owned name is published as a statement",
+        exported("kk") === "k_{k}=1",
+        exported("kk") + " err=" + cell.error
+    );
+    const own = /L_\{ua\d+\}/.exec(exported("X5"))[0];
+    fire({ [own.replace(/[{}]/g, "")]: own + "=1" });
+    ok(
+        "and an action updates it in place, with nothing handed to Desmos",
+        exported("kk") === "k_{k}=7",
+        exported("kk")
     );
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
