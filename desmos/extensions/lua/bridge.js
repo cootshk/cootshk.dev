@@ -610,8 +610,9 @@
     function callFn(co) {
         var base = C.lua_tojsstring(co, C.lua_upvalueindex(1));
         var n = C.lua_gettop(co);
-        if (!n) return fail(co, base + " needs an argument");
 
+        // No arguments is a call, not a mistake: `a\\left(\\right)=1` is a function of none, and
+        // `a()` is how both Desmos and Lua spell calling it.
         var parts = [];
         for (var i = 1; i <= n; i++) {
             var arg = toDesmos(co, i);

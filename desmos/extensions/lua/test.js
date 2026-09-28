@@ -1100,8 +1100,8 @@ async function main() {
     lua.runner.run(lua.cell(caller));
     await new Promise((r) => setTimeout(r, 60));
     ok(
-        "a no-argument function that computes is a value",
-        exported("helper1") === "h_{elper1}=11",
+        "a no-argument function is a function of none, not a variable",
+        exported("helper1") === "h_{elper1}\\left(\\right)=11",
         exported("helper1")
     );
     ok("nor is a string", exported("label") === undefined, exported("label"));
@@ -1474,6 +1474,43 @@ async function main() {
         moved.m + " - `m=n+m+3` would be read by Desmos as m defining itself"
     );
     ok("and the cell said nothing about it", !cell.error, cell.error);
+
+    // 43b-iii. the shape a cell writes is the shape the graph gets. A Lua function is a Desmos
+    // function and is called with brackets, even when it takes none; a Lua value is a variable.
+    // Collapsing `function a() ... end` to `a=1` would make the two indistinguishable.
+    id = cellWith("function a1() return 1 end\nb1 = 2");
+    change();
+    cell = lua.cell(id);
+    lua.runner.run(cell);
+    await new Promise((r) => setTimeout(r, 120));
+    ok(
+        "a Lua function of no arguments is a() on the graph",
+        exported("a1") === "a_{1}\\left(\\right)=1",
+        exported("a1") + " err=" + cell.error
+    );
+    ok(
+        "and a Lua value is a plain variable",
+        exported("b1") === "b_{1}=2",
+        exported("b1")
+    );
+    change();
+    await new Promise((r) => setTimeout(r, 20));
+    ok(
+        "so the graph indexes one as a function and the other as a value",
+        lua.bridge.defs.get("a_{1}") === "function" &&
+            lua.bridge.defs.get("b_{1}") === "value",
+        lua.bridge.defs.get("a_{1}") + " / " + lua.bridge.defs.get("b_{1}")
+    );
+    ok(
+        "and Lua can call it back with no arguments",
+        await (async () => {
+            const back = cellWith("Desmos.c1 = a1()");
+            change();
+            await new Promise((r) => setTimeout(r, 120));
+            return exported("c1") === "c_{1}=1";
+        })(),
+        exported("c1") + " - a() is a call, not a mistake"
+    );
 
     // 43c. a body that branches on a value the graph has not produced is still an action - the
     // probe takes the branch to find that out, and then refuses to write the body down as a

@@ -223,9 +223,21 @@ A global function reaches the graph, and **what it becomes depends on what it ha
 
 ```lua
 function A(n) return n + 2 end              -- A\left(L_{p0}\right)=L_{p0}+2, a function
+function a() return 1 end                   -- a\left(\right)=1, called from the sheet as a()
 function A(n) return function() ... end end -- an action
 function X(n) a = n end                     -- an action: it updates something
 ```
+
+The shape you write is the shape the graph gets. **A Lua function is a Desmos function and is
+called with brackets**, even when it takes none, and a Lua value is a variable:
+
+```lua
+function a() return 1 end   -- a() on the sheet
+b = 2                       -- b on the sheet
+```
+
+Writing the first as `a=1` would make it a variable that happens to hold the same number, and
+there would be no way left to tell it from the second.
 
 **A function that only computes is a Desmos function.** It is run once with its parameters
 standing in as latex, so `n + 2` composes `L_{p0}+2` and what lands on the graph is a real Desmos

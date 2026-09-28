@@ -532,6 +532,7 @@
      * running it once, here, and looking at what comes back:
      *
      *     function A(n) return n + 2 end                 ->  A\left(L_{p0}\right)=L_{p0}+2
+     *     function a() return 1 end                      ->  a\left(\right)=1, called as a()
      *     function A(n) return function() ... end end    ->  an action
      *     function X(n) a = n end                        ->  an action
      *
@@ -604,9 +605,16 @@
         return record_body(co, idx, args, true);
     }
 
-    /** `A` with no parameters, `A\left(L_{p0}\right)` with one. */
+    /**
+     * The left-hand side a Lua function is written down as. Always parenthesised, empty list and
+     * all: a Lua function is a Desmos function, and a Desmos function is called with brackets.
+     *
+     * `function a() return 1 end` is `a\left(\right)=1`, called as `a()`. Dropping the brackets
+     * for the no-argument case would write it down as a *variable* instead - which is a different
+     * thing that happens to hold the same number, and would make it indistinguishable from
+     * `b = 2`, which really is one.
+     */
     function signature(name, params) {
-        if (!params) return name;
         var names = [];
         for (var i = 0; i < params; i++) names.push("L_{p" + i + "}");
         return name + "\\left(" + names.join(",") + "\\right)";
