@@ -44,9 +44,31 @@
     resize: none !important;
 }
 
+/* --- the + menu's entry --------------------------------------------------- */
+
+/* Desmos' icons are a font - `[class^=dcg-icon-]` sets `font-family: dcg-icons-<date>` and each
+ * class is a `:before` with a codepoint in it - so there is no adding one by naming it. The
+ * class exists here instead, and what it draws is a mask rather than a background image: masked,
+ * the paint is `currentColor`, which is what makes the mark follow the theme and turn white on a
+ * highlighted menu row exactly as the glyphs beside it do. As a background image it would be one
+ * fixed colour and wrong in half of those states.
+ *
+ * Sized in `em` for the same reason: the container sets `font-size: 205%` on its icons, so a
+ * 1em box is the size its neighbours came out at, whatever that percentage becomes. */
+.dcg-icon-lua {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: middle;
+    background-color: currentColor;
+    -webkit-mask: url("/cdn/media/dcg-icon-lua.svg") no-repeat center / contain;
+    mask: url("/cdn/media/dcg-icon-lua.svg") no-repeat center / contain;
+}
+
 /* --- the gutter ---------------------------------------------------------- */
 
-/* The note's own icon goes; editor.js puts a run button where a slider's play button sits. Desmos
+/* The note's own icon goes; editor.js puts a run button - Desmos' action glyph in a slider's
+ * play-button slot - in its place. Desmos
  * draws the note icon as
  *
  *     .dcg-expressionitem.dcg-expressiontext .dcg-icon-text {
@@ -61,9 +83,10 @@
 }
 
 /* Almost nothing to do here: the button is built out of Desmos' own icon chain, so
- * .dcg-expression-icon-container places it (absolute, 29px, centred in the 38px tab) and
- * .dcg-circular-icon.dcg-thick-outline draws the ring in the theme's own text colour at 50%
- * opacity. Guessing at either was the bug this replaces. */
+ * .dcg-expression-icon-container places it (absolute, 29px, centred in the 38px tab),
+ * .dcg-action-icon-view centres the circle inside that, and .dcg-circular-icon.dcg-thick-outline
+ * draws the ring in the theme's own text colour at 50% opacity. Guessing at any of them was the
+ * bug this replaces - and leaving the middle one out is what puts the button off-centre. */
 .cde-lua__icon {
     cursor: pointer;
 }

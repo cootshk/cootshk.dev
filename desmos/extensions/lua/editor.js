@@ -232,22 +232,32 @@
     /**
      * The run button, where the note's own icon was.
      *
-     * Built out of Desmos' own classes rather than styled from scratch, because a slider's play
+     * Built out of Desmos' own classes rather than styled from scratch, because an action's run
      * button is the thing it is meant to look like and there is no reason to guess at 29px and
-     * the theme's outline colour when the calculator will say. This is the slider's chain with
-     * its tooltip and popover wrappers - which are components, and not reachable from markup -
-     * left out:
+     * the theme's outline colour when the calculator will say. Running a cell is the nearest
+     * thing the sheet already has a button for, and `a\to a+1` wears this one. Desmos' chain,
+     * with its tooltip and popover wrappers - which are components, and not reachable from
+     * markup - left out:
      *
      *     span.dcg-tab                                <- Desmos', the note row's
      *       div.dcg-tab-interior                      <- Desmos', empty in a note
      *         div.dcg-expression-icon-container        (absolute, 29px, centred in the tab)
-     *           div.dcg-circular-icon-container
-     *             span.dcg-circular-icon.dcg-thick-outline   (the ring: 2px, themed, 50% opacity)
-     *               i.dcg-icon-play                          (or -pause)
+     *           div.dcg-action-icon-view               (what centres the button in that 29px)
+     *             div.dcg-circular-icon-container
+     *               span.dcg-circular-icon.dcg-thick-outline  (the ring: 2px, themed, 50%)
+     *                 i.dcg-icon-minus                        (the arrow's stem)
+     *                 i.dcg-icon-chevron-right                (and its head)
      *
-     * `dcg-action-drag`, `dcg-action-icon-touch`, `dcg-action-icon-mouse` and `dcg-tab-interior`
-     * are all in the slider's markup too and all have no CSS and no behaviour - they are inert
-     * markers, so they are not copied.
+     * `dcg-action-icon-view` is not decoration: it is the layer Desmos centres the circle in,
+     * and without it the button sits off-centre in the tab. The ring is `dcg-thick-outline`
+     * because Desmos' icon component gives an action one, the same as a slider's play button -
+     * so the two sit at the same weight down a sheet that has both.
+     *
+     * A cell can be stopped mid-run, which an action cannot, so the busy state is one glyph
+     * where the idle state is two: this button is a toggle where Desmos' is a flash.
+     *
+     * `dcg-action-drag`, `dcg-action-icon-touch` and `dcg-action-icon-mouse` are in that markup
+     * too and all have no CSS and no behaviour - they are inert markers, so they are not copied.
      *
      * A note's own `i.dcg-icon-text` is absolutely centred in the same tab; index.css hides it
      * for a cell's row so the two do not sit on top of each other.
@@ -269,22 +279,36 @@
         var found = tab.querySelector(".cde-lua__icon");
         if (found) {
             cell.icon = found;
-            cell.ring = found.querySelector(".dcg-circular-icon-container");
-            cell.glyph = cell.ring && cell.ring.querySelector("i");
+            cell.ring = found.querySelector(".dcg-action-icon-view");
+            var glyphs = found.querySelectorAll(".dcg-circular-icon i");
+            cell.stem = glyphs[0];
+            cell.head = glyphs[1];
             cell.fault = found.querySelector(".dcg-tooltipped-error");
             return;
         }
 
-        var glyph = ui.el("i", { "aria-hidden": "true" });
+        // Two glyphs, not one. Desmos draws an action's arrow as a stem and a head - its icon
+        // component asks for a background icon and a primary one, and for an action those are
+        // `dcg-icon-minus` and `dcg-icon-chevron-right` layered on top of each other. The
+        // chevron on its own is the head with nothing behind it.
+        var stem = ui.el("i", { "aria-hidden": "true" });
+        var head = ui.el("i", { "aria-hidden": "true" });
         var ring = ui.el(
             "div",
-            { class: "dcg-circular-icon-container", role: "button" },
+            { class: "dcg-action-icon-view" },
             ui.el(
-                "span",
-                {
-                    class: "dcg-circular-icon dcg-thick-outline dcg-forced-color-none"
-                },
-                glyph
+                "div",
+                { class: "dcg-circular-icon-container", role: "button" },
+                ui.el(
+                    "span",
+                    {
+                        class:
+                            "dcg-do-not-blur dcg-forced-color-none " +
+                            "dcg-circular-icon dcg-thick-outline"
+                    },
+                    stem,
+                    head
+                )
             )
         );
 
@@ -330,7 +354,8 @@
         (tab.querySelector(".dcg-tab-interior") || tab).appendChild(icon);
         cell.icon = icon;
         cell.ring = ring;
-        cell.glyph = glyph;
+        cell.stem = stem;
+        cell.head = head;
         cell.fault = fault;
     }
 
@@ -368,7 +393,8 @@
         cell.box = null;
         cell.icon = null;
         cell.ring = null;
-        cell.glyph = null;
+        cell.stem = null;
+        cell.head = null;
         cell.fault = null;
     }
 
@@ -754,19 +780,25 @@
      */
     function render(cell) {
         guard(cell);
-        if (!cell.icon || !cell.ring || !cell.glyph || !cell.fault) return;
+        if (!cell.icon || !cell.ring || !cell.stem || !cell.head || !cell.fault)
+            return;
 
         var problem = cell.syntax || cell.error || "";
         var busy = lua.runner.busy(cell);
 
         cell.ring.style.display = problem ? "none" : "";
         cell.fault.style.display = problem ? "" : "none";
-        // dcg-layered-icon is what Desmos' own icon component puts here; it is inert outside a
-        // coloured or image-backed icon, and kept so this is the same markup.
-        if (!problem)
-            cell.glyph.className =
-                (busy ? "dcg-icon-pause" : "dcg-icon-play") +
+        // dcg-layered-icon is what Desmos' own icon component puts on each of these; it is inert
+        // outside a coloured or image-backed icon, and kept so this is the same markup. Running,
+        // the arrow gives way to a single pause glyph - there is no stem to draw behind it.
+        if (!problem) {
+            cell.stem.className =
+                (busy ? "dcg-icon-pause" : "dcg-icon-minus") +
                 " dcg-layered-icon";
+            cell.stem.style.opacity = "1";
+            cell.head.className = "dcg-icon-chevron-right dcg-layered-icon";
+            cell.head.style.display = busy ? "none" : "";
+        }
 
         var title = problem
             ? problem

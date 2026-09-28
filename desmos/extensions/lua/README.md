@@ -9,11 +9,11 @@ values as ordinary globals and hand values back by assigning to `Desmos`.
 Three times, and no others:
 
 - when the graph opens;
-- when you click the ▶ in its gutter;
+- when you click the › in its gutter;
 - when a value it read changes.
 
 **Not when you edit it.** Typing is not a request to execute, and running on every keystroke would
-run a dozen half-written versions of a line. `Ctrl`/`Cmd`+`Enter` or the ▶ is how you say so.
+run a dozen half-written versions of a line. `Ctrl`/`Cmd`+`Enter` or the › is how you say so.
 
 The one thing that does not run at load is a cell asking for `unsafe`, which is handed the page
 itself - see _What a cell can reach_. Everything else on a graph you have just opened runs, which
@@ -465,7 +465,7 @@ function on a Desmos graph.
 | `Ctrl`/`Cmd`+`Enter` | run the cell now                         |
 | `Esc`                | hand the row to Desmos                   |
 | `Backspace`          | delete the cell, when it is empty        |
-| ▶ in the gutter      | run the cell; ⏸ while it runs, to stop   |
+| › in the gutter      | run the cell; ⏸ while it runs, to stop   |
 
 After `Esc` the row belongs to the expression sheet again, so Desmos' own keys work on it -
 `Enter` for a new line below, up and down to walk to the neighbouring ones. `Shift`+`Enter` is
@@ -504,10 +504,15 @@ after the delete would put the row back as a plain note.
 
 ## The gutter, `print` and errors
 
-The note's own icon is replaced by a run button, in the same place and the same size a slider's
-play button sits: ▶ while the cell is idle, ⏸ while a run is in flight. Clicking mid-run stops it
-and withdraws what the part-finished run had exported - a definition whose cell was interrupted is
-a value from nowhere.
+The note's own icon is replaced by a run button, wearing the glyph Desmos gives an action and
+sitting where a slider's play button does: › while the cell is idle, ⏸ while a run is in flight.
+Running a cell is the nearest thing the sheet already has a button for. The + menu's entry wears
+the Lua mark instead - `dcg-icon-lua`, which is a class `index.css` defines over
+`/cdn/media/dcg-icon-lua.svg`, because Desmos' icons are a font and there is no adding one to it
+by name. It is drawn as a mask rather than a background image, so the mark takes `currentColor`
+and follows the theme. Clicking mid-run stops it and withdraws what the part-finished run had
+exported - a definition whose cell was interrupted is a value from nowhere. An action cannot be
+stopped that way, which is the one place this button is a toggle where Desmos' is a flash.
 
 That button is not a bundle patch. The row is already this extension's to decorate, and
 `attach()` is re-run whenever React rebuilds one. Taking the click off the drag handle underneath

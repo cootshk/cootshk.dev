@@ -212,9 +212,14 @@
                     replace: '$&case"lua":return"lua";',
                     count: 1
                 },
+                // The Lua mark, which is not one of Desmos' glyphs: its icons are a font, so
+                // `dcg-icon-lua` is a class ./index.css defines and draws from
+                // /cdn/media/dcg-icon-lua.svg. The name is spelt Desmos' way on purpose - the
+                // container styles its children by that prefix, and the row's markup is a bare
+                // `<i class="{whatever this returns}">`, so nothing else gets a say.
                 {
                     match: /getExpressionIcon\(\)\{switch\(this\.props\.itemType\(\)\)\{/,
-                    replace: '$&case"lua":return"dcg-icon-new-note";',
+                    replace: '$&case"lua":return"dcg-icon-lua";',
                     count: 1
                 }
             ],
