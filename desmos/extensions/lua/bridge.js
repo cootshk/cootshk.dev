@@ -92,6 +92,9 @@
         names: names,
         defs: defs,
 
+        /** Why something failed, in words. runner.js and actions.js both report errors. */
+        describe: describe,
+
         /** actions.js needs these: it spells Lua values as latex too. */
         toDesmos: toDesmos,
         num: num,
@@ -453,9 +456,12 @@
             latex: latex,
             used: ++clock
         };
+        // Only cached once it exists. Cached first, a HelperExpression that threw would leave an
+        // entry behind that is never ready and never will be - so the next read of that latex
+        // finds it, parks on it, and waits for a value nothing is going to report.
+        e.h = Calc.HelperExpression({ latex: latex });
         helpers.set(latex, e);
 
-        e.h = Calc.HelperExpression({ latex: latex });
         var take = function () {
             settle(e, valueOf(e.h));
         };
@@ -935,6 +941,60 @@
         if (s.indexOf("e") === -1) return s;
         var parts = s.split("e");
         return parts[0] + "\\cdot10^{" + Number(parts[1]) + "}";
+    }
+
+    /**
+     * The error value on top of `co`, as something worth reading. Does not pop it.
+     *
+     * `lua_tojsstring` answers null for anything that is not already a string or a number, and
+     * the usual way round that - `luaL_tolstring`, which honours `__tostring` - cannot always be
+     * used: after a failed resume the thread is dead, and anything that touches its stack
+     * asserts. So there are four attempts, narrowing as they go.
+     *
+     * The third is the one that matters. A JS exception thrown out of one of this extension's own
+     * C functions is caught by fengari and handed back as a userdata wrapping the exception - a
+     * bug in this file, arriving as the single least useful word it could have chosen: "error".
+     * Reaching in for the message is worth the two guarded lines.
+     */
+    function describe(co) {
+        var direct = C.lua_tojsstring(co, -1);
+        if (direct) return direct;
+
+        // Honours __tostring, and says "table: 0x22" for a plain one. On a dead thread it
+        // asserts - sometimes after pushing - so the stack is put back by height rather than by
+        // counting pops, or a half-finished attempt would leave its own string behind for the
+        // type check at the bottom to report instead of the error.
+        var top = C.lua_gettop(co);
+        try {
+            var text = F.to_jsstring(lauxlib.luaL_tolstring(co, -1));
+            if (text) return text;
+        } catch (error) {
+            // Dead thread. The two narrower answers below need nothing from its stack.
+        } finally {
+            C.lua_settop(co, top);
+        }
+
+        var thrown = jsError(co);
+        if (thrown) return "internal: " + thrown;
+
+        var type = C.lua_type(co, -1);
+        if (type === C.LUA_TNIL) return "error(nil)";
+        return "error(" + F.to_jsstring(C.lua_typename(co, type)) + ")";
+    }
+
+    /** The JS exception fengari wrapped, if that is what this error is. */
+    function jsError(co) {
+        try {
+            var held = C.lua_topointer(co, -1);
+            var inner = held && held.data;
+            if (inner && inner.data) inner = inner.data;
+            if (!inner) return null;
+            if (typeof inner.message === "string" && inner.message)
+                return (inner.name ? inner.name + ": " : "") + inner.message;
+            return null;
+        } catch (error) {
+            return null;
+        }
     }
 
     function luaType(co, idx) {

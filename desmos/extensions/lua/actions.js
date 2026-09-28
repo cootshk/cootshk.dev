@@ -449,9 +449,7 @@
         var status = C.lua_pcall(co, (args || []).length, 1, 0);
         if (status !== C.LUA_OK) {
             recorder = outer;
-            var why = C.lua_tojsstring(co, -1);
-            C.lua_pop(co, 1);
-            return { error: why || "error" };
+            return { error: why(co) };
         }
 
         // What it handed back decides what it *is* - see exportFunction. A function means an
@@ -468,11 +466,10 @@
         if (gave === C.LUA_TFUNCTION) {
             var inner = C.lua_pcall(co, 0, 0, 0);
             if (inner !== C.LUA_OK) {
-                var bad = C.lua_tojsstring(co, -1);
-                C.lua_pop(co, 1);
+                var bad = why(co);
                 if (!probe) {
                     recorder = outer;
-                    return { error: bad || "error" };
+                    return { error: bad };
                 }
                 // A probe is discovery. It already knows what this is - a function was handed
                 // back - and it ran the inner only to find out what that one reads.
@@ -489,6 +486,30 @@
         result.blind = !!recorder.blind;
         recorder = outer;
         return result;
+    }
+
+    /**
+     * Why a pcall failed, as something worth reading. Pops the error value.
+     *
+     * The message comes from bridge.describe, which knows what to do with an error value that is
+     * not a string - a table, a nil, and above all a JS exception thrown out of one of this
+     * extension's own C functions, which used to arrive as the bare word "error".
+     *
+     * The traceback goes on for the reason runner.js puts one on: the line number is most of what
+     * turns "attempt to index a nil value" into somewhere to look.
+     */
+    function why(co) {
+        var message = lua.bridge.describe(co);
+        C.lua_pop(co, 1);
+
+        try {
+            lauxlib.luaL_traceback(co, co, to_luastring(message), 1);
+            var full = C.lua_tojsstring(co, -1);
+            C.lua_pop(co, 1);
+            return full || message;
+        } catch (error) {
+            return message;
+        }
     }
 
     /** A JS value as a Lua one, latex fragments included. bridge.pushValue knows the rest. */
@@ -655,7 +676,7 @@
         // being recognised - a fire matching a marker no action mentions would run nothing.
         if (slot) release(cell, name);
 
-        slot = { markers: [], params: [], cell: cell };
+        slot = { markers: [], params: [], cell: cell, name: name };
         var n = params || 1;
         for (var i = 0; i < n; i++) slot.markers.push(marker());
         for (var j = 0; j < params; j++) slot.params.push("L_{p" + j + "}");
@@ -831,10 +852,16 @@
             );
     }
 
-    /** A body that failed: the cell that exported it is where an error belongs. */
+    /**
+     * A body that failed: the cell that exported it is where an error belongs.
+     *
+     * Named, because a fire is not a run - there is no line the user just typed to tie it to, and
+     * a cell can export more than one action. "C: ..." says which.
+     */
     function broke(slot, message) {
-        if (slot.cell && lua.runner) lua.runner.blame(slot.cell, message);
-        else console.error("lua:", message);
+        var named = (slot && slot.name ? slot.name + ": " : "") + message;
+        if (slot && slot.cell && lua.runner) lua.runner.blame(slot.cell, named);
+        else console.error("lua:", named);
     }
 
     /**

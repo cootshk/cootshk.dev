@@ -1588,6 +1588,12 @@ async function main() {
         cell.error
     );
     ok(
+        "and the error names the action it came from",
+        !!cell.error && /^X_\{2\}:/.test(cell.error),
+        cell.error +
+            " - a fire is not a run, so there is no line just typed to tie it to"
+    );
+    ok(
         "and nothing moved",
         list.find((i) => i.id === "g1").latex === wasA && !("a" in out),
         list.find((i) => i.id === "g1").latex
@@ -1712,6 +1718,58 @@ async function main() {
         exported("kk") === "k_{k}=7",
         exported("kk")
     );
+
+    // --- what an error says -------------------------------------------------------
+    //
+    // 50. an error value that is not a string used to come out as the bare word "error", which
+    // told nobody anything. The one that mattered was the last of these: a JS exception thrown
+    // out of one of this extension's own C functions is caught by fengari and handed back as a
+    // userdata, so a bug in the bridge reported itself as "error" and nothing else.
+    const errors = [
+        ["error('plain')", /plain/],
+        ["error({})", /table/],
+        ["error(nil)", /error\(nil\)/],
+        [
+            "error(setmetatable({}, {__tostring = function() return 'spoken for' end}))",
+            /spoken for|table/
+        ]
+    ];
+    for (const [source, want] of errors) {
+        const bad = cellWith(source);
+        change();
+        const c = lua.cell(bad);
+        lua.runner.run(c);
+        await new Promise((r) => setTimeout(r, 60));
+        ok(
+            "an error raised as " + source.slice(0, 22) + " says something",
+            !!c.error && want.test(c.error) && !/^\s*error\s*$/.test(c.error),
+            JSON.stringify(c.error)
+        );
+    }
+
+    // A JS exception out of a C function, which is what a bug in bridge.js looks like from Lua.
+    // Desmos.get is handed a number, and the stub's evaluator is asked for a latex it cannot
+    // have - so this reaches into the harness rather than pretending: replace one bridge
+    // function with one that throws, exactly as a mistake in it would.
+    {
+        const realHelper = Calc.HelperExpression;
+        Calc.HelperExpression = () => {
+            throw new TypeError("deliberate: not a function");
+        };
+        // A latex nothing has asked for yet, so the helper really is built here rather than
+        // answered from the cache an earlier test warmed.
+        const bad = cellWith('Desmos.zz = Desmos.get("\\\\brandnew")');
+        change();
+        const c = lua.cell(bad);
+        lua.runner.run(c);
+        await new Promise((r) => setTimeout(r, 80));
+        Calc.HelperExpression = realHelper;
+        ok(
+            "a JS exception in the bridge reports its own message",
+            !!c.error && /deliberate: not a function/.test(c.error),
+            JSON.stringify(c.error) + ' - this used to be the bare word "error"'
+        );
+    }
 
     console.log(fails ? "\n" + fails + " FAILED" : "\nall passed");
     process.exit(fails ? 1 : 0);

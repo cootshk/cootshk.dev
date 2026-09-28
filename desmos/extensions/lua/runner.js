@@ -387,8 +387,15 @@
         C.lua_pop(L, 1);
     }
 
+    /**
+     * The error a run died on, with its traceback.
+     *
+     * The message comes from bridge.describe rather than lua_tojsstring, which answers null for
+     * every error value that is not already a string or a number - and so used to turn a bug in
+     * this extension into the bare word "error".
+     */
     function traceback(cell) {
-        var message = C.lua_tojsstring(cell.co, -1) || "error";
+        var message = lua.bridge.describe(cell.co);
         try {
             lauxlib.luaL_traceback(L, cell.co, to_luastring(message), 1);
             var full = C.lua_tojsstring(L, -1);
@@ -404,10 +411,9 @@
         var name = chunk(cell)
             .slice(1)
             .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return String(message == null ? "error" : message).replace(
-            new RegExp("^" + name + ":", "gm"),
-            ""
-        );
+        return String(
+            message == null ? "it stopped without saying why" : message
+        ).replace(new RegExp("^" + name + ":", "gm"), "");
     }
 
     /**

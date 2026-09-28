@@ -464,6 +464,14 @@ can be run again once its error is fixed.
 
 `print` goes to `console.log` and `warn` to `console.warn`. There is no strip under the cell.
 
+An error raised as something other than a string still says something. `error({})`, `error(nil)`
+and a value with its own `__tostring` are all described rather than swallowed, and so is the one
+that matters most: a JS exception thrown out of this extension's own code, which fengari hands
+back as a userdata and which used to surface as the single word `error`. That now reads
+`internal: TypeError: ...`, which is the difference between a bug you can find and one you
+cannot. An error from an action names the action, because a fire is not a run and there is no
+line just typed to tie it to.
+
 ## What a cell can reach
 
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
