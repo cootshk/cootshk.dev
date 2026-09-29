@@ -1172,13 +1172,7 @@
      */
     function sealed(co, name) {
         if (!lua.actions || !lua.actions.recording()) return null;
-        return fail(
-            co,
-            'an action cannot set "' +
-                name +
-                '": an action is something Desmos runs on the graph, and a property of an ' +
-                "item is not part of one. Set it in the cell body"
-        );
+        return fail(co, `Cannot set "${name}" while in an action.`);
     }
 
     function why(error) {

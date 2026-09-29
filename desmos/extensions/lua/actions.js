@@ -420,9 +420,7 @@
             if (recorder.probe) return false;
             return fail(
                 co,
-                'an action cannot set "' +
-                    latex +
-                    '" to nil - there is no such Desmos value'
+                `Desmos value ${latex} cannot be set to nil (does it exist?)`
             );
         }
 
