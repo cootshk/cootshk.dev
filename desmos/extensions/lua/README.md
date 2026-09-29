@@ -798,11 +798,37 @@ line just typed to tie it to.
 ## What a cell can reach
 
 `_G` is the shared globals, not the page's: `_G.x = 1` is `x = 1`, and one cell's write is the
-next cell's read. It holds nothing of its own - every lookup goes through the metatable, which is
-what records a read as a dependency - so `pairs(_G)` walks a snapshot instead: the standard
-library, then the shared globals, then whatever the table itself holds. The graph is not in that
-snapshot. `_G.a` answers for a name the sheet defines, but enumerating one means reading it, and
-a read can park the cell half way through a loop.
+next cell's read. A lookup through it goes in order - what has been rawset into it, the shared
+globals, the standard library, then the graph - and `pairs(_G)` walks a snapshot in that same
+order. The graph is not in the snapshot. `_G.a` answers for a name the sheet defines, but
+enumerating one means reading it, and a read can park the cell half way through a loop.
+
+### rawset, and the two namespaces
+
+`rawset(_G, "a", 1)` is a global like any other - the cell next door reads it as a plain `a` -
+and it is the one way to make one **without touching the graph**:
+
+```dcg
+a = 2
+```
+
+```lua
+rawset(_G, "a", 1)
+```
+
+```lua
+a               -- 1, the Lua global
+Desmos.a        -- 2, the sheet's, which kept its value
+```
+
+`Desmos.` is the graph's namespace and asks Lua nothing, which is what makes the two readable
+side by side. A bare name is the Lua global if there is one and the graph's otherwise.
+
+Which door a write goes through is Lua's own rule rather than a special case. `__newindex` fires
+only for a key the table does not already hold, and an ordinary write is never kept in `_G` - it
+goes to the shared globals and to the graph, every time, however often you make it. A name a
+`rawset` put there _is_ held, so from then on assigning it - `a = 3` or `_G.a = 3`, either
+spelling - is a plain write that stays in Lua.
 
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
 `select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `getmetatable`, `setmetatable`,

@@ -45,6 +45,11 @@
 // globals at all. `Desmos.k = v` is the strict door: it errors rather than skipping, because it
 // asks for the graph outright instead of as a side effect of not writing `local`.
 //
+// And `rawset(_G, "a", 1)` is the quiet one. It puts a global where every cell reads it and
+// nowhere near the graph, so an `a=2` on the sheet keeps its value - `a` is 1 and `Desmos.a` is
+// 2, which is the two namespaces saying different things on purpose. A name put there that way
+// stays Lua's: assigning it afterwards, by either spelling, no longer reaches the graph either.
+//
 // An export never becomes an item in the expression list. It is handed straight to Desmos'
 // evaluator as a statement - see the patch in ./index.js - so it leaves nothing in the saved
 // graph, nothing on the undo stack, and no folder to tidy up.
@@ -428,7 +433,25 @@
         C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
     }
 
-    /** The one _G, made on first use and kept in the registry. */
+    /**
+     * `_G`: one table, shared by every cell, and the same metatable a cell's environment wears.
+     *
+     * What it holds raw is what a cell has *rawset* into it, and that is the whole of the
+     * difference between the two ways of writing a global:
+     *
+     *     b = 1                  -- and `_G.b = 1`: __newindex, so it reaches the graph
+     *     rawset(_G, "a", 1)     -- straight into this table, and nowhere near the graph
+     *
+     * Lua's own rule does the work. __newindex fires only for a key the table does not already
+     * hold, so an ordinary `_G.b = 1` goes through it every time - nothing is ever kept here by
+     * that path - while a name a cell rawset is present, and assigning it afterwards is a plain
+     * write that never reaches the graph either. "Unless a rawset has been used" is not a
+     * special case anybody wrote; it is what having the values here means.
+     *
+     * A read finds them because envIndex looks here first. So `rawset(_G, "a", 1)` in one cell
+     * is a bare `a` in the next, and an `a=2` on the sheet keeps its value and its own spelling:
+     * `Desmos.a` is 2. See desmosIndex.
+     */
     function pushGlobals(co) {
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
         if (!C.lua_isnil(co, -1)) return;
@@ -450,8 +473,8 @@
      * is built and Lua's own `next` walks that instead.
      *
      * In the order a lookup would find them, so the snapshot says the same thing indexing does:
-     * the standard library, then the shared globals every cell writes to, then whatever this
-     * table holds itself - the seeded copies, and `js` for a cell that asked for it.
+     * the standard library, then the shared globals every cell writes to, then what has been
+     * rawset into `_G`, then whatever this table holds itself - the seeded copies.
      *
      * **The graph is not in it.** `_G.a` answers for a name the sheet defines, and this does not
      * enumerate one: there is no list of them that is a list of *globals*, and asking for each
@@ -465,6 +488,9 @@
         drain(co);
 
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
+        drain(co);
+
+        pushGlobals(co);
         drain(co);
 
         C.lua_pushvalue(co, 1);
@@ -514,6 +540,9 @@
 
         // `Desmos` itself, so `_G.Desmos` is the table the cell was seeded with rather than the
         // graph's `D_{esmos}`. One object, so there is one thing to reach for either way.
+        //
+        // Below it, in order: what a cell rawset into `_G`, the shared globals, the standard
+        // library, and then the graph. `Desmos.a` skips the first three - see desmosIndex.
         if (name === "Desmos") {
             pushDesmos(co);
             return 1;
@@ -522,10 +551,26 @@
         var latex = toLatex(name);
         var kind = latex === null ? undefined : defs.get(latex);
 
+        // What a cell has rawset into `_G`, which beats everything below it: reaching for
+        // rawset is reaching past the door that publishes to the graph, and a name put there
+        // on purpose should not then be answered by the graph. Raw, and it has to be - `_G`
+        // wears this very function as its __index, so a lookup honouring metamethods would ask
+        // it about a name it has just said it does not hold, for ever.
+        pushGlobals(co);
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_rawget(co, -2);
+        if (!C.lua_isnil(co, -1)) {
+            C.lua_remove(co, -2);
+            if (current) current.reads.add("_:" + name);
+            return 1;
+        }
+        C.lua_pop(co, 2);
+
         // The shared globals. Recorded as a dependency the same way a Desmos name is, so cell 1
         // changing `x` re-runs cell 2.
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
-        C.lua_getfield(co, -1, to_luastring(name));
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_rawget(co, -2);
         if (!C.lua_isnil(co, -1)) {
             C.lua_remove(co, -2);
             if (current) {
@@ -561,9 +606,40 @@
         }
         C.lua_pop(co, 2);
 
+        return fromGraph(co, name);
+    }
+
+    /**
+     * __index for `Desmos`: the graph, and only the graph.
+     *
+     * `Desmos.a` is what the sheet says `a` is, even where a cell has a Lua global of the same
+     * name - which is the point of having the two spellings. A bare `a` is the Lua global if
+     * there is one and the graph's otherwise; `Desmos.a` never asks Lua. So `rawset(_G, "a", 1)`
+     * next to `a = 2` on the sheet leaves the sheet alone, and both values are still reachable:
+     * `a` is 1, `Desmos.a` is 2.
+     *
+     * The standard library is not on this path either. `Desmos.` is the graph's namespace, so
+     * `Desmos.math` is whatever the sheet calls `m_{ath}` and not Lua's table of that name.
+     * `Desmos.get`, `.items`, `.settings` and the rest are real fields of the table and never
+     * reach a metamethod at all.
+     */
+    function desmosIndex(co) {
+        if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        return fromGraph(co, C.lua_tojsstring(co, 2));
+    }
+
+    /** What the graph has for `name`: a value to wait for, a function to call, an action, or a
+     * Desmos builtin. The tail both __index paths end in. */
+    function fromGraph(co, name) {
+        var latex = toLatex(name);
         if (latex === null) return builtin(co, name);
+
         // Which *kind* of thing this name is - a value, a function, an action, nothing at all -
         // is itself something to re-run for, so it is filed whether or not a value is read.
+        var kind = defs.get(latex);
         note(latex);
         if (kind === "function") {
             pushCall(co, latex);
@@ -783,8 +859,9 @@
         var co = L;
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         names.forEach(function (name) {
+            C.lua_pushstring(co, to_luastring(name));
             C.lua_pushnil(co);
-            C.lua_setfield(co, -2, to_luastring(name));
+            C.lua_rawset(co, -3);
         });
         C.lua_pop(co, 1);
     }
@@ -1301,6 +1378,22 @@
         if (latex !== null && lua.actions && lua.actions.recording())
             return lua.actions.write(co, latex, 3) ? 0 : 0;
 
+        // A name a cell has rawset into `_G` is Lua's from then on. `_G.b = 1` is already a
+        // plain write once `b` is there - __newindex does not fire for a key the table holds -
+        // and a bare `b = 1` has to mean the same thing, or which door the assignment went
+        // through would decide whether it reached the graph. The cell's environment never holds
+        // a global, so its __newindex always runs, and this is where that rule is put back.
+        if (name !== null && shadowed(co, name)) {
+            pushGlobals(co);
+            C.lua_pushvalue(co, 2);
+            C.lua_pushvalue(co, 3);
+            C.lua_rawset(co, -3);
+            C.lua_pop(co, 1);
+            if (lua.bridge.onInvalidate)
+                lua.bridge.onInvalidate("_:" + name, current);
+            return 0;
+        }
+
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
         C.lua_pushvalue(co, 2);
         C.lua_pushvalue(co, 3);
@@ -1316,6 +1409,16 @@
         if (lua.bridge.onInvalidate)
             lua.bridge.onInvalidate("_:" + name, current);
         return 0;
+    }
+
+    /** Has a cell rawset `name` into `_G`? Then the graph is not this assignment's business. */
+    function shadowed(co, name) {
+        pushGlobals(co);
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_rawget(co, -2);
+        var has = !C.lua_isnil(co, -1);
+        C.lua_pop(co, 2);
+        return has;
     }
 
     /**
@@ -1400,7 +1503,7 @@
         }
 
         C.lua_createtable(co, 0, 3);
-        C.lua_pushcfunction(co, envIndex);
+        C.lua_pushcfunction(co, desmosIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
         C.lua_pushcfunction(co, desmosNewIndex);
         C.lua_setfield(co, -2, to_luastring("__newindex"));
