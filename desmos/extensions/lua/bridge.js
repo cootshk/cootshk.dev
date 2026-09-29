@@ -21,6 +21,12 @@
 // recorded as a dependency even when an earlier cell put the value there. A metatable on a table
 // that also *holds* the values could not do that: a rawget hit never reaches __index.
 //
+// Which is why the standard library is one shared table too, and why __index falls back to it.
+// A cell's environment is seeded with a copy so the chunk's own `print` is a rawget, but `_G`
+// holds nothing at all - so without that fallback `_G.print` was nil where `print` was a
+// function, and `_G` was an empty table pretending to be the globals. __pairs is the same story
+// for walking it: there is nothing to traverse, so a snapshot is built instead.
+//
 // Writing exports. `a = 2` puts 2 in the globals and `a=2` on the graph, and so does
 // `_G.a = 2` and `Desmos.a = 2`. A value that has no Desmos spelling - a function, a string, a
 // table of neither points nor numbers - is stored and not exported, silently, because
@@ -47,6 +53,7 @@
     var THREADS = "cde.lua.threads";
     var GLOBALS = "cde.lua.globals";
     var DESMOS = "cde.lua.desmos";
+    var SAFE = "cde.lua.safe";
 
     /**
      * A Desmos name, as Lua spells it. A Desmos identifier is one letter and an optional
@@ -184,6 +191,12 @@
         // when a builtin has to behave differently inside an action body.
         C.lua_pushnil(L);
         C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
+
+        // And the standard library, which every cell is seeded from and every `_G` lookup falls
+        // back to. Built on first use, for the same reason the two above are: `Desmos` and
+        // `action` want ./items.js and ./actions.js to have registered themselves first.
+        C.lua_pushnil(L);
+        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
     }
 
     // -----------------------------------------------------------------------
@@ -220,11 +233,13 @@
 
     /** The metatable behind a cell's environment and behind _G. The same one, deliberately. */
     function pushMeta(co) {
-        C.lua_createtable(co, 0, 3);
+        C.lua_createtable(co, 0, 4);
         C.lua_pushcfunction(co, envIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
         C.lua_pushcfunction(co, envNewIndex);
         C.lua_setfield(co, -2, to_luastring("__newindex"));
+        C.lua_pushcfunction(co, envPairs);
+        C.lua_setfield(co, -2, to_luastring("__pairs"));
         // Not readable from Lua, so a cell cannot lift our functions out of it.
         C.lua_pushliteral(co, "lua");
         C.lua_setfield(co, -2, to_luastring("__metatable"));
@@ -240,6 +255,30 @@
      * whole DOM - is behind the `unsafe` pragma; see ../lua/README.md.
      */
     function seed(co) {
+        pushSafe(co);
+
+        // Copied in rather than reached through, because the cell's environment is what the
+        // chunk's own globals rawget against - and a rawset there is how `print = 1` stays the
+        // cell's business instead of going out to everyone. `js` is not in the shared table for
+        // the same reason the other way round: it must reach one cell and no other.
+        drain(co);
+    }
+
+    /**
+     * The standard library, as one table every cell is seeded from *and* every `_G` lookup falls
+     * back to. One table, because those two have to agree: `_G.print` being nil where `print` is
+     * a function made `_G` look like an empty table, which is what it literally is - the values
+     * live in the cell's own environment, and a lookup through the metatable never saw them.
+     *
+     * Built once and kept in the registry. Everything in it is shared between cells on purpose:
+     * `math` is `math` everywhere, and a cell that rewrites its own `print` has rewritten the
+     * copy in its environment rather than this.
+     */
+    function pushSafe(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
         var safe = [
             "assert",
             "error",
@@ -259,6 +298,8 @@
             "coroutine",
             "utf8"
         ];
+
+        C.lua_createtable(co, 0, 24);
 
         C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
         safe.forEach(function (name) {
@@ -283,8 +324,19 @@
         C.lua_pushcfunction(co, luaWarn);
         C.lua_setfield(co, -2, to_luastring("warn"));
 
+        // `action(f)` hands `f` straight back and remembers it: the one way a cell says out loud
+        // that a body is meant to change the graph rather than work out a value. See
+        // ./actions.js, which is also where the rest of that rule lives.
+        if (lua.actions) {
+            lua.actions.pushBuiltin(co);
+            C.lua_setfield(co, -2, to_luastring("action"));
+        }
+
         pushDesmos(co);
         C.lua_setfield(co, -2, to_luastring("Desmos"));
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
     }
 
     /** The one `Desmos`, made on first use and kept in the registry. See init(). */
@@ -311,6 +363,57 @@
 
         C.lua_pushvalue(co, -1);
         C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
+    }
+
+    /**
+     * __pairs, for both a cell's environment and _G.
+     *
+     * Without it `for k, v in pairs(_G)` finds nothing, because `_G` holds nothing: the values
+     * are behind __index, and a rawget-based traversal never reaches a metamethod. So a snapshot
+     * is built and Lua's own `next` walks that instead.
+     *
+     * In the order a lookup would find them, so the snapshot says the same thing indexing does:
+     * the standard library, then the shared globals every cell writes to, then whatever this
+     * table holds itself - the seeded copies, and `js` for a cell that asked for it.
+     *
+     * **The graph is not in it.** `_G.a` answers for a name the sheet defines, and this does not
+     * enumerate one: there is no list of them that is a list of *globals*, and asking for each
+     * value is a read that can park the cell half way through a loop. The names are still there
+     * to be asked for; what is not offered is discovering them this way.
+     */
+    function envPairs(co) {
+        C.lua_createtable(co, 0, 32);
+
+        pushSafe(co);
+        drain(co);
+
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
+        drain(co);
+
+        C.lua_pushvalue(co, 1);
+        drain(co);
+
+        // `next` over a plain table, which is what pairs would have returned had this one held
+        // anything. Taken from the real globals rather than written here: it is the same
+        // function the cell's own `next` is.
+        C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
+        C.lua_getfield(co, -1, to_luastring("next"));
+        C.lua_remove(co, -2);
+        C.lua_insert(co, -2);
+        C.lua_pushnil(co);
+        return 3;
+    }
+
+    /** Copy every pair of the table on top into the one below it, and pop the source. */
+    function drain(co) {
+        C.lua_pushnil(co);
+        while (C.lua_next(co, -2)) {
+            // dest, src, key, value -> dest, src, key, key, value
+            C.lua_pushvalue(co, -2);
+            C.lua_insert(co, -2);
+            C.lua_rawset(co, -5);
+        }
+        C.lua_pop(co, 1);
     }
 
     /** `js`, for a cell whose sentinel line says `unsafe`. Only ever called from pushEnv. */
@@ -371,6 +474,19 @@
                     helper(latex);
                 }
             }
+            return 1;
+        }
+        C.lua_pop(co, 2);
+
+        // The standard library. A cell's own environment holds a copy of this, so the chunk's
+        // own `print` is a rawget and never arrives here - this is the path `_G.print` takes,
+        // and it has to answer with the same function or `_G` is an empty table pretending to
+        // be the globals. Before the graph, so a sheet that defines `t_{ype}` does not take
+        // `type` away from `_G` when it never took it from the cell.
+        pushSafe(co);
+        C.lua_getfield(co, -1, to_luastring(name));
+        if (!C.lua_isnil(co, -1)) {
+            C.lua_remove(co, -2);
             return 1;
         }
         C.lua_pop(co, 2);
@@ -1137,8 +1253,10 @@
      *
      * Three outcomes, and which one it is depends on who owns the name:
      *
-     *   - a **function** is an action. It is exported under this name, and running it is Desmos'
-     *     to ask for - a button, a ticker, or another cell calling it.
+     *   - a **function** is written down as a Desmos function, or as an action if the source
+     *     said so - `action(...)`, or a body that hands one back. ./actions.js has the rule and
+     *     refuses the third case, a function that assigns. Either way it is exported under this
+     *     name, and running an action is Desmos' to ask for: a button, a ticker, another cell.
      *   - a name a graph **item** defines is Desmos'. The value is handed over as an update, the
      *     way an action would, so `a = 5` moves the `a=2` that is already there instead of
      *     colliding with it.
@@ -1370,8 +1488,9 @@
         if (t === C.LUA_TFUNCTION)
             return {
                 error:
-                    "a function is an action, not a value. Assign it to a name of its own - " +
-                    "`function X(n) ... end` - and use that name where the action goes"
+                    "a function is not a value. Assign it to a name of its own - " +
+                    "`function X(n) ... end`, or `X = action(function() ... end)` for an " +
+                    "action - and use that name where it goes"
             };
         if (t === C.LUA_TSTRING)
             return {

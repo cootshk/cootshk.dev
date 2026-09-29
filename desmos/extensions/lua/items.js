@@ -278,6 +278,36 @@
         PROPS[name] = { kind: "group", group: name };
     });
 
+    // Which kind of item each of them belongs to. Kept apart from the table above so that one
+    // stays about behaviour; this is only ever read by the editor's completion list, where it
+    // is most of what makes forty-odd names navigable - `image_url` is worth knowing not to
+    // look for while an expression is what is being typed at.
+    belong("any item", "id type folderId index defines secret hidden");
+    belong(
+        "an expression, or a table's column",
+        "latex color colorLatex points pointOpacity pointSize pointStyle dragMode " +
+            "lines lineOpacity lineWidth lineStyle fill fillOpacity"
+    );
+    belong(
+        "an expression",
+        "label showLabel labelSize labelOrientation labelAngle suppressTextOutline " +
+            "interactiveLabel editableLabelMode displayEvaluationAsFraction " +
+            "residualVariable isLogModeRegression " +
+            Object.keys(GROUPS).join(" ")
+    );
+    belong("a note", "text");
+    belong("a folder", "title collapsed");
+    belong(
+        "an image",
+        "image_url name width height center angle opacity foreground draggable"
+    );
+
+    function belong(what, names) {
+        names.split(" ").forEach(function (name) {
+            if (PROPS[name]) PROPS[name].on = what;
+        });
+    }
+
     /**
      * The graph's own settings, which is the other thing DesModder's text mode hangs `@{ }`
      * off. Read off `controller.graphSettings` and written with `Calc.updateSettings`, which
@@ -394,7 +424,10 @@
         },
 
         /** The graph has changed: re-read what cells are watching, and tell them what moved. */
-        changed: changed
+        changed: changed,
+
+        /** What comes after a dot, for the editor's completion list. */
+        suggest: suggest
     };
 
     // -----------------------------------------------------------------------
@@ -722,6 +755,11 @@
         });
         lua.bridge.pushValue(co, value);
         return 1;
+    }
+
+    /** The properties of a nested object, whether it hangs off an item or off the settings. */
+    function grouped(name) {
+        return GROUPS[name] ? GROUPS[name].props : shape(name);
     }
 
     /** Which properties `which` has, and where its values live. */
@@ -1167,12 +1205,18 @@
      * Whether this write is allowed to happen at all.
      *
      * An action is something Desmos runs on the graph, and a property of an item is not part of
-     * one - so a body that sets one has no action to be. It is caught here, during the probe,
-     * which is before anything is painted.
+     * one - so a body that sets one has nothing an action could carry, and a function being
+     * written down as latex has nowhere to put it either. It is caught here, during the probe,
+     * which is before anything is painted: defining a body must not change the graph.
      */
     function sealed(co, name) {
         if (!lua.actions || !lua.actions.recording()) return null;
-        return fail(co, `Cannot set "${name}" while in an action.`);
+        return fail(
+            co,
+            `Cannot set "${name}" from a body being exported - a property is not part of an ` +
+                "action, and not something a function can be written down as. Set it from the " +
+                "cell body instead."
+        );
     }
 
     function why(error) {
@@ -1419,6 +1463,84 @@
             if (least >= cap) return cap;
         }
         return row[b.length];
+    }
+
+    // -----------------------------------------------------------------------
+    // the editor's completion list
+    // -----------------------------------------------------------------------
+
+    /**
+     * What can follow the dot at the end of `before`, or null for "nothing special here".
+     *
+     * Literal paths only - `Desmos.settings.`, `Desmos.items.P.`, and any nested object by its
+     * own name, so `n.slider.` works for a handle kept in a local even though `n.` cannot.
+     * Nothing here is a type checker, and pretending otherwise would offer a list that is
+     * wrong as often as it is right.
+     *
+     * What it does know it knows from the property tables themselves, so the list cannot drift
+     * from what a write will actually take - including the enums, which are read live.
+     */
+    function suggest(before) {
+        var text = String(before == null ? "" : before);
+        if (!/\.$/.test(text)) return null;
+
+        // An item is looked up by the name it defines, so this is the one place the graph's own
+        // names are the whole answer.
+        if (/Desmos\.items\.$/.test(text))
+            return lua.bridge.names().map(function (name) {
+                return { name: name, detail: "on the graph", kind: "name" };
+            });
+
+        if (/Desmos\.settings\.viewport\.$/.test(text)) return listed(VIEWPORT);
+        if (/Desmos\.settings\.$/.test(text)) return listed(SETTINGS);
+        if (/Desmos\.ticker\.$/.test(text)) return listed(TICKER);
+
+        // A nested object by its name: `Desmos.items.R.cdf.`, or `s.` where `s` was put in a
+        // local. Before the item check, so `Desmos.items.P.slider.` is the slider's.
+        var nested = /([A-Za-z_][A-Za-z0-9_]*)\.$/.exec(text);
+        if (nested && GROUPS[nested[1]]) return listed(GROUPS[nested[1]].props);
+
+        // An item, however it was reached.
+        if (
+            /Desmos\.items\s*(?:\.[A-Za-z][A-Za-z0-9_]*|\[[^\]]*\])\s*\.$/.test(
+                text
+            )
+        )
+            return listed(PROPS);
+
+        return null;
+    }
+
+    function listed(props) {
+        return Object.keys(props).map(function (name) {
+            var spec = props[name];
+            return {
+                name: name,
+                detail: takes(spec),
+                documentation: spec.on || null,
+                kind: "property"
+            };
+        });
+    }
+
+    /** What a property will take, in words, out of the same spec the write is checked against. */
+    function takes(spec) {
+        if (!spec.kind) return "read-only";
+        if (spec.kind === "flag") return "true or false";
+        if (spec.kind === "text") return "a string";
+        if (spec.kind === "color")
+            return 'a colour: "#aabbcc", or one of Desmos\' own by name';
+        if (spec.kind === "number") return "a number, or latex as a string";
+        if (spec.kind === "count") return "a number";
+        if (spec.kind === "numbers")
+            return "a list of " + spec.length + " numbers";
+        if (spec.kind === "group")
+            return "a group: " + Object.keys(grouped(spec.group)).join(", ");
+        return (
+            "one of " +
+            allowed(spec).join(", ") +
+            (spec.numbers ? ", or a number" : "")
+        );
     }
 
     // -----------------------------------------------------------------------

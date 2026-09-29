@@ -1,4 +1,22 @@
-// Actions, both ways: a Lua function is one, and a Desmos one is callable from Lua.
+// Actions, both ways: a Lua body is one, and a Desmos one is callable from Lua.
+//
+// Which Lua bodies are actions is written in the source rather than worked out from what a body
+// happens to do. There are exactly two ways to say it, and a third thing that is not one:
+//
+//     function A(n) return n + 2 end              -- a function: it computes, and nothing else
+//     function B(n) return function() a=n end end -- an action function: B(3) is an action
+//     C = action(function() b = 2 end)            -- an action: `C` is one, with no brackets
+//     function D(n) a = n end                     -- an error, said where the assignment is
+//
+// The last line is the point of the first three. A body that assigned a graph name used to
+// become an action by doing so, which meant there was no telling a helper that assigned once by
+// accident from an action somebody meant - and no way to write a function down as latex without
+// first checking it had not moved anything. Now a function may not assign at all, so what a body
+// is can be read off the page.
+//
+// Neither kind of action is ever handed an argument. An action *function*'s arguments belong to
+// the function, and the body that runs is the one it hands back - `B(3)` closes over `3` and
+// takes nothing itself.
 //
 // A Desmos action is simultaneous. `A = a\to a+1, b\to a` moves `a` and leaves `b` at the *old*
 // `a`, because every right-hand side is evaluated against the state before anything moved. That
@@ -51,6 +69,12 @@
     /** marker -> the Lua function it stands for, so a fire can find a body to run. */
     var BODIES = "cde.lua.bodies";
 
+    /**
+     * The functions `action(...)` has been called on, weakly keyed. What makes a body an action
+     * body rather than a function body - see exportFunction for the whole of that rule.
+     */
+    var MARKS = "cde.lua.marked";
+
     /** Marker variables are `L_{uaN}`; N counts up and is never reused within a page. */
     var counter = 0;
 
@@ -58,8 +82,13 @@
     var live = new Map();
 
     /**
-     * The recording in progress, or null: `{ updates: Map, probe }`, where `updates` maps a
-     * Desmos name to the latex it is to become.
+     * The recording in progress, or null: `{ updates: Map, probe, mode }`, where `updates` maps
+     * a Desmos name to the latex it is to become.
+     *
+     * `mode` is which kind of body is running. `"action"` collects an assignment; `"function"`
+     * refuses one, because a function computes a value and changes nothing. A body that hands
+     * back a function flips to `"action"` for the one it handed back - that is what returning a
+     * function *means* - and `action(...)` says the same thing outright.
      */
     var recorder = null;
 
@@ -89,6 +118,9 @@
         probing: function () {
             return !!(recorder && recorder.probe);
         },
+
+        /** the `action(...)` global. bridge.js seeds it into every cell's environment. */
+        pushBuiltin: pushBuiltin,
 
         /** the two Lua value kinds this file adds */
         pushLatex: pushLatex,
@@ -403,6 +435,63 @@
     }
 
     // -----------------------------------------------------------------------
+    // action(f)
+    // -----------------------------------------------------------------------
+
+    /**
+     * `C = action(function() b = 2 end)`, the one way to say "this body changes the graph".
+     *
+     * To Lua it is `function(inner) return inner end` - the same function comes back, and calling
+     * `C()` in a cell body still runs it. What it leaves behind is a note on the side, and that
+     * note is the whole of the rule this file now turns on: a plain Lua function *computes* and
+     * changes nothing, and an action is something you have to ask for. See exportFunction.
+     *
+     * The note is weak in its keys, so a body the cell has since rewritten is not kept alive by
+     * having once been marked.
+     */
+    function pushBuiltin(co) {
+        C.lua_pushcfunction(co, luaAction);
+    }
+
+    function luaAction(co) {
+        lauxlib.luaL_checktype(co, 1, C.LUA_TFUNCTION);
+        C.lua_settop(co, 1);
+        marks(co);
+        C.lua_pushvalue(co, 1);
+        C.lua_pushboolean(co, true);
+        C.lua_rawset(co, -3);
+        C.lua_pop(co, 1);
+        return 1;
+    }
+
+    /** The weak table of marked functions, made on first use. Leaves it on the stack. */
+    function marks(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(MARKS));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 8);
+        C.lua_createtable(co, 0, 1);
+        C.lua_pushliteral(co, "k");
+        C.lua_setfield(co, -2, to_luastring("__mode"));
+        C.lua_setmetatable(co, -2);
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(MARKS));
+    }
+
+    /** Has `action(...)` been called on the function at `idx`? */
+    function isMarked(co, idx) {
+        var at = C.lua_absindex(co, idx);
+        marks(co);
+        C.lua_pushvalue(co, at);
+        C.lua_rawget(co, -2);
+        var yes = C.lua_toboolean(co, -1);
+        C.lua_pop(co, 2);
+        return !!yes;
+    }
+
+    // -----------------------------------------------------------------------
     // recording a body
     // -----------------------------------------------------------------------
 
@@ -413,6 +502,22 @@
      */
     function write(co, latex, idx) {
         if (!recorder) return false;
+
+        // The rule the rest of this file turns on. A plain Lua function works out a value; if it
+        // also moved the graph there would be no way to write it down as a Desmos function, and
+        // no way to tell from the outside which of the two it was meant to be. So say so, rather
+        // than guess from what the body happened to do - `action(...)` and returning a function
+        // are the two ways to ask for the other thing, and both are visible in the source.
+        if (recorder.mode === "function") {
+            recorder.illegal = latex;
+            return fail(
+                co,
+                'cannot assign "' +
+                    latex +
+                    '" from a function. A function works out a value and changes nothing - to ' +
+                    "change the graph, wrap the body in action(...) or return a function from it"
+            );
+        }
 
         if (C.lua_isnil(co, idx)) {
             // A probe runs the body with no arguments, so half its assignments are nil. That is
@@ -435,40 +540,60 @@
     /**
      * One update, with the rule that makes an action an action.
      *
-     * The rule is not enforced during a probe. A probe is asking *what this function is*, not
-     * whether it is correct - and the answer it needs, "it updates something", is already known
-     * by the time the second update to the same name arrives. Erroring here would drop the
-     * function from the graph entirely and say nothing about why; the fire is where a duplicate
-     * matters and where there is somewhere to report it.
+     * A fire stops on a duplicate where it happens, so nothing is applied. A probe cannot, quite:
+     * it may have guessed its way past a comparison, and the two updates it saw may be the two
+     * arms of an `if` only one of which would ever run. So it carries the name back instead, and
+     * exportFunction reports it when the probe was not guessing - which is where a duplicate a
+     * cell can see in its own source gets said before anything has to fire to find out.
      */
     function record(co, name, latex) {
         if (!recorder) return false;
-        if (recorder.updates.has(name) && recorder.probe) return true;
-        if (recorder.updates.has(name))
-            return fail(
-                co,
-                'this action updates "' +
-                    name +
-                    '" more than once. A Desmos action assigns each variable at most once, ' +
-                    "because every update happens at the same moment"
-            );
+        if (recorder.updates.has(name)) {
+            // A probe carries the news back rather than stopping on it. It may have guessed its
+            // way past a comparison (see latexCompare) and run two arms of the same choice, so
+            // the second update is only certainly wrong when nothing was guessed - which is
+            // what exportFunction checks before reporting it.
+            if (recorder.probe) {
+                recorder.duplicate = recorder.duplicate || name;
+                return true;
+            }
+            return duplicated(co, name);
+        }
         recorder.updates.set(name, latex);
         return true;
     }
 
+    /** The one-target-once rule, said the same way wherever it is broken. */
+    function duplicated(co, name) {
+        return fail(
+            co,
+            'this action updates "' +
+                name +
+                '" more than once. A Desmos action assigns each variable at most once, ' +
+                "because every update happens at the same moment"
+        );
+    }
+
     /**
-     * Run the Lua function at `idx` as an action body and return what it recorded.
+     * Run the Lua function at `idx` as a body and return what it recorded.
      *
      * `args` are pushed as its parameters. A plain lua_pcall rather than a resume: a body must
      * not park, and bridge.js reads lua_isyieldable to know that - inside a pcall it is false, so
      * a read that has no value yet takes latex instead of suspending the fire.
+     *
+     * `opts` is `{ probe, symbolic, mode, direct }`. `mode` seeds the recorder - see above - and
+     * `direct` says this function *is* the action rather than something that might hand one
+     * back, which is what `action(...)` produces: its return value is nobody's, so it is dropped
+     * where an unmarked body's would have been run.
      */
-    function record_body(co, idx, args, probe, symbolic) {
+    function record_body(co, idx, args, opts) {
+        opts = opts || {};
         var outer = recorder;
         recorder = {
             updates: new Map(),
-            probe: !!probe,
-            symbolic: !!symbolic
+            probe: !!opts.probe,
+            symbolic: !!opts.symbolic,
+            mode: opts.mode === "function" ? "function" : "action"
         };
 
         C.lua_pushvalue(co, idx);
@@ -478,8 +603,12 @@
 
         var status = C.lua_pcall(co, (args || []).length, 1, 0);
         if (status !== C.LUA_OK) {
+            // Which kind of failure it was outlives the recording: an assignment from a function
+            // body is the cell's mistake and is worth reporting, and everything else a probe can
+            // trip over is silence. See exportFunction.
+            var illegal = recorder.illegal || null;
             recorder = outer;
-            return { error: why(co) };
+            return { error: why(co), illegal: illegal };
         }
 
         // What it handed back decides what it *is* - see exportFunction. A function means an
@@ -490,14 +619,19 @@
             updates: null,
             gave: gave,
             latex: null,
-            blind: !!recorder.blind
+            blind: !!recorder.blind,
+            duplicate: null,
+            illegal: null
         };
 
-        if (gave === C.LUA_TFUNCTION) {
+        if (gave === C.LUA_TFUNCTION && !opts.direct) {
+            // Handing back a function is how a function body asks for an action, so the one it
+            // handed back is an action body whatever this one was.
+            recorder.mode = "action";
             var inner = C.lua_pcall(co, 0, 0, 0);
             if (inner !== C.LUA_OK) {
                 var bad = why(co);
-                if (!probe) {
+                if (!opts.probe) {
                     recorder = outer;
                     return { error: bad };
                 }
@@ -505,7 +639,11 @@
                 // back - and it ran the inner only to find out what that one reads.
             }
         } else {
-            if (gave !== C.LUA_TFUNCTION && gave !== C.LUA_TNIL) {
+            if (
+                !opts.direct &&
+                gave !== C.LUA_TFUNCTION &&
+                gave !== C.LUA_TNIL
+            ) {
                 var value = lua.bridge.toDesmos(co, C.lua_gettop(co));
                 result.latex = value.error ? null : value.latex;
             }
@@ -514,6 +652,8 @@
 
         result.updates = recorder.updates;
         result.blind = !!recorder.blind;
+        result.duplicate = recorder.duplicate || null;
+        result.illegal = recorder.illegal || null;
         recorder = outer;
         return result;
     }
@@ -558,29 +698,41 @@
     // -----------------------------------------------------------------------
 
     /**
-     * A global write whose value is a function. Which of the two things it becomes is decided by
-     * running it once, here, and looking at what comes back:
+     * A global write whose value is a function. Which of the three things it becomes is written
+     * in the source rather than guessed at:
      *
      *     function A(n) return n + 2 end                 ->  A\left(L_{p0}\right)=L_{p0}+2
      *     function a() return 1 end                      ->  a\left(\right)=1, called as a()
-     *     function A(n) return function() ... end end    ->  an action
-     *     function X(n) a = n end                        ->  an action
+     *     function B(n) return function() ... end end    ->  B\left(L_{p0}\right)=(...), an
+     *                                                        action function
+     *     C = action(function() ... end)                 ->  C=(...), an action
+     *     function D(n) a = n end                        ->  an error
      *
-     * **A function that only computes is a Desmos function.** It is run with its parameters
-     * standing in as latex fragments, so `n + 2` composes `L_{p0}+2` and the export is a real
-     * Desmos function - `A(3)` is 5, it can be plotted, and Desmos can differentiate it. Nothing
-     * about it is Lua once it has been written down.
+     * **A function computes.** It is run with its parameters standing in as latex fragments, so
+     * `n + 2` composes `L_{p0}+2` and the export is a real Desmos function - `A(3)` is 5, it can
+     * be plotted, and Desmos can differentiate it. Nothing about it is Lua once it has been
+     * written down. Because that is all a function does, assigning a graph name from inside one
+     * is refused where it happens; see write().
      *
-     * **A function that hands back a function, or that updates anything, is an action.** The
-     * first is how you ask for one outright; the second is what an assignment to a Desmos name
-     * already means. Neither can be written down as latex, so those get the marker below.
+     * **An action is asked for.** Two spellings, and the difference between them is what Desmos
+     * ends up holding. `action(f)` is an action *value*, so `C` on a button or a ticker runs it.
+     * A function that hands back a function is an action *function*, so `B(3)` is an action and
+     * `B` on its own is not - which is what you want when the action needs an argument.
+     *
+     * Either way the body that runs is the one with no parameters: the marker carries `B`'s
+     * arguments in, and the action itself is handed none. Neither can be written down as latex,
+     * so both get the marker below.
      *
      * A body that cannot be run this way at all - one that compares a fragment, say, or a
-     * recursive helper that branches on its argument - is neither, and is left as what it always
-     * was: a Lua global the cell next door can call. That silence is the same one a string gets.
+     * recursive helper that branches on its argument - is none of the three, and is left as what
+     * it always was: a Lua global the cell next door can call. That silence is the same one a
+     * string gets, and it is only ever silence about what the body *computes*; a body that tried
+     * to assign is never silent.
      */
     function exportFunction(co, cell, name, idx) {
         if (!cell) return false;
+
+        if (isMarked(co, idx)) return asMarkedAction(co, cell, name, idx);
 
         var params = arity(co, idx);
 
@@ -588,23 +740,37 @@
         if (cell.probeReads) cell.probeReads.clear();
         var probe = probeBody(co, idx, params);
 
-        if (probe.error || (probe.gave === C.LUA_TNIL && !probe.updates.size)) {
+        // The one thing a probe learns that is worth stopping the cell for. write() has already
+        // said which name and why, and where; this is only how the message gets back out of the
+        // pcall that caught it.
+        if (probe.illegal) {
+            forget_export(cell, name);
+            return raise(co, probe.error);
+        }
+
+        if (probe.error || probe.gave === C.LUA_TNIL) {
             // Nothing to say about it. Drop any action it used to be, so a body that stops
-            // updating stops being an action too.
-            release(cell, name);
-            cell.exports.delete(key(name));
+            // being one stops being an action too.
+            forget_export(cell, name);
             return false;
         }
 
-        if (probe.gave === C.LUA_TFUNCTION || probe.updates.size)
-            return asAction(co, cell, name, params, idx);
+        // Only a body that handed back a function can have recorded anything: a function body
+        // that assigned never got this far.
+        if (probe.gave === C.LUA_TFUNCTION) {
+            if (probe.duplicate && !probe.blind) {
+                forget_export(cell, name);
+                return duplicated(co, probe.duplicate);
+            }
+            return asAction(co, cell, name, params, idx, false);
+        }
 
-        // A probe that guessed its way past a comparison found out whether the body updates
-        // anything - which is all the line above needed - but not what it computes. Writing
-        // down the branch it happened to take would be writing down a different function.
+        // What is left is a function, and a function has to be written down. A probe that
+        // guessed its way past a comparison knows what the body *is* - which is all the line
+        // above needed - but not what it computes: writing down the branch it happened to take
+        // would be writing down a different function.
         if (probe.blind || probe.latex === null) {
-            release(cell, name);
-            cell.exports.delete(key(name));
+            forget_export(cell, name);
             return false;
         }
 
@@ -662,18 +828,67 @@
         var args = [];
         for (var i = 0; i < params; i++) args.push({ latex: "L_{p" + i + "}" });
 
-        var symbolic = record_body(co, idx, args, true, true);
+        var symbolic = record_body(co, idx, args, {
+            probe: true,
+            symbolic: true,
+            mode: "function"
+        });
+        // An assignment from a function body is the same mistake whichever pass finds it, and
+        // running it again would only find it twice.
+        if (symbolic.illegal) return symbolic;
         if (symbolic.error || symbolic.blind)
-            return record_body(co, idx, args, true, false);
+            return record_body(co, idx, args, {
+                probe: true,
+                mode: "function"
+            });
 
         // An action fires against numbers, so warm it against numbers. A composed read - `f(a)`,
         // or anything Desmos.get is handed - has no helper until something asks for it with `a`'s
         // value already in place, and the symbolic pass never does: there `a` stands for itself.
         // Without this the first fire would have nothing to read and would write the formula.
         if (symbolic.gave === C.LUA_TFUNCTION || symbolic.updates.size)
-            record_body(co, idx, args, true, false);
+            record_body(co, idx, args, { probe: true, mode: "function" });
 
         return symbolic;
+    }
+
+    /**
+     * `C = action(function() ... end)`: an action *value*, not a function of anything.
+     *
+     * Written down without brackets - `C=\left(L_{ua3}\to L_{ua3}+1\right)` - because a bare
+     * `C` is what a button, a ticker or another action means by it. The bracketed form is the
+     * other door, a function that hands an action back, and is `B\left(L_{p0}\right)=...`.
+     *
+     * One pass, and it is only there to warm: an action fires against numbers, so the reads that
+     * have no helper yet get one made here rather than coming back as latex on the first fire.
+     * There is no symbolic pass because there is nothing to write down - the export is a marker
+     * either way - and no second chance needed if the body errors: it was declared an action, so
+     * it stays one, and a fire that fails says so through broke().
+     */
+    function asMarkedAction(co, cell, name, idx) {
+        if (cell.probeReads) cell.probeReads.clear();
+
+        var probe = record_body(co, idx, [], { probe: true, direct: true });
+
+        // A body the probe got all the way through, without guessing at a branch, that assigned
+        // the same name twice really does assign it twice. That is worth saying now rather than
+        // on the first click.
+        if (probe.duplicate && !probe.error && !probe.blind) {
+            forget_export(cell, name);
+            return duplicated(co, probe.duplicate);
+        }
+
+        return asAction(co, cell, name, 0, idx, true);
+    }
+
+    /**
+     * This name exports nothing after all. Said in one place because the half of it that is easy
+     * to forget is release(): a cell that stops exporting an action must stop being fired by the
+     * markers it used to have.
+     */
+    function forget_export(cell, name) {
+        release(cell, name);
+        cell.exports.delete(key(name));
     }
 
     /**
@@ -706,8 +921,8 @@
      * The slot is keyed by cell and name rather than allocated per run, so re-running a cell
      * exports the same latex and Desmos sees nothing change.
      */
-    function asAction(co, cell, name, params, idx) {
-        var slot = slotFor(cell, name, params);
+    function asAction(co, cell, name, params, idx, bare) {
+        var slot = slotFor(cell, name, params, bare);
         hold(co, slot, idx);
 
         var updates = slot.markers.map(function (marker, i) {
@@ -718,7 +933,7 @@
 
         cell.exports.set(key(name), {
             latex:
-                signature(name, params) +
+                (bare ? name : signature(name, params)) +
                 "=\\left(" +
                 updates.join(",") +
                 "\\right)",
@@ -745,17 +960,25 @@
     }
 
     /** The markers and parameter names for one cell's action, made once and kept. */
-    function slotFor(cell, name, params) {
+    function slotFor(cell, name, params, bare) {
         if (!cell.actions) cell.actions = new Map();
 
         var slot = cell.actions.get(name);
-        if (slot && slot.params.length === params) return slot;
+        if (slot && slot.params.length === params && !!slot.bare === !!bare)
+            return slot;
 
-        // A body whose parameter count changed needs new markers, and the old ones must stop
-        // being recognised - a fire matching a marker no action mentions would run nothing.
+        // A body whose parameter count changed needs new markers, and so does one that changed
+        // which kind of action it is; the old ones must stop being recognised, because a fire
+        // matching a marker no action mentions would run nothing.
         if (slot) release(cell, name);
 
-        slot = { markers: [], params: [], cell: cell, name: name };
+        slot = {
+            markers: [],
+            params: [],
+            cell: cell,
+            name: name,
+            bare: !!bare
+        };
         var n = params || 1;
         for (var i = 0; i < n; i++) slot.markers.push(marker());
         for (var j = 0; j < params; j++) slot.params.push("L_{p" + j + "}");
@@ -796,7 +1019,9 @@
         if (!slot) return;
         cell.actions.delete(name);
         slot.markers.forEach(function (marker) {
-            live.delete(marker);
+            // norm(), because that is the spelling hold() filed it under - a fire matches on
+            // Desmos' `L_ua3` rather than on our `L_{ua3}`.
+            live.delete(norm(marker));
             drop(marker);
         });
     }
@@ -869,7 +1094,15 @@
             return;
         }
 
-        var result = record_body(co, C.lua_gettop(co), args, false);
+        // An action is handed nothing. `slot.params` is how an action *function*'s arguments
+        // ride in on the markers, and where there are none the marker's own counting value is
+        // bookkeeping rather than an argument - so it is not passed on as one.
+        var result = record_body(
+            co,
+            C.lua_gettop(co),
+            slot.params.length ? args : [],
+            { direct: slot.bare }
+        );
         C.lua_pop(co, 2);
 
         if (result.error) return broke(slot, result.error);
@@ -1133,5 +1366,15 @@
 
     function fail(co, message) {
         return lauxlib.luaL_error(co, to_luastring(message));
+    }
+
+    /**
+     * Raise a message that already carries its own position - one a pcall caught inside a body
+     * and that is being passed on. luaL_error would prepend a second `lua:N:`, naming the line
+     * that *defined* the function over the line that broke the rule.
+     */
+    function raise(co, message) {
+        C.lua_pushstring(co, to_luastring(String(message)));
+        return C.lua_error(co);
     }
 })();

@@ -901,7 +901,24 @@
             ]
         ];
 
+        /**
+         * The globals that are not `Desmos`'. Kept apart from BUILTIN because that list is also
+         * what a `Desmos.` is answered with, and these do not go behind one.
+         */
+        var GLOBAL = [
+            [
+                "action",
+                "A = action(function() b = 1 end)",
+                "Mark a body as one that changes the graph. Without it a function " +
+                    "computes a value and nothing else."
+            ]
+        ];
+
         api.languages.registerCompletionItemProvider("lua", {
+            // Monaco asks on its own after a letter; a dot has to be asked for, and every one
+            // of the lists below is behind one.
+            triggerCharacters: ["."],
+
             provideCompletionItems: function (model, position) {
                 var word = model.getWordUntilPosition(position);
                 var range = {
@@ -911,7 +928,19 @@
                     endColumn: word.endColumn
                 };
 
-                var items = BUILTIN.map(function (entry) {
+                // What has been typed up to the word being completed, which is what says
+                // whether this is a member of something rather than a name of its own.
+                var before = model.getValueInRange({
+                    startLineNumber: position.lineNumber,
+                    startColumn: 1,
+                    endLineNumber: position.lineNumber,
+                    endColumn: word.startColumn
+                });
+
+                var member = members(before, range);
+                if (member) return { suggestions: member };
+
+                var items = BUILTIN.concat(GLOBAL).map(function (entry) {
                     return {
                         label: entry[0],
                         kind: api.languages.CompletionItemKind.Function,
@@ -948,5 +977,49 @@
                 return { suggestions: items };
             }
         });
+
+        /**
+         * The list for a member access, or null when this is an ordinary name.
+         *
+         * Three of them, and the first is a bug as much as a feature: the flat list offers
+         * `Desmos.get`, so accepting it after `Desmos.` used to leave `Desmos.Desmos.get` in
+         * the box. A dot is now answered with the bare names that can follow it.
+         */
+        function members(before, range) {
+            if (/(^|[^.\w])Desmos\.$/.test(before))
+                return BUILTIN.map(function (entry) {
+                    return {
+                        label: entry[0].slice("Desmos.".length),
+                        kind: api.languages.CompletionItemKind.Property,
+                        detail: entry[1],
+                        documentation: entry[2],
+                        insertText: entry[0].slice("Desmos.".length),
+                        range: range
+                    };
+                });
+
+            // What an item, the settings or the ticker has - out of the very tables items.js
+            // checks a write against, so the list and the rules cannot disagree - and the
+            // graph's own names after `Desmos.items.`, which is how an item is looked up.
+            var offered =
+                lua.items && lua.items.suggest
+                    ? lua.items.suggest(before)
+                    : null;
+            if (!offered) return null;
+
+            return offered.map(function (one) {
+                return {
+                    label: one.name,
+                    kind:
+                        one.kind === "name"
+                            ? api.languages.CompletionItemKind.Variable
+                            : api.languages.CompletionItemKind.Property,
+                    detail: one.detail,
+                    documentation: one.documentation || undefined,
+                    insertText: one.name,
+                    range: range
+                };
+            });
+        }
     }
 })();

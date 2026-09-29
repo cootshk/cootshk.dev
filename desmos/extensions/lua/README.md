@@ -224,7 +224,7 @@ label = "hello"             -- a global, shared with every cell, on the graph no
 That silence is deliberate: a global write is how a cell shares anything at all, and erroring on
 the ones the graph has no use for would make sharing the exception rather than the rule.
 
-A **function** is not one of these. It is an action - see below.
+A **function** is not one of these. It is a Desmos function, or an action - see below.
 
 `Desmos.k = v` is the loud door. It asks for the graph outright rather than as a side effect of
 forgetting `local`, so it **errors** rather than skipping:
@@ -236,14 +236,28 @@ Desmos["1x"] = 1            -- error: not a name Desmos can parse
 
 ### Functions
 
-A global function reaches the graph, and **what it becomes depends on what it hands back**:
+A global function reaches the graph, and **what it becomes is written in the source** - there are
+two ways to say "this changes the graph", and neither of them is silent:
 
 ```lua
 function A(n) return n + 2 end              -- A\left(L_{p0}\right)=L_{p0}+2, a function
 function a() return 1 end                   -- a\left(\right)=1, called from the sheet as a()
-function A(n) return function() ... end end -- an action
-function X(n) a = n end                     -- an action: it updates something
+function B(n) return function() ... end end -- an action function: B(3) is an action
+C = action(function() ... end)              -- an action: C is one, with no brackets
+function D(n) a = n end                     -- an error: a function may not assign
 ```
+
+A function **computes**. If it also moved the graph there would be no telling a helper that
+assigned something once by accident from an action somebody meant, so assigning a Desmos name
+from inside a plain function is refused where it is written:
+
+```lua
+function D(n)
+    a = n   -- error: cannot assign "a" from a function
+end
+```
+
+The two ways out are the two lines above it, and both are visible on the page.
 
 The shape you write is the shape the graph gets. **A Lua function is a Desmos function and is
 called with brackets**, even when it takes none, and a Lua value is a variable:
@@ -286,10 +300,20 @@ to know, and a fragment has no truth value, so the body is run a second time wit
 asked for and written down _as it stands_. `with` cannot reach that one, and it is re-exported
 whenever a name it read moves.
 
-**A function that hands back a function is an action**, and so is one that updates a Desmos value.
-The first is how you ask for an action outright; the second is what assigning to a Desmos name
-already meant. Neither can be written down as latex, so those keep a marker and run their Lua when
-they fire.
+**`action(f)` is an action, and a function that hands back a function is an action function.**
+The difference between them is what ends up on the sheet: `action(f)` exports a bare `C`, which
+is what a button or a ticker means by an action, while `function B(n) return function() ... end
+end` exports `B\left(n\right)`, so `B(3)` is an action and `B` on its own is not. Use the second
+when the action needs an argument, and the first when it does not.
+
+`action` hands `f` straight back - as far as Lua is concerned it is `function(f) return f end` -
+so the body is still an ordinary function a cell can call. What it leaves behind is the note that
+says which of the two things this is.
+
+Neither kind can be written down as latex, so both keep a marker and run their Lua when they fire.
+And **neither is ever handed an argument**. `B`'s arguments belong to `B`; the body that runs is
+the one it handed back, which closes over them and takes none of its own. A body declared with
+parameters it will never be given sees `nil`.
 
 A body that can be neither - a recursive helper that branches on its own argument, say - is left
 as what it already was: a Lua global the cell next door can call, and nothing on the graph. That
@@ -306,9 +330,11 @@ f(n) = n + arctan(n)
 
 ```lua
 function X(n)
-    a = n                   -- updates the a above, so X is an action
-    b = f(a)                -- a is still 2 here
-    return 3                -- ignored: an action has no value
+    return function()       -- the returned function is the action
+        a = n               -- updates the a above
+        b = f(a)            -- a is still 2 here
+        return 3            -- ignored: an action has no value
+    end
 end
 ```
 
@@ -326,8 +352,10 @@ be written in either order.
 Two consequences follow from it:
 
 - **a variable can only be updated once.** Adding `Y()` to the body above is an error naming `a`,
-  because `Y` updates `a` too. The body stops there and the action applies _nothing_ - a
-  half-moved graph is not a state anything gets to observe.
+  because `Y` updates `a` too. Exporting the action runs the body once, so a duplicate the source
+  spells out is reported there, before anything can be clicked; one that only shows up during a
+  fire - because the action that ran this one moves the same name - stops the body where it
+  happened and applies _nothing_. A half-moved graph is not a state anything gets to observe.
 - **a value the graph has not produced yet cannot be branched on.** Rare, because the probe
   warms what a body reads before anything can fire, but it still holds for a value that depends
   on the action's own argument. See below.
@@ -336,8 +364,17 @@ An action a cell exports is reached from anywhere an action can be: a button, a 
 cell. It runs at full speed under a ticker, because the Lua runs _inside_ Desmos' own fire rather
 than a frame behind it.
 
-`local function` is how you say you meant none of this. A local is the cell's own, and nothing
-about it reaches the graph - neither as an action nor as a function.
+A **local** is the cell's own, and none of this applies to it. `local function` reaches the graph
+neither as an action nor as a function, and a local variable inside an action body may be assigned
+as often as you like - the one-update rule is about the graph's names, not Lua's:
+
+```lua
+E = action(function()
+    local t = 1
+    t = t + 1   -- fine: t is nobody's but this body's
+    a = t
+end)
+```
 
 ### What a body can see
 
@@ -358,7 +395,8 @@ Three things make that hold inside a fire, where the evaluator cannot be waited 
 
 What is left over is **a latex fragment**: a value the graph has not produced _and_ was not
 asked for in advance, which in practice means one that depends on the action's own argument.
-`function X(n) b = f(n) end` cannot know `f(n)` until `n` arrives, so the first fire assigns the
+`function X(n) return function() b = f(n) end end` cannot know `f(n)` until `n` arrives, so the
+first fire assigns the
 expression and warms it, and later fires with that same argument assign the number. Arithmetic
 on a fragment composes more latex, and assigning it hands Desmos something to evaluate during
 the same fire - which is exactly what `b\to f(4)` is, so the value is right either way.
@@ -381,18 +419,18 @@ because the probe below warms `n` and `m` before anyone can click.
 What a fragment cannot do at all is be compared:
 
 ```lua
-function X(n)
+X = action(function()
     if Desmos.get("\\notyet") > 1 then a = 1 end   -- error: it is not a number yet
-end
+end)
 ```
 
 The way out is to read it in the cell body, where a cell _can_ wait, and close over the number:
 
 ```lua
 local threshold = Desmos.get("\\notyet")
-function X(n)
+X = action(function()
     if threshold > 1 then a = 1 end
-end
+end)
 ```
 
 In practice this rarely comes up: a cell that exports an action has its body run once at export
@@ -599,13 +637,13 @@ real numbers are `slider.animationPeriod`, in milliseconds, and `slider.playDire
 ### An action cannot set one
 
 ```lua
-function Paint() Desmos.items.W.color = "blue" end   -- not an action
+Paint = action(function() Desmos.items.W.color = "blue" end)   -- not an action
 ```
 
 An action is something Desmos runs on the graph, and a property of an item is not part of one -
-so a body that sets one has no action to be, and it is not exported as one. It is caught while
-the body is being probed, which is before anything is painted: defining a function must not
-change the graph.
+so a body that sets one has nothing to update and is not exported. Asking for it with `action`
+does not change that: the marker would have nothing to carry. Nothing is painted on the way to
+finding that out, either - defining a function must not change the graph.
 
 It is still an ordinary Lua function, and calling `Paint()` from a cell body does set the
 colour. What cannot happen is a button on the sheet firing it.
@@ -733,6 +771,32 @@ can be run again once its error is fixed.
 
 `print` goes to `console.log` and `warn` to `console.warn`. There is no strip under the cell.
 
+### What autocomplete offers
+
+Unqualified, it is the graph's names, Desmos' own functions, `action` and the `Desmos` members -
+the same index a read goes through, so the list and what a name will actually do cannot disagree.
+
+After a dot it is that dot's members, and only those:
+
+| after                   | you get                                                    |
+| ----------------------- | ---------------------------------------------------------- |
+| `Desmos.`               | `get`, `define`, `sample`, `items`, `settings`, `ticker`   |
+| `Desmos.items.`         | the names the graph defines, which is how an item is found |
+| `Desmos.items.P.`       | everything an item has, with what each one takes           |
+| `...slider.`, `...cdf.` | that nested object's own, from anywhere it is reached      |
+| `Desmos.settings.`      | every setting, and `viewport`                              |
+| `Desmos.ticker.`        | its four                                                   |
+
+Each entry says what it takes - `true or false`, `one of POINT, OPEN, CROSS`, `read-only` - and
+which kind of item it belongs to, and both come out of the very tables `items.js` checks a write
+against. There is no second list to fall out of date: an enum gains a value the moment Desmos
+does, because the offer reads the same live `Desmos.Styles` the write does.
+
+It follows literal paths only. `Desmos.items.P.slider.` knows what it is; a handle kept in a
+local does not, unless the last thing before the dot is a nested object's name - `s.cdf.` works
+because `cdf` is only ever one thing. Nothing here is a type checker, and a list that guessed
+would be wrong about as often as it was right.
+
 An error raised as something other than a string still says something. `error({})`, `error(nil)`
 and a value with its own `__tostring` are all described rather than swallowed, and so is the one
 that matters most: a JS exception thrown out of this extension's own code, which fengari hands
@@ -743,8 +807,16 @@ line just typed to tie it to.
 
 ## What a cell can reach
 
+`_G` is the shared globals, not the page's: `_G.x = 1` is `x = 1`, and one cell's write is the
+next cell's read. It holds nothing of its own - every lookup goes through the metatable, which is
+what records a read as a dependency - so `pairs(_G)` walks a snapshot instead: the standard
+library, then the shared globals, then whatever the table itself holds. The graph is not in that
+snapshot. `_G.a` answers for a name the sheet defines, but enumerating one means reading it, and
+a read can park the cell half way through a loop.
+
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
-`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print`, `warn` and `Desmos` - plus
+`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print`, `warn`, `action` and
+`Desmos` - the same objects through `_G` as bare - plus
 Desmos' own functions, as a fallback for any name the graph does not define. `Desmos` and
 `_G.Desmos` are the same object.
 
@@ -844,8 +916,8 @@ swapped back.
 - A cell that both defines a name and exports an action updating it puts the name back to what the
   cell body says whenever the cell re-runs. The cell body is the definition; the action is a
   change to it - so firing the action is not one of the things that re-runs the cell, and
-  `function a() n = sin(n) end` next to `n = 1` steps `n` on every `a()` and returns it to 1
-  when the cell is run.
+  `a = action(function() n = sin(n) end)` next to `n = 1` steps `n` on every `a` and returns it
+  to 1 when the cell is run.
 - What a body reads while it is being probed is warmed, not depended on. The exception is the
   one body written down with those numbers - `A()=10` for a body that branched on a graph value
     - which is re-exported when they move, because it is only right for as long as they are.
@@ -861,10 +933,12 @@ swapped back.
   bounded: a body whose reads are different every run - `f(random())` - stops being waited for
   rather than looping.
 - A function is written down by running it with its parameters standing in as latex. A body that
-  compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported at all
-  unless it also updates something, in which case it is an action. Comparing a _graph_ read is
-  different: that one has a number to fall back on, and the body is written down as it stands
-  today. `with` cannot substitute into it, and it is re-exported when the number moves.
+  compares one of those - `if n > 0 then` - has no single latex to be, so it is not exported at
+  all. Comparing a _graph_ read is different: that one has a number to fall back on, and the body
+  is written down as it stands today. `with` cannot substitute into it, and it is re-exported when
+  the number moves.
+- A function that assigns a Desmos name is an error, not an action. Say which you meant with
+  `action(...)` or by returning a function; `local` is how you keep a name out of it entirely.
 - An exported action's plumbing takes names of its own: `L_{uaN}` for the markers and `L_{p0}`,
   `L_{p1}` ... for the parameters. A graph that defines one of those itself has a duplicate
   definition, and Desmos will say so.
