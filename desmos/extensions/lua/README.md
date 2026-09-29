@@ -805,8 +805,9 @@ snapshot. `_G.a` answers for a name the sheet defines, but enumerating one means
 a read can park the cell half way through a loop.
 
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
-`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `print`, `warn`, `action` and
-`Desmos` - the same objects through `_G` as bare - plus
+`select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `getmetatable`, `setmetatable`,
+`rawget`/`rawset`/`rawequal`/`rawlen`, `print`, `warn`, `action` and `Desmos` - the same objects
+through `_G` as bare - plus
 Desmos' own functions, as a fallback for any name the graph does not define. `Desmos` and
 `_G.Desmos` are the same object.
 
@@ -828,6 +829,41 @@ nothing would ever re-run.
 
 Left out: `debug` (it reaches upvalues and the registry, so it escapes any of this), `load`,
 `require`, `dofile` (they build an environment of their own), `io`, `os` and `package`.
+
+`rawget`, `rawset`, `rawequal` and `rawlen` are in, and they are the one place here you can hold
+the tool by the blade. A `rawset` into `_G` lands in the empty table in front of the shared
+globals, so `_G.x` finds it and a bare `x` in the cell next door does not; a `rawset` into
+`Desmos` replaces a function for every cell on the graph. Neither reaches past Desmos, so neither
+is the sandbox's business - reaching for `rawset` is how you say you wanted the sharp edge.
+
+### Metatables
+
+`getmetatable` and `setmetatable` are ordinary Lua and a cell gets both. What keeps this
+extension's own objects out of reach is Lua's own lock rather than their absence: a metatable
+with a `__metatable` field cannot be handed to `setmetatable` at all, and `getmetatable` returns
+that field instead of the real table.
+
+```lua
+setmetatable({}, {__index = f})         -- yours: fine
+setmetatable(Desmos.items.P, {})        -- error: cannot change a protected metatable
+getmetatable(_G).__index = f            -- error: this is a locked metatable, not the real one
+```
+
+That field is one shared, empty, locked table - every object this extension makes answers with
+the same one, it is its own metatable so there is no layer under it, and writing to it errors
+rather than quietly changing something nothing consults. It used to be the string `"lua"`, which
+locked just as well but read as a type error the moment anyone treated the result as a metatable.
+
+The other half of granting `setmetatable` is that **a value on its way to the graph is read
+raw**. A point is `{x = 1, y = 2}` and not a table that would produce those through `__index`:
+
+```lua
+Desmos.p = setmetatable({}, {__index = function(_, k) return k == "x" and 1 or 2 end})
+-- error: an empty table has nothing to become
+```
+
+The conversion runs inside an action fire and inside JS callbacks, which are places Lua must not
+run at all - so it reads what the table holds and never calls back into a cell to find out.
 
 And `js` - fengari's interop, and through it `js.global`: this page, same-origin, with its
 storage and its session. **It is granted to nothing.** There is no pragma, no flag and no cell

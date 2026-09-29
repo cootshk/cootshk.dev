@@ -15,11 +15,16 @@
 // and lua_isyieldable is the test; there the read gives nil and the cell is marked stale, to
 // be re-run from the top once the value lands.
 //
-// A cell reaches the graph and nothing else. What it is handed is a list written down in seed()
-// below - `math`, `string`, `table`, the safe half of the base library, and `Desmos` - and the
-// list is the whole of it: fengari's `js` is never granted, so there is no route from a cell to
-// the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's code, and
-// opening one runs it.
+// A cell reaches the graph and nothing else. What it is handed is a list written down in
+// pushSafe() below - `math`, `string`, `table`, the safe half of the base library, and `Desmos`
+// - and the list is the whole of it: fengari's `js` is never granted, so there is no route from
+// a cell to the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's
+// code, and opening one runs it.
+//
+// The objects this file hands over are closed rather than withheld. Each wears a `__metatable`,
+// which is Lua's own lock: `setmetatable` refuses such a table outright and `getmetatable` hands
+// back that field instead of the real one - so a cell gets both functions, as ordinary Lua, and
+// still cannot reach the closures behind an item's properties. See pushSealed.
 //
 // Every cell shares one set of globals and keeps its own locals. The globals live in a table of
 // their own, and both `_G` and a cell's own environment are empty tables in front of it wearing
@@ -60,6 +65,7 @@
     var GLOBALS = "cde.lua.globals";
     var DESMOS = "cde.lua.desmos";
     var SAFE = "cde.lua.safe";
+    var SEALED = "cde.lua.sealed";
 
     /**
      * A Desmos name, as Lua spells it. A Desmos identifier is one letter and an optional
@@ -152,6 +158,13 @@
         /** Why something failed, in words. runner.js and actions.js both report errors. */
         describe: describe,
 
+        /**
+         * The table `getmetatable` hands back for anything of ours. items.js and actions.js
+         * lock their own metatables with it, so every object this extension makes answers the
+         * same way.
+         */
+        sealed: pushSealed,
+
         /** actions.js needs these: it spells Lua values as latex too. */
         toDesmos: toDesmos,
         num: num,
@@ -233,6 +246,54 @@
         C.lua_setmetatable(co, -2);
     }
 
+    /**
+     * What `getmetatable` hands back for anything this extension made: an item, `Desmos`, `_G`,
+     * a cell's own environment, a latex fragment, an action.
+     *
+     * `__metatable` is Lua's own lock - a table that has one cannot be handed to `setmetatable`
+     * at all, and `getmetatable` returns this instead of the real thing. So the real metatable
+     * is never in a cell's hands, and the closures behind an item's properties stay where they
+     * are. It used to be the string `"lua"`, which locked just as well but read as a type error
+     * the moment anyone treated the result as a metatable.
+     *
+     * A table, then, and an empty one that refuses to be written to - so `getmetatable(x).__index
+     * = f` says what it is rather than silently changing a table nothing consults. It is its own
+     * `__metatable` too, so there is no unwrapping it one layer further down.
+     */
+    function pushSealed(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(SEALED));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 0);
+
+        C.lua_createtable(co, 0, 3);
+        C.lua_pushcfunction(co, sealedNewIndex);
+        C.lua_setfield(co, -2, to_luastring("__newindex"));
+        C.lua_pushcfunction(co, sealedToString);
+        C.lua_setfield(co, -2, to_luastring("__tostring"));
+        C.lua_pushvalue(co, -2);
+        C.lua_setfield(co, -2, to_luastring("__metatable"));
+
+        C.lua_setmetatable(co, -2);
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(SEALED));
+    }
+
+    function sealedNewIndex(co) {
+        return fail(
+            co,
+            "this is a locked metatable, not the real one. What this extension hands a cell " +
+                "keeps its own behaviour, and there is nothing here to rewrite"
+        );
+    }
+
+    function sealedToString(co) {
+        C.lua_pushstring(co, to_luastring("locked metatable"));
+        return 1;
+    }
+
     /** The metatable behind a cell's environment and behind _G. The same one, deliberately. */
     function pushMeta(co) {
         C.lua_createtable(co, 0, 4);
@@ -243,7 +304,7 @@
         C.lua_pushcfunction(co, envPairs);
         C.lua_setfield(co, -2, to_luastring("__pairs"));
         // Not readable from Lua, so a cell cannot lift our functions out of it.
-        C.lua_pushliteral(co, "lua");
+        pushSealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
     }
 
@@ -256,6 +317,13 @@
      * own; `io`, `os.execute` and `package` are not this page's to offer. And `js` - fengari's
      * bridge to the page, and so to the DOM, `fetch` and every other global on this origin - is
      * offered to nothing and nobody. A cell reaches Desmos, and that is the whole of it.
+     *
+     * The `raw*` family is in, and it is the one thing here that can be held wrong end up. A
+     * `rawset` into `_G` lands in the empty table in front of the shared globals, where it
+     * shadows the store for `_G.x` and is invisible to a bare `x` next door; a `rawset` into
+     * `Desmos` replaces a function for every cell on the graph. Neither reaches past Desmos, so
+     * neither is the sandbox's business - they are the sharp edge of a sharp tool, and reaching
+     * for `rawset` is how you say you wanted one.
      */
     function seed(co) {
         pushSafe(co);
@@ -285,12 +353,18 @@
         var safe = [
             "assert",
             "error",
+            "getmetatable",
             "ipairs",
             "next",
             "pairs",
             "pcall",
             "xpcall",
+            "rawequal",
+            "rawget",
+            "rawlen",
+            "rawset",
             "select",
+            "setmetatable",
             "tonumber",
             "tostring",
             "type",
@@ -1330,7 +1404,7 @@
         C.lua_setfield(co, -2, to_luastring("__index"));
         C.lua_pushcfunction(co, desmosNewIndex);
         C.lua_setfield(co, -2, to_luastring("__newindex"));
-        C.lua_pushliteral(co, "lua");
+        pushSealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
         C.lua_setmetatable(co, -2);
     }
@@ -1496,9 +1570,14 @@
 
         // A point: `{x = 1, y = 2}`, and `{x, y, z}` in the 3D calculator. The `z` is written
         // down when it is there, so a point read off the graph goes back as the point it was.
-        C.lua_getfield(co, idx, to_luastring("x"));
-        C.lua_getfield(co, idx, to_luastring("y"));
-        C.lua_getfield(co, idx, to_luastring("z"));
+        //
+        // Read raw, the way the list below already is. A cell can set a metatable now, and an
+        // `__index` here would be arbitrary Lua running inside a conversion that is called from
+        // places Lua must not run - an action fire, a JS callback, a context that cannot yield.
+        // What goes to the graph is what the table holds.
+        rawfield(co, idx, "x");
+        rawfield(co, idx, "y");
+        rawfield(co, idx, "z");
         if (
             C.lua_type(co, -3) === C.LUA_TNUMBER &&
             C.lua_type(co, -2) === C.LUA_TNUMBER
@@ -1553,6 +1632,13 @@
         if (!parts.length)
             return { error: "an empty table has nothing to become" };
         return { latex: "\\left[" + parts.join(",") + "\\right]" };
+    }
+
+    /** `t.name` without metamethods, pushed. `idx` may be relative; it is resolved first. */
+    function rawfield(co, idx, name) {
+        var at = C.lua_absindex(co, idx);
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_rawget(co, at);
     }
 
     function list(values) {

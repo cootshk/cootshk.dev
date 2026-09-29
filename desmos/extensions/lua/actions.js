@@ -218,7 +218,7 @@
         // Closed, like every other metatable here.
         C.lua_pushcfunction(co, latexIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
-        C.lua_pushliteral(co, "lua");
+        lua.bridge.sealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
 
         C.lua_pushvalue(co, -1);
@@ -352,7 +352,7 @@
         C.lua_setfield(co, -2, to_luastring("__tostring"));
         C.lua_pushcfunction(co, latexIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
-        C.lua_pushliteral(co, "lua");
+        lua.bridge.sealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
 
         C.lua_pushvalue(co, -1);

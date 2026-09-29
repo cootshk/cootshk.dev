@@ -444,7 +444,7 @@
         C.lua_setfield(co, -2, to_luastring("__newindex"));
         C.lua_pushcfunction(co, itemsLen);
         C.lua_setfield(co, -2, to_luastring("__len"));
-        C.lua_pushliteral(co, "lua");
+        lua.bridge.sealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
         C.lua_setmetatable(co, -2);
     }
@@ -565,7 +565,7 @@
             bind(co, [id, group], groupNewIndex, "__newindex");
             bind(co, [id, group], groupToString, "__tostring");
         }
-        C.lua_pushliteral(co, "lua");
+        lua.bridge.sealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
         C.lua_setmetatable(co, -2);
 
@@ -611,7 +611,7 @@
         bind(co, [which], oneIndex, "__index");
         bind(co, [which], oneNewIndex, "__newindex");
         bind(co, [which], oneToString, "__tostring");
-        C.lua_pushliteral(co, "lua");
+        lua.bridge.sealed(co);
         C.lua_setfield(co, -2, to_luastring("__metatable"));
         C.lua_setmetatable(co, -2);
 
@@ -888,7 +888,7 @@
         var names = settableIn(props);
         var touched = [];
         for (var i = 0; i < names.length; i++) {
-            C.lua_getfield(co, idx, to_luastring(names[i]));
+            rawfield(co, idx, names[i]);
             if (C.lua_isnil(co, -1)) {
                 C.lua_pop(co, 1);
                 continue;
@@ -1105,7 +1105,7 @@
 
         var names = Object.keys(g.props);
         for (var i = 0; i < names.length; i++) {
-            C.lua_getfield(co, idx, to_luastring(names[i]));
+            rawfield(co, idx, names[i]);
             if (C.lua_isnil(co, -1)) {
                 C.lua_pop(co, 1);
                 continue;
@@ -1217,6 +1217,19 @@
                 "action, and not something a function can be written down as. Set it from the " +
                 "cell body instead."
         );
+    }
+
+    /**
+     * `t.name` without metamethods, pushed.
+     *
+     * Raw, because a cell can set a metatable on the table it hands over, and an `__index` here
+     * would be arbitrary Lua running inside a property write - which happens in places Lua must
+     * not run. What is written is what the table holds.
+     */
+    function rawfield(co, idx, name) {
+        var at = C.lua_absindex(co, idx);
+        C.lua_pushstring(co, to_luastring(name));
+        C.lua_rawget(co, at);
     }
 
     function why(error) {
