@@ -888,6 +888,16 @@
                 "Desmos.items",
                 'Desmos.items.P.color = "#aabbcc"',
                 "The sheet's items, by name, by id or by position."
+            ],
+            [
+                "Desmos.settings",
+                "Desmos.settings.showGrid = false",
+                "The graph's own settings, and its viewport."
+            ],
+            [
+                "Desmos.ticker",
+                "Desmos.ticker.playing = true",
+                "The ticker: its handler, its step, and whether it runs."
             ]
         ];
 

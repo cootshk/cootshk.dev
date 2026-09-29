@@ -1,4 +1,12 @@
-// Graph items as Lua objects: `Desmos.items.P.color = "#aabbcc"`.
+// The graph as Lua objects: its items, its settings and its ticker.
+//
+//     Desmos.items.P.color = "#aabbcc"
+//     Desmos.settings.showGrid = false
+//     Desmos.ticker.playing = true
+//
+// All three are the same mechanism - a locked handle over a table of properties, a strict write,
+// and a read that is a dependency - so they are one file. Items are most of it; the settings and
+// the ticker are one object each, at the bottom.
 //
 // Reading a Desmos name gives its *value* - `P` is `{x = 1, y = 2}` - and that is the whole of
 // the bridge in ./bridge.js. It leaves no room for the item itself: a value has no colour, a
@@ -40,6 +48,11 @@
 // that vanishes when the cell stops saying it; a colour is a property of somebody's real item,
 // so it is saved with the graph. The write is skipped when it would change nothing, which is
 // what keeps a cell that re-runs often from doing anything at all most of the time.
+//
+// `Desmos.settings` and `Desmos.ticker` cover the other two things DesModder's text mode hangs
+// `@{ }` off, with one wrinkle of their own: Desmos has rules about its settings that it keeps
+// by *declining* - it will not lock the viewport while the zoom buttons show - so a setting is
+// read back after it is written and the cell is told when Desmos would not have it.
 //
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
@@ -265,6 +278,89 @@
         PROPS[name] = { kind: "group", group: name };
     });
 
+    /**
+     * The graph's own settings, which is the other thing DesModder's text mode hangs `@{ }`
+     * off. Read off `controller.graphSettings` and written with `Calc.updateSettings`, which
+     * has a whitelist of its own - so `direct` means the same here as it does above.
+     *
+     * Two of them are spelled differently by the API and by the model, and `at` is the model's
+     * word: this is the one place the rule "the names are the saved graph's" is broken, because
+     * `lockViewport` is what the API and text mode both call it and `userLockedViewport` is a
+     * name nobody would guess.
+     *
+     * The 3D settings are only meaningful in the 3D calculator; in the 2D one they are written
+     * and go nowhere, which is Desmos' behaviour and not something to pretend about.
+     */
+    var SETTINGS = {
+        product: {
+            read: function (settings) {
+                return settings.product;
+            }
+        },
+        viewport: { kind: "group", group: "viewport" },
+
+        degreeMode: { kind: "flag" },
+        complex: { kind: "flag" },
+        randomSeed: { kind: "text" },
+        squareAxes: { kind: "flag", direct: true },
+        lockViewport: { kind: "flag", at: "userLockedViewport" },
+
+        showGrid: { kind: "flag" },
+        showXAxis: { kind: "flag" },
+        showYAxis: { kind: "flag" },
+        xAxisNumbers: { kind: "flag" },
+        yAxisNumbers: { kind: "flag" },
+        polarNumbers: { kind: "flag" },
+        polarMode: { kind: "flag" },
+        restrictGridToFirstQuadrant: { kind: "flag" },
+        xAxisLabel: { kind: "text" },
+        yAxisLabel: { kind: "text" },
+        xAxisStep: { kind: "count" },
+        yAxisStep: { kind: "count" },
+        xAxisMinorSubdivisions: { kind: "count" },
+        yAxisMinorSubdivisions: { kind: "count" },
+        xAxisArrowMode: { kind: "enum", of: ["NONE", "POSITIVE", "BOTH"] },
+        yAxisArrowMode: { kind: "enum", of: ["NONE", "POSITIVE", "BOTH"] },
+
+        axis3D: { kind: "numbers", length: 3, direct: true },
+        speed3D: { kind: "count", direct: true },
+        worldRotation3D: { kind: "numbers", length: 9, direct: true },
+        lockRotation: {
+            kind: "flag",
+            at: "userLockedRotation",
+            direct: true
+        },
+        disableLighting: { kind: "flag", direct: true }
+    };
+
+    /**
+     * `Desmos.settings.viewport`. Read live off `Calc.graphpaperBounds`, and written with
+     * `Calc.setMathBounds`, which takes all four corners together - so one of them moving is
+     * the other three as they are.
+     *
+     * `zmin` and `zmax` are read-only. They exist in the 3D calculator, `setMathBounds` is two
+     * dimensional, and a way of writing them that cannot be tried here is not one to ship.
+     */
+    var VIEWPORT = {
+        xmin: { kind: "count", corner: "left" },
+        xmax: { kind: "count", corner: "right" },
+        ymin: { kind: "count", corner: "bottom" },
+        ymax: { kind: "count", corner: "top" },
+        zmin: { read: depth("zmin") },
+        zmax: { read: depth("zmax") }
+    };
+
+    /**
+     * The ticker. All four on the model, which is enough: writing `playing` there really does
+     * start it ticking, rather than only noting that something else had.
+     */
+    var TICKER = {
+        handlerLatex: { kind: "text" },
+        minStepLatex: { kind: "number" },
+        playing: { kind: "flag" },
+        open: { kind: "flag" }
+    };
+
     /** A plain number written as a string, which is how the model holds a width or a bound. */
     var NUMERIC = /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/;
 
@@ -288,6 +384,14 @@
 
         /** Push the `Desmos.items` table. Called from bridge.buildDesmos. */
         push: push,
+
+        /** And `Desmos.settings` and `Desmos.ticker`, which are one object each. */
+        pushSettings: function (co) {
+            pushOne(co, "settings");
+        },
+        pushTicker: function (co) {
+            pushOne(co, "ticker");
+        },
 
         /** The graph has changed: re-read what cells are watching, and tell them what moved. */
         changed: changed
@@ -399,7 +503,7 @@
      * nil to everything else.
      */
     function pushHandle(co, id, group) {
-        var key = group === null ? id : id + " " + group;
+        var key = group === null ? "i " + id : "g " + id + " " + group;
 
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
         if (C.lua_isnil(co, -1)) {
@@ -444,6 +548,69 @@
         });
         C.lua_pushcclosure(co, fn, upvalues.length);
         C.lua_setfield(co, -2, to_luastring(name));
+    }
+
+    /**
+     * The handle for the graph's settings, its viewport, or the ticker. One of each, so the
+     * only upvalue is which one it is.
+     */
+    function pushOne(co, which) {
+        var key = "s " + which;
+
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
+        if (C.lua_isnil(co, -1)) {
+            C.lua_pop(co, 1);
+            C.lua_createtable(co, 0, 8);
+            C.lua_pushvalue(co, -1);
+            C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
+        }
+
+        C.lua_getfield(co, -1, to_luastring(key));
+        if (!C.lua_isnil(co, -1)) {
+            C.lua_remove(co, -2);
+            return;
+        }
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 0);
+
+        C.lua_createtable(co, 0, 4);
+        bind(co, [which], oneIndex, "__index");
+        bind(co, [which], oneNewIndex, "__newindex");
+        bind(co, [which], oneToString, "__tostring");
+        C.lua_pushliteral(co, "lua");
+        C.lua_setfield(co, -2, to_luastring("__metatable"));
+        C.lua_setmetatable(co, -2);
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, -3, to_luastring(key));
+        C.lua_remove(co, -2);
+    }
+
+    function oneIndex(co) {
+        var which = C.lua_tojsstring(co, C.lua_upvalueindex(1));
+        if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        return readOne(co, which, C.lua_tojsstring(co, 2));
+    }
+
+    function oneNewIndex(co) {
+        var which = C.lua_tojsstring(co, C.lua_upvalueindex(1));
+        if (C.lua_type(co, 2) !== C.LUA_TSTRING)
+            return fail(co, "a property is named with a string");
+        return writeOne(co, which, C.lua_tojsstring(co, 2), 3);
+    }
+
+    function oneToString(co) {
+        C.lua_pushstring(
+            co,
+            to_luastring(
+                "the graph's " + C.lua_tojsstring(co, C.lua_upvalueindex(1))
+            )
+        );
+        return 1;
     }
 
     function handleIndex(co) {
@@ -531,8 +698,10 @@
             return 1;
         }
 
-        var value = valueOf(model[name], spec, model, id);
-        watch(dep(id, name), id, name, null, spec, value);
+        var value = propertyOf(model, spec, name, id);
+        watch(dep(id, name), id, value, function () {
+            return propertyOf(modelOf(id), spec, name, id);
+        });
         lua.bridge.pushValue(co, value);
         return 1;
     }
@@ -546,24 +715,222 @@
             return 1;
         }
 
-        var held = model[group];
-        var value = valueOf(held ? held[name] : undefined, spec, model, id);
-        watch(dep(id, group + "." + name), id, name, group, spec, value);
+        var value = propertyOf(model[group], spec, name, id);
+        watch(dep(id, group + "." + name), id, value, function () {
+            var again = modelOf(id);
+            return propertyOf(again && again[group], spec, name, id);
+        });
         lua.bridge.pushValue(co, value);
         return 1;
     }
 
+    /** Which properties `which` has, and where its values live. */
+    function shape(which) {
+        if (which === "settings") return SETTINGS;
+        if (which === "ticker") return TICKER;
+        return VIEWPORT;
+    }
+
+    function holder(which) {
+        try {
+            if (which === "settings") return Calc.controller.graphSettings;
+            if (which === "ticker")
+                return Calc.controller.getTicker
+                    ? Calc.controller.getTicker()
+                    : null;
+            return Calc.graphpaperBounds
+                ? Calc.graphpaperBounds.mathCoordinates
+                : null;
+        } catch (error) {
+            // A build that keeps one of them somewhere else: nil, rather than throwing out
+            // of a metamethod into whatever cell happened to ask.
+        }
+        return null;
+    }
+
+    /**
+     * The z of the viewport, which `graphpaperBounds` does not carry because it is flat. The
+     * saved state does, in the 3D calculator; read from there and nowhere in the 2D one.
+     */
+    function depth(name) {
+        return function () {
+            try {
+                var graph = Calc.getState().graph || {};
+                return (graph.viewport || {})[name];
+            } catch (error) {
+                return undefined;
+            }
+        };
+    }
+
+    function readOne(co, which, name) {
+        var spec = shape(which)[name];
+        if (!spec) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        if (spec.kind === "group") {
+            pushOne(co, spec.group);
+            return 1;
+        }
+
+        var key = "@" + which + "." + name;
+        var again = function () {
+            return propertyOf(holder(which), spec, name, null);
+        };
+        var value = again();
+        watch(key, null, value, again);
+        lua.bridge.pushValue(co, value);
+        return 1;
+    }
+
+    function writeOne(co, which, name, idx) {
+        var props = shape(which);
+        var spec = props[name];
+        if (!spec) return fail(co, missing(which, name, settableIn(props)));
+        if (!spec.kind)
+            return fail(
+                co,
+                which === "viewport"
+                    ? '"' +
+                          name +
+                          '" can be read and not set: Desmos moves the viewport with ' +
+                          "setMathBounds, which is two dimensional"
+                    : '"' +
+                          name +
+                          '" is what the graph is, not something to set'
+            );
+
+        var stop = sealed(co, name);
+        if (stop !== null) return stop;
+
+        if (spec.kind === "group") return writeWhole(co, spec.group, idx);
+
+        var given = coerce(co, spec, idx);
+        if (given.error)
+            return fail(co, 'cannot set "' + name + '": ' + given.error);
+        if (alike(propertyOf(holder(which), spec, name, null), given.seen))
+            return 0;
+
+        return apply(
+            co,
+            name,
+            "@" + which + "." + name,
+            given.seen,
+            function () {
+                if (which === "ticker") return lua.setTicker(name, given.api);
+                if (which === "viewport") return moveCorner(spec, given.api);
+                lua.setSetting(name, given.api, !!spec.direct, spec.at || name);
+            },
+            // A setting is checked afterwards, because Desmos has rules about them that it
+            // enforces by declining: it will not lock the viewport while the zoom buttons are
+            // showing, and complex mode is in radians whatever `degreeMode` says. It says so at
+            // the console and carries on, which from a cell looks like a line that did nothing
+            // - so the line is made to say so instead.
+            which === "settings"
+                ? function () {
+                      return propertyOf(holder(which), spec, name, null);
+                  }
+                : null
+        );
+    }
+
+    /** `Desmos.settings.viewport = { xmin = -5, xmax = 5 }` - the named parts, the rest as is. */
+    function writeWhole(co, which, idx) {
+        var props = shape(which);
+        if (C.lua_type(co, idx) !== C.LUA_TTABLE)
+            return fail(
+                co,
+                'cannot set "' +
+                    which +
+                    '": it takes a table of ' +
+                    settableIn(props).join(", ")
+            );
+
+        var names = settableIn(props);
+        var touched = [];
+        for (var i = 0; i < names.length; i++) {
+            C.lua_getfield(co, idx, to_luastring(names[i]));
+            if (C.lua_isnil(co, -1)) {
+                C.lua_pop(co, 1);
+                continue;
+            }
+            var given = coerce(co, props[names[i]], C.lua_absindex(co, -1));
+            C.lua_pop(co, 1);
+            if (given.error)
+                return fail(
+                    co,
+                    'cannot set "' + names[i] + '": ' + given.error
+                );
+            touched.push([names[i], given]);
+        }
+        if (!touched.length) return 0;
+
+        try {
+            if (which === "viewport") {
+                var corners = corner(null);
+                touched.forEach(function (one) {
+                    corners[props[one[0]].corner] = one[1].api;
+                });
+                lua.setBounds(corners);
+            } else {
+                touched.forEach(function (one) {
+                    var spec = props[one[0]];
+                    lua.setSetting(
+                        one[0],
+                        one[1].api,
+                        !!spec.direct,
+                        spec.at || one[0]
+                    );
+                });
+            }
+        } catch (error) {
+            return fail(co, 'could not set "' + which + '": ' + why(error));
+        }
+
+        touched.forEach(function (one) {
+            told("@" + which + "." + one[0], one[1].seen);
+        });
+        return 0;
+    }
+
+    /** Move one edge of the viewport, leaving the other three where they are. */
+    function moveCorner(spec, value) {
+        var corners = corner(null);
+        corners[spec.corner] = value;
+        lua.setBounds(corners);
+    }
+
+    /** The viewport as setMathBounds spells it. */
+    function corner() {
+        var now = holder("viewport") || {};
+        return {
+            left: now.xmin,
+            right: now.xmax,
+            bottom: now.ymin,
+            top: now.ymax
+        };
+    }
+
     /** What `raw` is worth, in the spelling Lua reads it back in. */
-    function valueOf(raw, spec, model, id) {
-        if (spec.read) return spec.read(model, id);
+    function valueOf(raw, spec) {
         // An empty latex is how the model spells "not set" - an untouched width, a label
         // nobody has typed - and nil is what that is in Lua. Left as the empty string it is
         // truthy, so `item.lineWidth or 2.5` would never reach its fallback.
         if (raw === undefined || raw === null || raw === "") return undefined;
         if (spec.kind === "flag") return raw === true;
+        if (spec.kind === "numbers")
+            return Array.isArray(raw) ? raw.slice() : undefined;
         if (spec.kind === "number" || spec.kind === "count" || spec.numbers)
             return numberish(raw);
         return typeof raw === "string" ? raw : String(raw);
+    }
+
+    /** One property of one thing, whatever kind of thing it is. */
+    function propertyOf(holder, spec, name, id) {
+        if (spec.read) return holder ? spec.read(holder, id) : undefined;
+        if (!holder) return undefined;
+        return valueOf(holder[spec.at || name], spec);
     }
 
     /**
@@ -630,7 +997,7 @@
         var given = coerce(co, spec, idx);
         if (given.error)
             return fail(co, 'cannot set "' + name + '": ' + given.error);
-        if (alike(valueOf(model[name], spec, model, id), given.seen)) return 0;
+        if (alike(propertyOf(model, spec, name, id), given.seen)) return 0;
 
         return apply(co, name, dep(id, name), given.seen, function () {
             lua.setItem(id, name, given.api, !!spec.direct);
@@ -657,8 +1024,7 @@
             );
 
         var held = model[group];
-        var now = valueOf(held ? held[name] : undefined, spec, model, id);
-        if (alike(now, given.seen)) return 0;
+        if (alike(propertyOf(held, spec, name, id), given.seen)) return 0;
 
         var key = dep(id, group + "." + name);
         return apply(co, name, key, given.seen, function () {
@@ -761,14 +1127,33 @@
      * the echo guard in index.js means the change event this caused is the one scan() is
      * certain not to see.
      */
-    function apply(co, name, key, seen, write) {
+    function apply(co, name, key, seen, write, check) {
         try {
             write();
         } catch (error) {
             return fail(co, 'could not set "' + name + '": ' + why(error));
         }
+        if (check) {
+            var still = check();
+            if (!alike(still, seen))
+                return fail(
+                    co,
+                    'Desmos would not set "' +
+                        name +
+                        '" - it is still ' +
+                        show(still) +
+                        ". There is usually a reason at the console"
+                );
+        }
         told(key, seen);
         return 0;
+    }
+
+    /** A value in an error message. */
+    function show(value) {
+        if (value === undefined) return "unset";
+        if (typeof value === "string") return '"' + value + '"';
+        return String(value);
     }
 
     function told(key, seen) {
@@ -865,6 +1250,35 @@
             return { error: "it takes a number, or latex as a string" };
         }
 
+        // A fixed-length list of numbers: which way is up in the 3D calculator, and how it is
+        // turned. Not latex - these really are numbers.
+        if (spec.kind === "numbers") {
+            if (t !== C.LUA_TTABLE)
+                return {
+                    error: "it takes a list of " + spec.length + " numbers"
+                };
+            var n = C.lua_rawlen(co, idx);
+            if (n !== spec.length)
+                return {
+                    error:
+                        "it takes " +
+                        spec.length +
+                        " numbers, and this has " +
+                        n
+                };
+            var list = [];
+            for (var at = 1; at <= n; at++) {
+                C.lua_rawgeti(co, idx, at);
+                var number = C.lua_type(co, -1) === C.LUA_TNUMBER;
+                var one = number ? C.lua_tonumber(co, -1) : 0;
+                C.lua_pop(co, 1);
+                if (!number || !isFinite(one))
+                    return { error: "every one of them has to be a number" };
+                list.push(one);
+            }
+            return { api: list, seen: list };
+        }
+
         var words = allowed(spec);
         // `labelSize` is one of three words or a latex number, and the number is latex for the
         // same reason a width is.
@@ -934,8 +1348,12 @@
 
     /** Every property a cell may set, for the errors above. */
     function settable() {
-        return Object.keys(PROPS).filter(function (name) {
-            return !!PROPS[name].kind;
+        return settableIn(PROPS);
+    }
+
+    function settableIn(props) {
+        return Object.keys(props).filter(function (name) {
+            return !!props[name].kind;
         });
     }
 
@@ -1031,18 +1449,19 @@
         else cell.reads.add(key);
     }
 
-    function watch(key, id, name, group, spec, value) {
+    /**
+     * File a read, and remember what it was worth so changed() can tell when it moves.
+     *
+     * `again` re-reads it. A closure rather than enough fields to look it up with, because what
+     * is being watched is a property of an item, of a nested object, of the graph's settings or
+     * of the ticker, and only the closure knows which. `id` is the item it belongs to, or null
+     * for the two that are not items - it is what says the entry can be dropped.
+     */
+    function watch(key, id, value, again) {
         note(key);
         var entry = watched.get(key);
         if (entry) entry.was = value;
-        else
-            watched.set(key, {
-                id: id,
-                name: name,
-                group: group,
-                spec: spec,
-                was: value
-            });
+        else watched.set(key, { id: id, was: value, again: again });
     }
 
     /**
@@ -1059,21 +1478,11 @@
 
         var gone = [];
         watched.forEach(function (entry, key) {
-            var model = modelOf(entry.id);
-            var now;
-            if (model) {
-                var held = entry.group ? model[entry.group] : model;
-                now = valueOf(
-                    held ? held[entry.name] : undefined,
-                    entry.spec,
-                    model,
-                    entry.id
-                );
-            }
+            var now = entry.again();
             if (alike(entry.was, now)) return;
 
             entry.was = now;
-            if (!model) gone.push(key);
+            if (entry.id !== null && !modelOf(entry.id)) gone.push(key);
             lua.bridge.onInvalidate(key, null);
         });
 
@@ -1084,6 +1493,13 @@
 
     function alike(a, b) {
         if (a === b) return true;
+        if (Array.isArray(a) && Array.isArray(b))
+            return (
+                a.length === b.length &&
+                a.every(function (one, i) {
+                    return alike(one, b[i]);
+                })
+            );
         return (
             typeof a === "number" &&
             typeof b === "number" &&

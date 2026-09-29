@@ -1199,11 +1199,16 @@
         C.lua_pushcfunction(co, desmosSample);
         C.lua_setfield(co, -2, to_luastring("sample"));
 
-        // The sheet itself, as objects. A value has no colour and a number cannot carry a
-        // metatable, so an item is a second thing to reach for; see ./items.js.
+        // The graph itself, as objects. A value has no colour and a number cannot carry a
+        // metatable, so an item is a second thing to reach for - and so are the graph's
+        // settings and its ticker, which are not values at all. See ./items.js.
         if (lua.items) {
             lua.items.push(co);
             C.lua_setfield(co, -2, to_luastring("items"));
+            lua.items.pushSettings(co);
+            C.lua_setfield(co, -2, to_luastring("settings"));
+            lua.items.pushTicker(co);
+            C.lua_setfield(co, -2, to_luastring("ticker"));
         }
 
         C.lua_createtable(co, 0, 3);

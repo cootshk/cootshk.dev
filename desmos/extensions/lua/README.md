@@ -537,7 +537,8 @@ n.cdf = nil                                  -- and nil takes it off
 
 Left out: `glesmos`, `errorHidden` and `pinned`, which text mode also takes. Those are
 DesModder's own, kept in an expression of its own rather than on the item, so setting one here
-would mean nothing.
+would mean nothing. A table's columns and a regression's parameters are not reachable either,
+and there is no adding or deleting an item this way.
 
 ### Reading, and what a read costs
 
@@ -608,6 +609,56 @@ change the graph.
 
 It is still an ordinary Lua function, and calling `Paint()` from a cell body does set the
 colour. What cannot happen is a button on the sheet firing it.
+
+## Settings and the ticker
+
+The other two things DesModder's text mode hangs `@{ }` off, and they work the way items do.
+
+```lua
+Desmos.settings.showGrid = false
+Desmos.settings.degreeMode = true
+Desmos.settings.xAxisLabel = "time"
+Desmos.settings.viewport = { xmin = -5, xmax = 5 }
+
+Desmos.ticker.handlerLatex = "a \\to a+1"
+Desmos.ticker.minStepLatex = 50
+Desmos.ticker.playing = true
+```
+
+`Desmos.settings` has `degreeMode`, `complex`, `randomSeed`, `squareAxes`, `lockViewport`,
+`showGrid`, `showXAxis`, `showYAxis`, `xAxisNumbers`, `yAxisNumbers`, `polarNumbers`,
+`polarMode`, `restrictGridToFirstQuadrant`, `xAxisLabel`, `yAxisLabel`, `xAxisStep`, `yAxisStep`,
+`xAxisMinorSubdivisions`, `yAxisMinorSubdivisions`, `xAxisArrowMode`, `yAxisArrowMode`, and the
+3D calculator's `axis3D`, `speed3D`, `worldRotation3D`, `lockRotation` and `disableLighting`.
+`product` is read-only - Desmos says so itself, in as many words.
+
+`Desmos.settings.viewport` is `xmin`, `xmax`, `ymin`, `ymax` - moving one leaves the other three
+where they are, because Desmos takes all four together. `zmin` and `zmax` can be read and not
+set: they exist in the 3D calculator, `setMathBounds` is two dimensional, and a way of writing
+them that could not be tried here is not one to ship.
+
+`Desmos.ticker` is `handlerLatex`, `minStepLatex`, `playing` and `open`. Setting `playing` really
+does start it ticking rather than only noting that something else had.
+
+The same two ways of writing, for the same reason: `Calc.updateSettings` has a whitelist and
+warns at the console about anything else, so `squareAxes` and the 3D five go onto the settings
+model instead. Two of them the API and the model spell differently, and the API's word is used:
+`lockViewport` is `userLockedViewport` on the model, and `lockRotation` is `userLockedRotation`.
+This is the one place the "names are the saved graph's" rule bends, because nobody would guess
+the other spelling.
+
+Desmos also has rules about its settings that it keeps by **declining**, saying so at the
+console and carrying on - it will not lock the viewport while the zoom buttons are showing, and
+complex mode is in radians whatever `degreeMode` says. From a cell that looks like a line that
+did nothing, so a setting is read back after it is written and the line says so itself:
+
+```
+Desmos would not set "lockViewport" - it is still false. There is usually a reason at the console
+```
+
+Reading a setting is a dependency like reading anything else, so a cell re-runs when the grid is
+turned off underneath it - and that includes the viewport, so a cell that reads `viewport.xmax`
+re-runs as the graph is panned.
 
 ## Keys
 
@@ -830,8 +881,13 @@ swapped back.
   parameters are not exposed, and there is no adding or deleting an item through it.
   `glesmos`, `errorHidden` and `pinned` are DesModder's own metadata rather than Desmos', so
   they are not there either.
-- Graph settings and the ticker - the other two things DesModder's text mode hangs `@{ }` off -
-  are not reachable this way. Only items are.
+- A cell that reads `Desmos.settings.viewport` re-runs whenever the graph is panned or zoomed,
+  because the viewport really is part of the graph's state and `change` really does fire for it.
+- The viewport's `zmin` and `zmax` can be read and not set; `setMathBounds` is two dimensional.
+- Desmos declines some settings rather than refusing them - it will not lock the viewport while
+  the zoom buttons show, and complex mode ignores `degreeMode`. Those come back as errors
+  because the setting is read after it is written; a rule Desmos enforces some other way would
+  not.
 - Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
   running all still work; the colours and the error squiggles do not.
 - One Monaco editor per cell, built when the row appears and disposed when it scrolls away. The
@@ -862,7 +918,7 @@ interactive version, and where to go when this says something has moved.
 | `index.js`    | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
 | `builtins.js` | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
 | `bridge.js`   | the environment a cell runs in, reading the graph, and writing to it                       |
-| `items.js`    | items as objects: `Desmos.items`, what an item has, and keeping a cell up to date with it  |
+| `items.js`    | the graph as objects: `Desmos.items`, `Desmos.settings`, `Desmos.ticker`                   |
 | `actions.js`  | actions both ways - recording a body, the markers, and applying updates                    |
 | `runner.js`   | when a cell runs, the loop watchdog, and errors                                            |
 | `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |

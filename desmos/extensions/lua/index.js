@@ -385,6 +385,59 @@
             },
 
             /**
+             * One of the graph's own settings. The same two ways: `updateSettings` is the door
+             * and warns at the console about a name it does not know, and `direct` is the
+             * settings model, which is what the saved state is built from.
+             *
+             * `field` is what the model calls it, which for two of them is not what the API
+             * does - `lockViewport` is `userLockedViewport` on the model.
+             */
+            setSetting: function (name, value, direct, field) {
+                if (direct) {
+                    var settings = Calc.controller.graphSettings;
+                    if (!settings)
+                        throw new Error(
+                            "this build keeps the graph settings somewhere else"
+                        );
+                    settings[field] = value;
+                    reparse();
+                    return;
+                }
+
+                writing = true;
+                try {
+                    var spec = {};
+                    spec[name] = value;
+                    Calc.updateSettings(spec);
+                } finally {
+                    writing = false;
+                }
+            },
+
+            /**
+             * One of the ticker's four. All of them on the model: writing `playing` there
+             * really does start it ticking rather than only noting that it is, so there is no
+             * second path to have.
+             */
+            setTicker: function (name, value) {
+                var ticker =
+                    Calc.controller.getTicker && Calc.controller.getTicker();
+                if (!ticker) throw new Error("this build has no ticker");
+                ticker[name] = value;
+                reparse();
+            },
+
+            /** Move the viewport. All four corners at once, which is what Desmos takes. */
+            setBounds: function (bounds) {
+                writing = true;
+                try {
+                    Calc.setMathBounds(bounds);
+                } finally {
+                    writing = false;
+                }
+            },
+
+            /**
              * Hold a new value for a Lua-owned name - one with no item behind it - by rewriting
              * the export that publishes it. One statement per name either way, so Desmos' own
              * reaper still works and there is never a second definition to collide with.
