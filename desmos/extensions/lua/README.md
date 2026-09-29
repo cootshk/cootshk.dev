@@ -193,8 +193,9 @@ no longer makes is simply absent from the map, so Desmos removes the statement i
 ```lua
 k = 42                      -- k=42
 v = {1, 2, 3}               -- v=\left[1,2,3\right]
-p = {x = 1, y = 2}          -- p=\left(1,2\right)
-q = {{x=0,y=0}, {x=1,y=1}}  -- a list of points
+e = {}                      -- e=\left[\right], an empty list
+p = point(1, 2)             -- p=\left(1,2\right)
+q = {point(0, 0), point(1, 1)}  -- a list of points
 total = 7                   -- t_{otal}=7
 k = nil                     -- and it is gone
 ```
@@ -202,10 +203,26 @@ k = nil                     -- and it is gone
 `_G.k = 42` and `Desmos.k = 42` do the same thing. All three go through one metatable, and
 `local` is how you say you meant none of it.
 
+**`point(x, y)`** is `\left(x,y\right)`, and `point(x, y, z)` is the 3D calculator's. What it
+hands back is the table a point already is - `{x = 1, y = 2}` - which is also the shape a point
+read _off_ the graph arrives in, so one can be taken apart and put back together without either
+end knowing which door it came through:
+
+```lua
+local p = point(1, 2)
+p.x                         -- 1
+Desmos.q = point(P.x, P.y)  -- P off the sheet, straight back onto it
+```
+
+Writing the table out by hand still works; `point` is the name for it, and the thing that says
+which coordinate is wrong when one is. A coordinate does not have to be a number yet either -
+inside a function being written down, `point(n, 2)` is a point whose x is the parameter.
+
 ### Values with no Desmos spelling
 
 A string, or a table that is neither a point nor a list of numbers, is **stored and not
-exported**, quietly:
+exported**, quietly. An _empty_ table is not one of those - it is an empty list, which is a value
+Desmos has - but a table holding something with no spelling is:
 
 ```lua
 label = "hello"             -- a global, shared with every cell, on the graph nowhere
@@ -832,8 +849,8 @@ spelling - is a plain write that stays in Lua.
 
 A cell starts with `math`, `string`, `table`, `coroutine`, `utf8`, `pairs`/`ipairs`, `pcall`,
 `select`, `tonumber`, `tostring`, `type`, `assert`, `error`, `getmetatable`, `setmetatable`,
-`rawget`/`rawset`/`rawequal`/`rawlen`, `print`, `warn`, `action` and `Desmos` - the same objects
-through `_G` as bare - plus
+`rawget`/`rawset`/`rawequal`/`rawlen`, `print`, `warn`, `point`, `action` and `Desmos` - the same
+objects through `_G` as bare - plus
 Desmos' own functions, as a fallback for any name the graph does not define. `Desmos` and
 `_G.Desmos` are the same object.
 

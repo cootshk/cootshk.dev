@@ -907,6 +907,11 @@
          */
         var GLOBAL = [
             [
+                "point",
+                "Desmos.P = point(1, 2)",
+                "A Desmos point. Two coordinates, or three in the 3D calculator."
+            ],
+            [
                 "action",
                 "A = action(function() b = 1 end)",
                 "Mark a body as one that changes the graph. Without it a function " +

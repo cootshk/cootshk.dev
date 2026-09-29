@@ -401,6 +401,9 @@
         pushGlobals(co);
         C.lua_setfield(co, -2, to_luastring("_G"));
 
+        C.lua_pushcfunction(co, luaPoint);
+        C.lua_setfield(co, -2, to_luastring("point"));
+
         C.lua_pushcfunction(co, luaPrint);
         C.lua_setfield(co, -2, to_luastring("print"));
         C.lua_pushcfunction(co, luaWarn);
@@ -1681,16 +1684,9 @@
         rawfield(co, idx, "x");
         rawfield(co, idx, "y");
         rawfield(co, idx, "z");
-        if (
-            C.lua_type(co, -3) === C.LUA_TNUMBER &&
-            C.lua_type(co, -2) === C.LUA_TNUMBER
-        ) {
-            var axes = [
-                num(C.lua_tonumber(co, -3)),
-                num(C.lua_tonumber(co, -2))
-            ];
-            if (C.lua_type(co, -1) === C.LUA_TNUMBER)
-                axes.push(num(C.lua_tonumber(co, -1)));
+        if (isCoord(co, -3) && isCoord(co, -2)) {
+            var axes = [coord(co, -3), coord(co, -2)];
+            if (isCoord(co, -1)) axes.push(coord(co, -1));
             C.lua_pop(co, 3);
             if (
                 axes.some(function (v) {
@@ -1721,6 +1717,13 @@
                 C.lua_pop(co, 1);
                 if (point.error)
                     return { error: "in the list, " + point.error };
+                // A list of lists is not a Desmos value. The only table a list may hold is a
+                // point, and an empty one is a list - so it is refused here rather than written
+                // down as latex Desmos would read as something else entirely.
+                if (point.latex.indexOf("\\left(") !== 0)
+                    return {
+                        error: "a list cannot hold a list, only numbers or points"
+                    };
                 parts.push(point.latex);
             } else {
                 C.lua_pop(co, 1);
@@ -1732,9 +1735,44 @@
                 };
             }
         }
-        if (!parts.length)
-            return { error: "an empty table has nothing to become" };
+        // An empty table is an empty list, which is a value Desmos has. A table with keys in
+        // it that got this far is not: it held something none of the above knew what to do
+        // with, and calling that an empty list would be writing down a value nobody asked for.
+        if (!parts.length) {
+            if (bare(co, idx)) return { latex: "\\left[\\right]" };
+            return {
+                error: "this table has nothing a Desmos value could be made of"
+            };
+        }
         return { latex: "\\left[" + parts.join(",") + "\\right]" };
+    }
+
+    /**
+     * Is the value at `idx` something a coordinate can be made of, and what is it worth?
+     *
+     * A number, or - inside an action body - a latex fragment, which is how `point(n, 2)` works
+     * where `n` is the action's own argument and nobody has a number for it yet. The two are
+     * apart from each other so that `{x = "no"}` is a point with a bad coordinate rather than
+     * something that falls through to the list below and is reported as neither.
+     */
+    function isCoord(co, idx) {
+        if (C.lua_type(co, idx) === C.LUA_TNUMBER) return true;
+        return !!(lua.actions && lua.actions.isLatex(co, idx));
+    }
+
+    function coord(co, idx) {
+        if (C.lua_type(co, idx) === C.LUA_TNUMBER)
+            return num(C.lua_tonumber(co, idx));
+        return lua.actions.latexOf(co, idx);
+    }
+
+    /** Is this table empty - no array part and no keys at all? */
+    function bare(co, idx) {
+        var at = C.lua_absindex(co, idx);
+        C.lua_pushnil(co);
+        if (!C.lua_next(co, at)) return true;
+        C.lua_pop(co, 2);
+        return false;
     }
 
     /** `t.name` without metamethods, pushed. `idx` may be relative; it is resolved first. */
@@ -1844,6 +1882,43 @@
 
     function finish() {
         current = null;
+    }
+
+    /**
+     * `point(1, 2)`, which is `\left(1,2\right)` on the graph - and `point(1, 2, 3)` in the 3D
+     * calculator.
+     *
+     * It hands back the table a point already is, `{x = 1, y = 2}`, rather than a value of its
+     * own: that is the spelling toDesmos reads and the spelling a point read *off* the graph
+     * arrives in, so `point(1, 2).x` is 1 and a point can be taken apart and put back together
+     * without either end knowing which door it came through. What this adds is the name, the
+     * arity check, and saying which coordinate is wrong where one is.
+     */
+    function luaPoint(co) {
+        var n = C.lua_gettop(co);
+        if (n !== 2 && n !== 3)
+            return fail(
+                co,
+                "point takes two coordinates, or three in the 3D calculator - not " +
+                    n
+            );
+
+        for (var i = 1; i <= n; i++)
+            if (!isCoord(co, i))
+                return fail(
+                    co,
+                    'point needs a number for "' +
+                        COORDS[i - 1] +
+                        '", not a ' +
+                        luaType(co, i)
+                );
+
+        C.lua_createtable(co, 0, n);
+        for (var j = 1; j <= n; j++) {
+            C.lua_pushvalue(co, j);
+            C.lua_setfield(co, -2, to_luastring(COORDS[j - 1]));
+        }
+        return 1;
     }
 
     /** print() and warn(), straight to the console. The row has nowhere to show them. */
