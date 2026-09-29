@@ -87,6 +87,13 @@
     var sites = new Map();
 
     /**
+     * Desmos name -> the cell whose export publishes it, for the names no item defines.
+     * Rebuilt with the definitions index, and read by announce(): a cell that brings a name
+     * into being is the one cell that must not be re-run for it having appeared.
+     */
+    var owners = new Map();
+
+    /**
      * Our graph observer. Desmos' unobserveEvent takes an event name and not a callback, so an
      * un-namespaced "change" would take every other extension's observer down with it -
      * extensions/desmosMd watches the same event, and unnamespaced.
@@ -243,6 +250,7 @@
 
                 if (lua.builtins) lua.builtins.init(calc);
                 if (lua.bridge) lua.bridge.init(calc);
+                if (lua.items) lua.items.init(calc);
                 if (lua.actions) lua.actions.init(calc);
                 if (lua.editor) lua.editor.init(calc);
 
@@ -340,6 +348,42 @@
                 return sites.get(canonical(name)) || null;
             },
 
+            /** Every item on the graph, live. items.js walks this to find one. */
+            itemList: items,
+
+            /**
+             * Set one property of a real item - a colour, a label, the latex itself. This is
+             * items.js's write path, and the one place this extension changes something of
+             * Desmos' that is saved with the graph.
+             *
+             * Two ways of doing it, and items.js says which. `setExpression` is the door, with
+             * the echo guard up so the `change` it fires is the one scan() is certain not to
+             * see - but it takes a fixed list of properties and drops anything else without a
+             * word. `direct` is for the rest: the item model is what `getState()` is built
+             * from, so writing the field there is saved with the graph and survives a state
+             * round trip, and reparse() is what makes the row and the graph paper catch up.
+             *
+             * An undefined value takes the property off the item, which is how a `cdf` or a
+             * `clickableInfo` is turned off at all.
+             */
+            setItem: function (id, name, value, direct) {
+                if (direct) {
+                    var model = Calc.controller.getItemModel(id);
+                    if (!model) throw new Error("there is no item " + id);
+                    if (value === undefined) delete model[name];
+                    else model[name] = value;
+                    reparse();
+                    return;
+                }
+
+                var spec = { id: id };
+                spec[name] = value;
+                setExpression(spec);
+                if (name !== "latex" && name !== "text") return;
+                rescan();
+                reparse();
+            },
+
             /**
              * Hold a new value for a Lua-owned name - one with no item behind it - by rewriting
              * the export that publishes it. One statement per name either way, so Desmos' own
@@ -387,6 +431,11 @@
             parsing = null;
             var controller = Calc.controller;
             try {
+                // The exports have moved, and half the definitions index is built out of them -
+                // so it is rebuilt here as well as in scan(). Without this `Desmos.v = 5` in one
+                // cell stayed invisible to the next until some unrelated change to the graph
+                // happened to run the scan.
+                index(items());
                 if (typeof controller.updateTheComputedWorld === "function")
                     controller.updateTheComputedWorld();
                 controller.requestParseForAllItems();
@@ -450,6 +499,10 @@
      */
     function scan() {
         if (writing) return;
+
+        // A graph load is a graph change and nothing else announces one, so this is where a
+        // helper Desmos threw away gets watched again. See bridge.resync().
+        if (lua.bridge && lua.bridge.resync) lua.bridge.resync();
 
         var list = items();
         var seen = new Set();
@@ -527,6 +580,9 @@
         });
 
         index(list);
+        // A colour or a label is not a value, so no helper ever hears about one moving. This
+        // event is the only word there is, and items.js is what turns it into a re-run.
+        if (lua.items) lua.items.changed();
         paint();
         if (fresh.length) wake(fresh);
     }
@@ -560,9 +616,12 @@
     function index(list) {
         if (!lua.bridge) return;
         var defs = lua.bridge.defs;
+        var was = new Map(defs);
+        var wasOwners = new Map(owners);
         defs.clear();
 
         sites.clear();
+        owners.clear();
 
         list.forEach(function (item) {
             if (!item) return;
@@ -581,11 +640,11 @@
         cells.forEach(function (cell) {
             cell.exports.forEach(function (spec) {
                 // No id: an export is a statement, so there is no latex of Desmos' behind it.
-                mark(spec.latex, null);
+                mark(spec.latex, null, cell);
             });
         });
 
-        function mark(latex, id) {
+        function mark(latex, id, cell) {
             var text = String(latex == null ? "" : latex);
             var m = DEFINE.exec(text);
             if (!m) return;
@@ -607,7 +666,43 @@
                       : "value"
             );
             if (id) sites.set(name, id);
+            else if (cell) owners.set(name, cell);
         }
+
+        announce(was, wasOwners);
+    }
+
+    /**
+     * A name that has appeared, gone, or changed kind is news to every cell that read it.
+     *
+     * A read files its name whether or not anything defines it - that is what bridge.envIndex
+     * records a dependency for before it has anything to answer with - and this is the other
+     * half of that bargain: `Desmos.v = 5` in one cell makes `v` real, and the cell next door
+     * that read it as nil a moment ago is asked to have another go.
+     *
+     * Only a change in *kind*. What a name is currently worth is the helpers' business, and
+     * re-running on every reindex would be a re-run on every keystroke.
+     */
+    function announce(was, wasOwners) {
+        if (!lua.bridge.onInvalidate) return;
+        var defs = lua.bridge.defs;
+
+        var moved = [];
+        defs.forEach(function (kind, name) {
+            if (was.get(name) !== kind) moved.push(name);
+        });
+        was.forEach(function (kind, name) {
+            if (!defs.has(name)) moved.push(name);
+        });
+
+        moved.forEach(function (name) {
+            // The cell whose export moved is skipped, the same way runner.invalidate skips the
+            // cell whose write moved a value: `spin = (spin or 0) + 1` reads a name it also
+            // publishes, and without this the publishing would re-run it for ever. A name an
+            // item defines has no cell behind it, and nothing is skipped.
+            var from = owners.get(name) || wasOwners.get(name) || null;
+            lua.bridge.onInvalidate(name, from);
+        });
     }
 
     /**

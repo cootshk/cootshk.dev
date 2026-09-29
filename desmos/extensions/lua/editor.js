@@ -883,6 +883,11 @@
                 "Desmos.sample",
                 'Desmos.sample("g", f, 0, 10, 200)',
                 "Plot a Lua function as sampled points."
+            ],
+            [
+                "Desmos.items",
+                'Desmos.items.P.color = "#aabbcc"',
+                "The sheet's items, by name, by id or by position."
             ]
         ];
 

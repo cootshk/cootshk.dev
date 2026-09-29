@@ -148,8 +148,18 @@ cell's `base`, and changing it re-runs the reader.
 
 ```lua
 Desmos.get("\\sin(2)")
-Desmos.get("\\left(P\\right).x")   -- a point's components; see Limits
+Desmos.get("\\operatorname{mean}\\left(L\\right)")
 ```
+
+A point comes back as `{x = 1, y = 2}` and a list of points as a list of those, which is the
+same spelling a write takes - so `Desmos.q = Q` puts back what it read. In the 3D calculator a
+point has a `z` as well.
+
+Everything else Desmos writes down as numbers comes back as the numbers it is made of, nested
+the way it is nested. A polygon is its list of points; a colour is its three numbers and a list
+of colours is a list of those; a tone is two. Only the types made of _coordinates_ - points,
+polygons, vectors, segments and triangles - turn their numbers into points, because an rgb
+colour has three numbers too and calling it a point would be a guess at what it means.
 
 ### Calling a function the graph defines
 
@@ -456,6 +466,149 @@ be plotted. It is N points with straight lines between them: no derivative, wron
 discontinuity, and nothing outside the range you gave. That is the honest shape of a Lua
 function on a Desmos graph.
 
+## Items
+
+Reading a name gives you its _value_. `Desmos.items` gives you the item.
+
+```lua
+local myPolygon = Desmos.items.G
+myPolygon.color = "#aabbcc"
+myPolygon.lineStyle = "dashed"
+
+Desmos.items.P.label = "this is a label!"
+Desmos.items.P.showLabel = true
+```
+
+An item is found three ways: by the name it defines (`Desmos.items.G`), by its id
+(`Desmos.items["17"]`), or by where it sits on the sheet (`Desmos.items[1]`, and `#Desmos.items`
+for how many there are, so `ipairs` walks the graph). The name is tried first, because a name is
+what a graph is written in; an id is what is left for the things that define no name, which is
+most of what is worth styling - `y=x^{2}`, a circle, an image, a folder.
+
+A handle is the same table every time, so `Desmos.items.P == Desmos.items.P` and one can be kept
+in a local across a run.
+
+Why not the value itself? Because most items have no value to hang it off. A number cannot carry
+a metatable in Lua, `f(x)=x^{2}` is a function and neither can that, and `x^{2}+y^{2}=1` has no
+name at all. The item is a second thing, and it is reached separately.
+
+### What an item has
+
+The property names are the **saved graph's** - what `getState()` calls them, nested where it
+nests them. The _set_ comes from DesModder's text mode `@{ }` schema, which is the most complete
+list of what a Desmos item is made of; the spellings do not, because text mode groups by what
+reads well (`points: @{ size: ... }`) and this groups by what the state actually is
+(`pointSize`).
+
+|                    |                                                                                                                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| what it is         | `id`, `type`, `folderId`, `index`, `defines` - all read-only                                                                                                             |
+| any item           | `hidden`, `secret`                                                                                                                                                       |
+| an expression      | `latex`, `color`, `colorLatex`, `points`, `pointOpacity`, `pointSize`, `pointStyle`, `dragMode`, `lines`, `lineOpacity`, `lineWidth`, `lineStyle`, `fill`, `fillOpacity` |
+| its label          | `label`, `showLabel`, `labelSize`, `labelOrientation`, `labelAngle`, `suppressTextOutline`, `interactiveLabel`, `editableLabelMode`                                      |
+| and the rest of it | `displayEvaluationAsFraction`, `residualVariable`, `isLogModeRegression`                                                                                                 |
+| a note             | `text`                                                                                                                                                                   |
+| a folder           | `title`, `collapsed`                                                                                                                                                     |
+| an image           | `image_url`, `name`, `width`, `height`, `center`, `angle`, `opacity`, `foreground`, `draggable`                                                                          |
+| nested             | `slider`, `parametricDomain`, `polarDomain`, `parametricDomain3Du`/`3Dv`/`3Dr`/`3Dphi`, `cdf`, `clickableInfo`, `vizProps`                                               |
+
+`defines` is the Desmos name the item defines, as Lua spells it - `W` for `W=7`, nil for
+`x^{2}+y^{2}=1`. `index` counts from 1.
+
+The nested ones are handles too:
+
+```lua
+local n = Desmos.items.N
+n.slider.min = -5
+n.slider.max = 25
+n.slider.isPlaying = true
+
+n.cdf = { show = true, min = 1, max = 2 }   -- or all at once
+n.cdf = nil                                  -- and nil takes it off
+```
+
+- `slider`: `min`, `max`, `step`, `hardMin`, `hardMax`, `isPlaying`, `loopMode`,
+  `animationPeriod`, `playDirection`
+- every domain: `min`, `max`
+- `cdf`: `show`, `min`, `max`
+- `clickableInfo`: `enabled`, `description`, `latex`, `hoveredImage`, `depressedImage`
+- `vizProps`: `breadth`, `axisOffset`, `alignedAxis`, `showBoxplotOutliers`, `dotplotXMode`,
+  `binAlignment`, `histogramMode`
+
+Left out: `glesmos`, `errorHidden` and `pinned`, which text mode also takes. Those are
+DesModder's own, kept in an expression of its own rather than on the item, so setting one here
+would mean nothing.
+
+### Reading, and what a read costs
+
+An unset property is `nil`, not the empty string the model holds - so `item.lineWidth or 2.5`
+reaches its fallback. A width or a bound comes back as a **number** when that is what it is and
+as the latex string when it is not: `2` for `2`, `"2a"` for `2a`.
+
+A read is a dependency, the same as reading a value. A cell that read a colour is re-run when
+that colour moves, whoever moved it - which needs saying, because nothing else would notice: a
+style is not a value, so the evaluator never publishes one and no helper ever hears about it.
+The graph's `change` event is the only word there is, and that is what `items.changed()` is
+listening for.
+
+### Writing, and what a write costs
+
+Setting a property is **not** an export. Everything else this extension puts on the graph is a
+statement that vanishes when the cell stops saying it; a colour is a property of somebody's real
+item, so it is saved with the graph and it stays when the cell is deleted.
+
+A write that would change nothing is not made at all. That matters more than it sounds: a cell
+re-runs whenever anything it reads moves, and a cell that asserts a style does nothing on almost
+every one of those runs.
+
+Colours take `"#aabbcc"`, any CSS colour, or one of Desmos' own by name - `"red"` is
+`#c74440`. Enums are matched without regard to case and stored the way Desmos spells them, which
+is not consistent and is not ours to tidy: `pointStyle` is `OPEN` and `labelOrientation` is
+`above`. Where Desmos publishes an object for exactly one of them - `Desmos.DragModes`,
+`Desmos.LabelOrientations` - its values are accepted as well as the ones written down, so a
+value Desmos has added since is not refused for being new.
+
+Setting a property Desmos does not have is an **error**, unlike reading one:
+
+```
+an item has no "colour". Did you mean "color"?
+cannot set "pointStyle": "round" is not one of POINT, OPEN, CROSS, SOLID, ...
+```
+
+It has to be. `setExpression` drops a property it does not recognise without a word, so a typo
+that got through would look exactly like a line that did nothing.
+
+### Two ways of writing
+
+`Calc.setExpression` is the door, and it takes a fixed list: `color`, `hidden`, `latex`,
+`label`, `pointSize`, `sliderBounds`, `parametricDomain` and about twenty more. Anything else it
+is handed it silently ignores.
+
+The rest is written onto the **item model**, which is what `getState()` is built from - so it is
+saved with the graph and survives a state round trip, and `reparse()` is what makes the row and
+the graph paper catch up. Which is which was measured against the live bundle rather than
+guessed, and is marked property by property in `items.js`. The difference to a cell is that a
+model write is not an undo step.
+
+Numbers are written down as latex either way. A width, an opacity and a bound are all latex as
+far as Desmos is concerned, and handing its parser a JavaScript number throws; `setExpression`
+spells one for us and the model has nobody to do it, so `items.js` does it for both. The two
+real numbers are `slider.animationPeriod`, in milliseconds, and `slider.playDirection`.
+
+### An action cannot set one
+
+```lua
+function Paint() Desmos.items.W.color = "blue" end   -- not an action
+```
+
+An action is something Desmos runs on the graph, and a property of an item is not part of one -
+so a body that sets one has no action to be, and it is not exported as one. It is caught while
+the body is being probed, which is before anything is painted: defining a function must not
+change the graph.
+
+It is still an ordinary Lua function, and calling `Paint()` from a cell body does set the
+colour. What cannot happen is a button on the sheet firing it.
+
 ## Keys
 
 |                      |                                          |
@@ -617,8 +770,10 @@ swapped back.
 
 ## Limits
 
-- Numbers and lists of numbers can be read. A point reads as `NaN`; use
-  `Desmos.get("\\left(P\\right).x")`.
+- Anything the evaluator has numbers for can be read. A name it has no value for at all - a
+  distribution, a name that errors - still reads as `NaN`.
+- A polygon comes back as its points and a colour as its three numbers, so neither goes back as
+  the thing it was: writing one puts a list on the graph, not a polygon.
 - A name the graph defines but the evaluator cannot value reads as `NaN`. A name the graph does
   not define at all reads as `nil`; the two are worth telling apart.
 - A Desmos function called from Lua costs one trip to the evaluator per distinct argument. Pass a
@@ -662,6 +817,21 @@ swapped back.
 - An exported action's plumbing takes names of its own: `L_{uaN}` for the markers and `L_{p0}`,
   `L_{p1}` ... for the parameters. A graph that defines one of those itself has a duplicate
   definition, and Desmos will say so.
+- Setting an item's property is not an export: it changes somebody's real item and is saved with
+  the graph. Stopping a cell withdraws what it defined and leaves what it painted.
+- Half of an item's properties are written onto the model rather than through `setExpression`,
+  because `setExpression` ignores them. Those are not undo steps. Which half was measured
+  against the live bundle, so a Desmos deploy that widens the API leaves this working and
+  slightly out of date rather than broken.
+- Two cells that set the same property to different values re-run each other until the loop
+  guard stops them. A cell that sets one it also reads does not: its own write is not news to
+  it, which is the rule everywhere else here too.
+- `Desmos.items` reaches items, not their innards: a table's columns and a regression's
+  parameters are not exposed, and there is no adding or deleting an item through it.
+  `glesmos`, `errorHidden` and `pinned` are DesModder's own metadata rather than Desmos', so
+  they are not there either.
+- Graph settings and the ticker - the other two things DesModder's text mode hangs `@{ }` off -
+  are not reachable this way. Only items are.
 - Monaco comes from jsDelivr. Without it a cell is a plain textarea - editing, saving and
   running all still work; the colours and the error squiggles do not.
 - One Monaco editor per cell, built when the row appears and disposed when it scrolls away. The
@@ -675,7 +845,7 @@ node desmos/extensions/lua/test.js            # the Lua half, offline
 node desmos/extensions/lua/patches.test.js    # do the + menu patches still match?
 ```
 
-`test.js` runs index.js, builtins.js, bridge.js, actions.js and runner.js against the real VM out of
+`test.js` runs index.js, builtins.js, bridge.js, items.js, actions.js and runner.js against the real VM out of
 `cdn/fengari-web.js` and a stub `Calc` that reports values on a timer - so the pause-and-resume
 path is exercised rather than assumed. No browser, nothing to install.
 
@@ -692,6 +862,7 @@ interactive version, and where to go when this says something has moved.
 | `index.js`    | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
 | `builtins.js` | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
 | `bridge.js`   | the environment a cell runs in, reading the graph, and writing to it                       |
+| `items.js`    | items as objects: `Desmos.items`, what an item has, and keeping a cell up to date with it  |
 | `actions.js`  | actions both ways - recording a body, the markers, and applying updates                    |
 | `runner.js`   | when a cell runs, the loop watchdog, and errors                                            |
 | `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |

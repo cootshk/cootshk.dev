@@ -67,6 +67,34 @@
     var helpers = new Map();
 
     /**
+     * A HelperExpression has two channels and both of them are numeric: `numericValue`, and
+     * `listValue` for a list of numbers. Anything else has nowhere to arrive.
+     *
+     * Desmos squeezes what it can down the list channel - a point comes through as its two
+     * coordinates, an rgb colour as its three, a tone as its two - but a *list* of any of those
+     * fits neither channel, and nor does a polygon. Those all used to reach Lua as the NaN
+     * `numericValue` was left holding, and they are read off the model instead. See valueOf().
+     *
+     * The table below is the one thing the shape of the value cannot tell us: which types are
+     * made of *coordinates*, so that `[1, 2]` inside one is a point rather than a pair of
+     * numbers. An rgb colour is three numbers and a tone is two, and calling either a point
+     * would be a guess at what it means - so they keep their shape, and only these do not.
+     * The names are Desmos' own `expression_type`.
+     */
+    var POINTED = {};
+    (
+        "SINGLE_POINT POINT_LIST POINT3D POINT3D_LIST POLYGON " +
+        "VECTOR2D VECTOR3D SEGMENT3D TRIANGLE3D"
+    )
+        .split(" ")
+        .forEach(function (name) {
+            POINTED[name] = true;
+        });
+
+    /** A point's coordinates, in order, as Desmos spells them. */
+    var COORDS = ["x", "y", "z"];
+
+    /**
      * Past this many live helpers the oldest unparked ones are let go. Reachable now that a call
      * is keyed by its argument: `f(1)` and `f(2)` are two different latexes to watch.
      */
@@ -77,6 +105,12 @@
 
     /** Bumped on every read, so the least recently used helper is the one to drop. */
     var clock = 0;
+
+    /** Whether listen() has managed to subscribe yet. One subscription for the page. */
+    var listening = false;
+
+    /** Whether a re-read is already queued for the end of this dispatch. See recheck(). */
+    var pending = false;
 
     /**
      * Desmos latex name -> "value" | "function". Filled by ./index.js on every graph change from
@@ -99,6 +133,9 @@
         names: names,
         defs: defs,
 
+        /** ./index.js calls this on every graph change; see resync(). */
+        resync: resync,
+
         /** Why something failed, in words. runner.js and actions.js both report errors. */
         describe: describe,
 
@@ -106,6 +143,9 @@
         toDesmos: toDesmos,
         num: num,
         toLatex: toLatex,
+
+        /** The other way, for items.js and the editor's completion list. */
+        toName: toName,
         current: function () {
             return current;
         },
@@ -118,6 +158,7 @@
 
     function init(calc) {
         Calc = calc;
+        listen();
 
         if (typeof Calc.HelperExpression !== "function")
             console.warn(
@@ -588,6 +629,7 @@
         var e = helpers.get(latex);
         if (e) {
             e.used = ++clock;
+            if (dead(e)) regraft(e);
             return e;
         }
         if (helpers.size >= HELPER_CAP) evict();
@@ -605,20 +647,83 @@
             waiting: [],
             writer: null,
             latex: latex,
-            used: ++clock
+            used: ++clock,
+            // Filled in by modelOf() and valueOf(): the id Desmos filed this helper's model
+            // under, and the typed constant its value was last built out of.
+            id: null,
+            typed: null
+        };
+        e.take = function () {
+            settle(e, valueOf(e));
         };
         // Only cached once it exists. Cached first, a HelperExpression that threw would leave an
         // entry behind that is never ready and never will be - so the next read of that latex
         // finds it, parks on it, and waits for a value nothing is going to report.
-        e.h = Calc.HelperExpression({ latex: latex });
+        graft(e);
         helpers.set(latex, e);
-
-        var take = function () {
-            settle(e, valueOf(e.h));
-        };
-        e.h.observe("numericValue", take);
-        e.h.observe("listValue", take);
         return e;
+    }
+
+    /** Watch `e`'s latex: one HelperExpression, both of its channels reporting to e.take. */
+    function graft(e) {
+        e.id = null;
+        e.h = Calc.HelperExpression({ latex: e.latex });
+        e.h.observe("numericValue", e.take);
+        e.h.observe("listValue", e.take);
+    }
+
+    /**
+     * Has Desmos thrown this helper away? `isActive` is its own word for it, and it goes false
+     * when the evaluator is emptied out from under us - a setState, a setBlank, an undo past a
+     * graph load. Nothing says so at the time: the proxy keeps the last number it was told and
+     * simply never reports again, so a cell that read `a` before the load goes on being right
+     * about the graph that is gone.
+     *
+     * A build without the property answers undefined, which is not false - so the old
+     * behaviour, rather than a helper rebuilt on every read.
+     */
+    function dead(e) {
+        return !!e.h && e.h.isActive === false;
+    }
+
+    /**
+     * Watch the latex again, on a helper Desmos has let go.
+     *
+     * The *entry* is kept rather than replaced, which is the whole point of doing it this way:
+     * a cell parked on this latex is parked on this object, and `value` has to stay too, so the
+     * report that follows is read as the change it is. That is what re-runs the cells still
+     * holding the old graph's answer - settle() does it on its own, because to it this is a
+     * value that moved.
+     */
+    function regraft(e) {
+        release(e.h);
+        // A write we were about to hear back about belongs to the graph that is gone, and so
+        // does the typed constant the old model was holding.
+        e.writer = null;
+        e.typed = null;
+        graft(e);
+    }
+
+    /**
+     * Rewatch everything Desmos has let go of. Called on every graph change, because a load is
+     * a graph change and nothing else announces one.
+     *
+     * The sweep is what covers a latex nobody reads again: a cell that has already run is not
+     * going to ask for `a` a second time by itself, so waiting for the next read would leave it
+     * showing the old graph's numbers until something else happened to disturb it.
+     */
+    function resync() {
+        helpers.forEach(function (e) {
+            if (!dead(e)) return;
+            try {
+                regraft(e);
+            } catch (error) {
+                console.warn(
+                    "desmos: couldn't watch " + e.latex + " again",
+                    error
+                );
+            }
+        });
     }
 
     /**
@@ -641,26 +746,191 @@
 
         loose.slice(0, EVICT).forEach(function (e) {
             helpers.delete(e.latex);
-            try {
-                if (e.h && e.h.unobserveAll) e.h.unobserveAll();
-                var models = Calc.controller.listModel.__helperIdToModel;
-                for (var id in models)
-                    if (models[id] && models[id].proxy === e.h) {
-                        delete models[id];
-                        break;
-                    }
-            } catch (error) {
-                // Our reference is gone, which is the part that was leaking.
-            }
+            release(e.h);
         });
     }
 
-    /** What a HelperExpression is currently worth: a list if it has one, else a number. */
-    function valueOf(h) {
-        var list = h.listValue;
+    /** Let one HelperExpression go: our observers, and Desmos' own reference to its model. */
+    function release(h) {
+        try {
+            if (h && h.unobserveAll) h.unobserveAll();
+            var models = Calc.controller.listModel.__helperIdToModel;
+            for (var id in models)
+                if (models[id] && models[id].proxy === h) {
+                    delete models[id];
+                    break;
+                }
+        } catch (error) {
+            // Our reference is gone, which is the part that was leaking.
+        }
+    }
+
+    /**
+     * The model behind a helper, which is where everything the two numeric channels cannot
+     * carry is written down: `expression_type` says what kind of thing the latex is worth, and
+     * `typed_constant_value` holds the value itself.
+     *
+     * Reaching past the API, the same way evict() does and for the same reason - the add files
+     * the model in listModel.__helperIdToModel under an id we were never told, so it is found
+     * by matching the proxy we were handed. The id is kept once found; the model under it is
+     * looked up again every time, because a re-parse replaces the object.
+     */
+    function modelOf(e) {
+        try {
+            var models = Calc.controller.listModel.__helperIdToModel;
+            if (e.id !== null) {
+                var known = models[e.id];
+                return known && known.proxy === e.h ? known : null;
+            }
+            for (var id in models)
+                if (models[id] && models[id].proxy === e.h) {
+                    e.id = id;
+                    return models[id];
+                }
+        } catch (error) {
+            // A build that moved it: points read as NaN again, and nothing else changes.
+        }
+        return null;
+    }
+
+    /**
+     * What a helper is currently worth: a number, a point, or a list - of numbers, of points,
+     * of whatever the thing below turns out to be made of.
+     *
+     * The model has the first word on anything made of **coordinates**, because a point arrives
+     * down the list channel as its two numbers and `\left(1,2\right)` is indistinguishable
+     * from `\left[1,2\right]` there. Then the two channels, which are right about a number
+     * and about a list of numbers and are the cheap answer for both. What is left is everything
+     * neither channel can carry - a list of points, a polygon, a list of colours - and that
+     * comes off the model too.
+     */
+    function valueOf(e) {
+        var formula = (modelOf(e) || {}).formula;
+        var typed = (formula && formula.typed_constant_value) || null;
+
+        // What we last built a value out of. published() compares against it to find the
+        // helpers that moved without saying so.
+        e.typed = typed;
+
+        if (typed && POINTED[formula.expression_type] === true)
+            return shaped(typed.value, true);
+
+        var list = e.h.listValue;
         if (list && typeof list.length === "number")
             return Array.prototype.slice.call(list);
-        return h.numericValue;
+
+        var number = e.h.numericValue;
+        if (typeof number === "number" && !Number.isNaN(number)) return number;
+
+        if (typed) {
+            var value = shaped(typed.value, false);
+            if (value !== undefined) return value;
+        }
+        return number;
+    }
+
+    /**
+     * A value Desmos has written down as numbers, as the Lua one it stands for: numbers stay
+     * numbers, an array becomes a list, and all the way down.
+     *
+     * `pointed` says the numbers in this value are coordinates, so the innermost run of them is
+     * a point - which is what makes a polygon a list of points and a list of points a list of
+     * points, off the same two lines. Undefined for anything that is not numbers and arrays at
+     * all: an action is the one that reaches here, and it is not a value.
+     */
+    function shaped(value, pointed) {
+        if (typeof value === "number") return value;
+        if (!Array.isArray(value)) return undefined;
+        if (pointed && value.length && value.every(isNumber))
+            return point(value);
+
+        var out = [];
+        for (var i = 0; i < value.length; i++) {
+            var one = shaped(value[i], pointed);
+            if (one === undefined) return undefined;
+            out.push(one);
+        }
+        return out;
+    }
+
+    function isNumber(v) {
+        return typeof v === "number";
+    }
+
+    /** `[1, 2]` -> `{ x = 1, y = 2 }`, which is the point toDesmos already knows how to write. */
+    function point(coordinates) {
+        var out = {};
+        for (var i = 0; i < COORDS.length && i < coordinates.length; i++)
+            out[COORDS[i]] = coordinates[i];
+        return out;
+    }
+
+    /**
+     * The graph has been recomputed: re-read every helper whose value moved without the proxy
+     * saying so.
+     *
+     * A HelperExpression only notifies when `numericValue` or `listValue` moves, so for
+     * everything they cannot carry the first report is the only one it will ever make - the
+     * graph could move a polygon afterwards and no cell that read it would hear about it.
+     * Desmos rebuilds `typed_constant_value` whenever the evaluator publishes for an item, so
+     * its identity is the cheap test for "this one has been recomputed"; settle() still has the
+     * last word on whether the value actually differs.
+     */
+    function published() {
+        pending = false;
+        helpers.forEach(function (e) {
+            var formula = (modelOf(e) || {}).formula;
+            var typed = (formula && formula.typed_constant_value) || null;
+            if (typed !== e.typed) e.take();
+        });
+    }
+
+    /**
+     * published(), once this dispatch is over.
+     *
+     * A subscriber runs *inside* the dispatch, and settling a helper resumes whatever cell was
+     * parked on it - so reading the graph here would run Lua in the middle of one, and the
+     * first export it made would dispatch inside a dispatch. Desmos queues its own helper
+     * notifications rather than making them on the spot for exactly that reason, and this is
+     * the same queue.
+     *
+     * Coalesced, because one recompute is several subscription calls.
+     */
+    function recheck() {
+        if (pending) return;
+        pending = true;
+
+        try {
+            if (typeof Calc.controller.runAfterDispatch === "function") {
+                Calc.controller.runAfterDispatch(published);
+                return;
+            }
+        } catch (error) {
+            // A build that moved it; a microtask is out of the dispatch too, just later.
+        }
+        Promise.resolve().then(published);
+    }
+
+    /**
+     * Ask to be told when the graph is recomputed.
+     *
+     * Not the `change` event ./index.js watches: Desmos decides deliberately that an evaluator
+     * result is not a change (see nJ in the bundle), and an evaluator result is exactly when a
+     * value moves - a slider dragged, a ticker running, an action fired. `subscribeToChanges`
+     * is the controller's own subscription and fires for all of it, with the models already
+     * rebuilt by the time it runs.
+     */
+    function listen() {
+        if (listening) return;
+        try {
+            if (typeof Calc.controller.subscribeToChanges !== "function")
+                return;
+            Calc.controller.subscribeToChanges(recheck);
+            listening = true;
+        } catch (error) {
+            // A build that moved it. Everything still reads right the first time; what is lost
+            // is the re-read, so a polygon that moves goes unnoticed until something else asks.
+        }
     }
 
     /**
@@ -714,6 +984,11 @@
                 if (!same(a[i], b[i])) return false;
             return true;
         }
+        // A point, `{ x, y }` - compared coordinate by coordinate for the same reason a list is.
+        if (isPoint(a) && isPoint(b))
+            return COORDS.every(function (axis) {
+                return same(a[axis], b[axis]);
+            });
         // NaN is the ordinary state of an undefined name, so it has to compare equal to
         // itself here or every frame would look like a change.
         if (typeof a === "number" && typeof b === "number")
@@ -721,10 +996,25 @@
         return a === b;
     }
 
-    /** A JS value onto a Lua stack. Numbers, lists of numbers, and nothing else yet. */
+    /** One of point()'s tables, rather than a list or a number. */
+    function isPoint(v) {
+        return !!v && typeof v === "object" && typeof v.x === "number";
+    }
+
+    /** A JS value onto a Lua stack. Numbers, points, lists of either, and nothing else yet. */
     function pushValue(co, v) {
         if (typeof v === "number") {
             C.lua_pushnumber(co, v);
+            return;
+        }
+        // A point is `{ x = 1, y = 2 }`, which is the spelling toDesmos reads back.
+        if (isPoint(v)) {
+            C.lua_createtable(co, 0, COORDS.length);
+            COORDS.forEach(function (axis) {
+                if (typeof v[axis] !== "number") return;
+                C.lua_pushnumber(co, v[axis]);
+                C.lua_setfield(co, -2, to_luastring(axis));
+            });
             return;
         }
         if (Array.isArray(v)) {
@@ -909,6 +1199,13 @@
         C.lua_pushcfunction(co, desmosSample);
         C.lua_setfield(co, -2, to_luastring("sample"));
 
+        // The sheet itself, as objects. A value has no colour and a number cannot carry a
+        // metatable, so an item is a second thing to reach for; see ./items.js.
+        if (lua.items) {
+            lua.items.push(co);
+            C.lua_setfield(co, -2, to_luastring("items"));
+        }
+
         C.lua_createtable(co, 0, 3);
         C.lua_pushcfunction(co, envIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
@@ -1077,21 +1374,31 @@
             };
         if (t !== C.LUA_TTABLE) return { error: "it is a " + luaType(co, idx) };
 
-        // A point, {x = 1, y = 2}.
+        // A point: `{x = 1, y = 2}`, and `{x, y, z}` in the 3D calculator. The `z` is written
+        // down when it is there, so a point read off the graph goes back as the point it was.
         C.lua_getfield(co, idx, to_luastring("x"));
         C.lua_getfield(co, idx, to_luastring("y"));
+        C.lua_getfield(co, idx, to_luastring("z"));
         if (
-            C.lua_type(co, -2) === C.LUA_TNUMBER &&
-            C.lua_type(co, -1) === C.LUA_TNUMBER
+            C.lua_type(co, -3) === C.LUA_TNUMBER &&
+            C.lua_type(co, -2) === C.LUA_TNUMBER
         ) {
-            var px = num(C.lua_tonumber(co, -2));
-            var py = num(C.lua_tonumber(co, -1));
-            C.lua_pop(co, 2);
-            if (px === null || py === null)
-                return { error: "a point needs two numbers" };
-            return { latex: "\\left(" + px + "," + py + "\\right)" };
+            var axes = [
+                num(C.lua_tonumber(co, -3)),
+                num(C.lua_tonumber(co, -2))
+            ];
+            if (C.lua_type(co, -1) === C.LUA_TNUMBER)
+                axes.push(num(C.lua_tonumber(co, -1)));
+            C.lua_pop(co, 3);
+            if (
+                axes.some(function (v) {
+                    return v === null;
+                })
+            )
+                return { error: "a point needs numbers for its coordinates" };
+            return { latex: "\\left(" + axes.join(",") + "\\right)" };
         }
-        C.lua_pop(co, 2);
+        C.lua_pop(co, 3);
 
         // A list. Numbers or points, not a mix and not nested.
         var n = C.lua_rawlen(co, idx);

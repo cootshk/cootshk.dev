@@ -43,6 +43,7 @@
                 "index.js",
                 "builtins.js",
                 "bridge.js",
+                "items.js",
                 "actions.js",
                 "runner.js",
                 "editor.js"
