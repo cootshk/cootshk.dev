@@ -15,9 +15,9 @@ Three times, and no others:
 **Not when you edit it.** Typing is not a request to execute, and running on every keystroke would
 run a dozen half-written versions of a line. `Ctrl`/`Cmd`+`Enter` or the › is how you say so.
 
-The one thing that does not run at load is a cell asking for `unsafe`, which is handed the page
-itself - see _What a cell can reach_. Everything else on a graph you have just opened runs, which
-means opening somebody else's graph runs their Lua.
+Every cell, with nothing held back: opening somebody else's graph runs their Lua. That is only
+tolerable because of what a cell can reach, which is the graph and nothing else - see _What a
+cell can reach_.
 
 ## A cell
 
@@ -26,16 +26,6 @@ verbatim. That is why it survives saving, undo, version history, `.dcg` files an
 without this extension teaching Desmos a new item type - and why, with the extension off, you
 still see your Lua rather than losing it. The note's text _is_ the chunk: nothing is reassembled
 and nothing is escaped, so Lua's line 3 is the editor's line 3.
-
-An optional first line names pragmas, and there is one pragma - `unsafe`:
-
-```lua
---!lua unsafe
-Desmos.k = a * 2
-```
-
-It is read and then left exactly where it is. `--!lua` is a Lua comment, so the compiler ignores
-it and no line numbers have to be adjusted.
 
 Desmos has no typed-word conversions of its own - `table` is not one either, whatever the
 folklore says - so the `lua` trigger is this extension's. It fires the moment an expression's
@@ -839,22 +829,21 @@ nothing would ever re-run.
 Left out: `debug` (it reaches upvalues and the registry, so it escapes any of this), `load`,
 `require`, `dofile` (they build an environment of their own), `io`, `os` and `package`.
 
-`js` - the whole DOM, through fengari's interop - is behind a pragma:
+And `js` - fengari's interop, and through it `js.global`: this page, same-origin, with its
+storage and its session. **It is granted to nothing.** There is no pragma, no flag and no cell
+that gets it. A cell reaches the graph, and that is the whole of it.
 
-```lua
---!lua unsafe
-js.global.console:log("hello")
-```
+There used to be a `--!lua unsafe` pragma that handed it over, and a rule that such a cell waited
+for a click rather than running when the graph opened. Both are gone. A click is a poor control
+for this: the graph is somebody else's code either way, the button says nothing about what the
+cell will do with the page, and one kind of cell behaving differently from every other kind is a
+sharp edge with nothing on the other side of it. An old graph with `--!lua unsafe` still on line
+one loads fine - it is a Lua comment, and now that is all it is.
 
-That is real: `js.global` is this page, same-origin, with its storage and its session. A cell
-with `unsafe` on it can do anything a script on cootshk.dev can do. So it is the one kind of cell
-that **does not run when the graph opens** - it waits for a click, which is the control that
-matters.
-
-`js` is seeded into the cell's own environment _before_ that environment's metatable goes on, and
-that ordering is the whole of the guarantee. Set afterwards it would go through `__newindex` into
-the shared globals, handing the DOM to every cell on the graph the moment one asked for it.
-`test.js` checks a safe cell next to an unsafe one for exactly that.
+The standard library is seeded into a cell's environment _before_ that environment's metatable
+goes on, which is what keeps it out of the shared globals: set afterwards it would go through
+`__newindex` and be published to every cell on the graph. `test.js` checks that a cell cannot
+reach `js`, `debug` or `load` by name, through `_G`, or by walking `pairs(_G)`.
 
 ## Loops
 

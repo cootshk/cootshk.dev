@@ -12,10 +12,6 @@
 // value it read changes. It does *not* run because it was edited - typing is not a request to
 // execute, and the same keystroke would otherwise run a dozen half-written versions of a line.
 //
-// The one exception to running at load is `--!lua unsafe`, which grants the cell `js` and with it
-// the DOM on this origin. A graph you have just opened is someone else's code, so that pragma
-// keeps needing a deliberate click.
-//
 // Part of extensions/lua; ./index.js registers the object this hangs itself off.
 (function () {
     var lua = window.Extensions.lua;
@@ -229,7 +225,7 @@
             return fail(cell, message);
         }
 
-        lua.bridge.pushEnv(co, cell.pragmas.has("unsafe"));
+        lua.bridge.pushEnv(co);
         C.lua_setupvalue(co, -2, 1);
 
         C.lua_sethook(co, watchdog, C.LUA_MASKCOUNT, BUDGET);

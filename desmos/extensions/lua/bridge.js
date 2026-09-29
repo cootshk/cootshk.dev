@@ -15,6 +15,12 @@
 // and lua_isyieldable is the test; there the read gives nil and the cell is marked stale, to
 // be re-run from the top once the value lands.
 //
+// A cell reaches the graph and nothing else. What it is handed is a list written down in seed()
+// below - `math`, `string`, `table`, the safe half of the base library, and `Desmos` - and the
+// list is the whole of it: fengari's `js` is never granted, so there is no route from a cell to
+// the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's code, and
+// opening one runs it.
+//
 // Every cell shares one set of globals and keeps its own locals. The globals live in a table of
 // their own, and both `_G` and a cell's own environment are empty tables in front of it wearing
 // the same __index/__newindex - so a write is seen by the next cell to read, and a read is
@@ -209,23 +215,19 @@
      * makes both "cell 2 sees what cell 1 defined" and "cell 2 re-runs when cell 1 changes it"
      * fall out of the same hook.
      *
-     * One table per chunk rather than _G itself, for one reason: `js` is granted per cell, by the
-     * `unsafe` pragma, and it must not be visible to the cell next door. Everything else about
-     * the table is shared, because everything else goes through the metatable.
+     * One table per chunk rather than _G itself, so the standard library is a rawget and a cell
+     * that shadows one of those names - `print = 1` - has shadowed its own copy rather than
+     * everyone's. Everything else about the table is shared, because everything else goes
+     * through the metatable.
      *
-     * The order here is the whole of that guarantee. Everything seeded goes in *before* the
-     * metatable does, so it lands in this table and nowhere else. Setting any of it afterwards
-     * would go through __newindex into the shared globals instead - which is exactly what `js`
-     * used to do, handing the DOM to every cell on the graph the moment one asked for it, and
-     * spinning the asking cell against its own write until the loop guard stopped it.
+     * The order here matters. Everything seeded goes in *before* the metatable does, so it lands
+     * in this table and nowhere else. Setting any of it afterwards would go through __newindex
+     * into the shared globals instead, publishing the standard library to every cell on the
+     * graph and spinning the writing cell against its own write until the loop guard stopped it.
      */
-    function pushEnv(co, unsafe) {
+    function pushEnv(co) {
         C.lua_createtable(co, 0, 16);
         seed(co);
-        if (unsafe) {
-            grantJs(co);
-            C.lua_setfield(co, -2, to_luastring("js"));
-        }
 
         pushMeta(co);
         C.lua_setmetatable(co, -2);
@@ -249,10 +251,11 @@
      * The standard library a cell starts with. Set before the metatable is on, so none of it is
      * seen by __newindex - see pushEnv.
      *
-     * What is left out is left out on purpose. `debug` reaches upvalues and the registry and
-     * so escapes any sandbox at all; `load`, `require` and `dofile` build an environment of
-     * their own; `io`, `os.execute` and `package` are not this page's to offer. `js` - the
-     * whole DOM - is behind the `unsafe` pragma; see ../lua/README.md.
+     * What is left out is left out on purpose. `debug` reaches upvalues and the registry and so
+     * escapes any sandbox at all; `load`, `require` and `dofile` build an environment of their
+     * own; `io`, `os.execute` and `package` are not this page's to offer. And `js` - fengari's
+     * bridge to the page, and so to the DOM, `fetch` and every other global on this origin - is
+     * offered to nothing and nobody. A cell reaches Desmos, and that is the whole of it.
      */
     function seed(co) {
         pushSafe(co);
@@ -414,13 +417,6 @@
             C.lua_rawset(co, -5);
         }
         C.lua_pop(co, 1);
-    }
-
-    /** `js`, for a cell whose sentinel line says `unsafe`. Only ever called from pushEnv. */
-    function grantJs(co) {
-        C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
-        C.lua_getfield(co, -1, to_luastring("js"));
-        C.lua_remove(co, -2);
     }
 
     // -----------------------------------------------------------------------

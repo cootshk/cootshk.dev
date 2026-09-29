@@ -33,8 +33,6 @@
 // cheap: `text` is already in both of those lists.
 //
 // The source is the chunk. Nothing is stripped from it, so Lua's line 3 is the editor's line 3.
-// A first line of `--!lua <pragmas>` is read for pragmas and then left exactly where it is -
-// it is a Lua comment, so the compiler does not care, and nothing has to count lines.
 //
 // With this extension off, a cell is a note with readable Lua in it. Nothing is lost.
 (function () {
@@ -55,13 +53,6 @@
      * the same guard is on Desmos' own reader of this.
      */
     var ACTION = /\\to(?![a-zA-Z])/;
-
-    /**
-     * A cell's optional first line: `--!lua <pragmas>`. Read for the pragmas and then left
-     * alone - it is a Lua comment, so the compiler ignores it, and leaving it in means the
-     * source is the chunk and no line numbers have to be adjusted.
-     */
-    var PRAGMA = /^--!lua[ \t]*([^\n]*)/;
 
     /**
      * The word that turns an expression into a cell, as it looks by the time it reaches the
@@ -231,8 +222,6 @@
                 }
             ],
 
-            PRAGMA: PRAGMA,
-
             /** Every cell on the graph, by expression id. Live - do not hold onto it. */
             cells: cells,
 
@@ -264,7 +253,6 @@
 
             /** Is this a Lua cell? */
             isCell: isCell,
-            pragmas: pragmas,
 
             /** The cell for an expression id, or undefined. */
             cell: function (id) {
@@ -533,13 +521,6 @@
         return !!item && item.type === "text" && !!item.lua;
     }
 
-    /** The pragmas a cell's source asks for, from its first line if it has such a line. */
-    function pragmas(source) {
-        var match = PRAGMA.exec(source || "");
-        var words = match ? match[1].trim() : "";
-        return new Set(words ? words.split(/\s+/) : []);
-    }
-
     // -----------------------------------------------------------------------
     // keeping `cells` and the graph in step
     // -----------------------------------------------------------------------
@@ -587,7 +568,6 @@
                 cell = {
                     id: item.id,
                     source: source,
-                    pragmas: pragmas(source),
                     order: order++,
 
                     node: null,
@@ -612,7 +592,6 @@
                 fresh.push(cell);
             } else {
                 cell.order = order++;
-                cell.pragmas = pragmas(source);
                 // Changed underneath us - undo, setState, a graph load. Take it, and tell the
                 // editor so the box catches up without losing its undo history.
                 if (source !== cell.source) {
@@ -644,15 +623,16 @@
      * Start cells that have just appeared - which at page load is all of them.
      *
      * Deferred out of the dispatch that brought us here: starting a run calls reparse(), and
-     * Desmos is in the middle of its own state change. A cell asking for `unsafe` is left alone;
-     * that pragma hands Lua `js`, and so the DOM on this origin, and a graph someone else wrote
-     * should not get that for the price of being opened.
+     * Desmos is in the middle of its own state change.
+     *
+     * Every cell, with nothing held back. A cell reaches the graph and nothing else - there is
+     * no route from one to the DOM or to the page - so opening somebody else's graph is opening
+     * a graph, and there is nothing here that wants a deliberate click first.
      */
     function wake(fresh) {
         setTimeout(function () {
             fresh.forEach(function (cell) {
                 if (!cells.get(cell.id)) return;
-                if (cell.pragmas.has("unsafe")) return;
                 if (lua.runner) lua.runner.run(cell);
             });
         }, 0);
