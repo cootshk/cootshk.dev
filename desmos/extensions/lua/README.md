@@ -770,11 +770,19 @@ element chain outwards from the pointer and fires on the first element whose rec
 stopping at any element carrying that attribute. It is Desmos' own convention for a control nested
 inside another.
 
-An error turns the same icon into Desmos' error icon, because it is Desmos' own markup -
-`div.dcg-tooltipped-error > i.dcg-icon-error`, which is exactly what an expression's error is - so
-the colour, the size and the fade-in come for free. The message is on the icon's `title` and, when
-Monaco loaded, squiggled under the line it names. The button stays clickable either way, so a cell
-can be run again once its error is fixed.
+An error turns the same icon into Desmos' error - not a copy of one. What is mounted in the gutter
+is `Tooltip` out of `Desmos.Private.Fragile`, wearing the markup `TooltippedError` gives it
+(`div.dcg-tooltipped-error > i.dcg-icon-error`), which is the component an expression's error is
+drawn with. So the message arrives in the same bubble under the same icon, after the same half
+second, pinned by the same tap, clamped to the same sheet - and the colour, the size and the
+fade-in come along with it. The line it names is squiggled too, when Monaco loaded.
+
+The component itself is not on the `Fragile` list, but everything it is made of is, so it is
+rebuilt here prop for prop rather than reimplemented; a build that stops handing `Fragile` out
+costs the bubble and nothing else, and the message goes back onto the icon's `title` where it used
+to ride. The button stays clickable in either state, so a cell can be run again once its error is
+fixed - a tap on the error pins the message _and_ runs the cell, which is the one place this
+differs from an expression, whose error has nothing else to do.
 
 `print` goes to `console.log` and `warn` to `console.warn`. There is no strip under the cell.
 

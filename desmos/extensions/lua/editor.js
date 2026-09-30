@@ -283,7 +283,8 @@
             var glyphs = found.querySelectorAll(".dcg-circular-icon i");
             cell.stem = glyphs[0];
             cell.head = glyphs[1];
-            cell.fault = found.querySelector(".dcg-tooltipped-error");
+            cell.fault = found.querySelector(".cde-lua__fault");
+            cell.view = cell.fault ? speak(cell.fault) : null;
             return;
         }
 
@@ -313,12 +314,11 @@
         );
 
         // The error form is not a circled icon - in Desmos an expression's error *replaces* the
-        // icon in this container with exactly this pair, so the two swap rather than stack.
-        var fault = ui.el(
-            "div",
-            { class: "dcg-tooltipped-error" },
-            ui.el("i", { class: "dcg-icon-error", "aria-hidden": "true" })
-        );
+        // icon in this container with its own TooltippedError, so the two swap rather than
+        // stack. That view is mounted into this div; see speak() for what it is and for what
+        // stands in its place on a build that no longer offers it.
+        var fault = ui.el("div", { class: "cde-lua__fault" });
+        var view = speak(fault);
 
         var icon = ui.el(
             "div",
@@ -357,6 +357,7 @@
         cell.stem = stem;
         cell.head = head;
         cell.fault = fault;
+        cell.view = view;
     }
 
     /**
@@ -383,6 +384,9 @@
             editor.dispose();
             editors.delete(cell.id);
         }
+        // Before the node it is mounted in goes: a tooltip pinned open is a child of the tap
+        // container rather than of this row, and Desmos' own willUnmount is what takes it away.
+        hush(cell);
         if (cell.host && cell.host.parentNode)
             cell.host.parentNode.removeChild(cell.host);
         if (cell.icon && cell.icon.parentNode)
@@ -396,6 +400,7 @@
         cell.stem = null;
         cell.head = null;
         cell.fault = null;
+        cell.view = null;
     }
 
     /** The cell is gone for good. */
@@ -773,10 +778,13 @@
      * is how Desmos does it - an expression's error *replaces* its icon rather than recolouring
      * it, so the circle should not be there when there is an error to show.
      *
-     * The message itself rides on `title`. Desmos' tooltip binds its listeners when it mounts and
-     * there is no way into it from markup alone, so a native tooltip is as close as this gets.
-     * The container stays clickable in either state, so a cell can be run again once its error is
-     * fixed.
+     * The message goes to the view mounted in the gutter, which is Desmos' own tooltip - so an
+     * error reads the way an expression's does, in the same bubble, after the same pause, and
+     * pinned by the same tap. `title` is what is left for the run button, and it steps aside
+     * while there is an error rather than answer the same hover twice.
+     *
+     * The container stays clickable in either state, so a cell can be run again once its error
+     * is fixed - a tap on the error both pins the message and runs the cell.
      */
     function render(cell) {
         guard(cell);
@@ -807,7 +815,14 @@
                   ? "Waiting for the graph - click to stop"
                   : "Stop this cell"
               : "Run this cell";
-        cell.icon.setAttribute("title", title);
+        // The view reads this rather than being handed it: a dcg-view prop is a getter, and
+        // update() is how Desmos tells one to look again. Told nothing, the tooltip takes
+        // itself away, which is what fixing an error does to it.
+        says.set(cell.fault, problem);
+        if (cell.view) cell.view.update();
+
+        if (problem && cell.view) cell.icon.removeAttribute("title");
+        else cell.icon.setAttribute("title", title);
         cell.icon.setAttribute("aria-label", title);
 
         markers(cell, problem);
@@ -832,6 +847,168 @@
                 endColumn: found.getLineMaxColumn(line)
             }
         ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // the error
+    // -----------------------------------------------------------------------
+    //
+    // An expression's error in Desmos is a `TooltippedError`: the warning glyph, wrapped in
+    // Desmos' `Tooltip`, which is what draws the bubble under it after half a second, pins it
+    // when it is tapped, keeps it inside the sheet and takes it away again. None of that is in
+    // the markup - the tooltip binds its listeners when it mounts, and Desmos' own hover
+    // dispatcher speaks to it over the jQuery events it bound - so a hand-rolled copy of the
+    // markup gets the icon and nothing else, which is what a `title` was standing in for.
+    //
+    // So the view is mounted rather than imitated. `Desmos.Private.Fragile` is the namespace the
+    // calculator hands out its own internals through - builtins.js takes `evaluateLatex` from
+    // the same place - and it carries `DCGView` and `Tooltip`. `TooltippedError` itself is not
+    // on the list, but it is six lines of Desmos' own source and every one of those lines is
+    // made of something that *is*:
+    //
+    //     Tooltip({ tooltip: props.error, sticky: () => props.sticky?.() ?? true,
+    //               gravity: props.gravity,
+    //               additionalClass: "dcg-tooltipped-error-container" },
+    //       div.dcg-tooltipped-error > i.dcg-icon-error)
+    //
+    // rebuilt below, prop for prop. What is doing the work is Desmos', which is the point: the
+    // delay, the placement, the arrow, the pinning and the fade all come from the component
+    // rather than from numbers copied out of a stylesheet and left to drift.
+    //
+    // A build that moves `Fragile` costs the bubble and nothing else: speak() returns null, the
+    // glyph is drawn the way it always was, and render() leaves the message on `title`.
+
+    /** What each mounted error has to say. Read by the view; written by render(). */
+    var says = new WeakMap();
+
+    /** Desmos' view layer, when this build still hands it out. */
+    function parts() {
+        var D = window.Desmos;
+        var found = (D && D.Private && D.Private.Fragile) || null;
+        var View = found && found.DCGView;
+        if (
+            !View ||
+            typeof View.Class !== "function" ||
+            typeof View.createElement !== "function" ||
+            typeof View.mountToNode !== "function" ||
+            typeof View.unmountFromNode !== "function" ||
+            typeof found.Tooltip !== "function"
+        )
+            return null;
+        return found;
+    }
+
+    /** Desmos' TooltippedError, built once out of those. */
+    var Fault = null;
+
+    /** A build we have already complained about, or one whose view would not mount. */
+    var mute = false;
+
+    function fault() {
+        if (Fault) return Fault;
+
+        var found = parts();
+        if (!found) {
+            if (!mute)
+                console.warn(
+                    "desmos: no Desmos.Private.Fragile.Tooltip, so a Lua cell's error is " +
+                        "a plain title"
+                );
+            mute = true;
+            return null;
+        }
+
+        var View = found.DCGView;
+        var Tooltip = found.Tooltip;
+        var make = View.createElement;
+        Fault = class extends View.Class {
+            template() {
+                return make(Tooltip, {
+                    tooltip: this.props.error,
+                    // Sticky is what an expression's error is: a tap pins the message, so a long
+                    // one can be read and copied rather than chased with the pointer.
+                    sticky: this.const(true),
+                    additionalClass: this.const(
+                        "dcg-tooltipped-error-container"
+                    ),
+                    children: make("div", {
+                        class: this.const("dcg-tooltipped-error"),
+                        children: make("i", {
+                            class: "dcg-icon-error",
+                            "aria-hidden": "true"
+                        })
+                    })
+                });
+            }
+        };
+        return Fault;
+    }
+
+    /**
+     * Mount one into `node`, and hand back the view - or null, which is the signal to fall back
+     * to `title`.
+     *
+     * A row React rebuilt hands us back our own icon with the view still mounted in it, so an
+     * already-mounted node is answered with what is there: mountToNode refuses a second one.
+     */
+    function speak(node) {
+        if (node._mountedDCGView) return node._mountedDCGView;
+
+        var found = mute ? null : parts();
+        var Component = found && fault();
+        if (Component)
+            try {
+                return found.DCGView.mountToNode(Component, node, {
+                    error: function () {
+                        return says.get(node) || "";
+                    }
+                });
+            } catch (error) {
+                // Not tried again: a view that would not mount will not mount for the next
+                // cell either, and every cell on the graph saying so helps nobody.
+                console.warn(
+                    "desmos: couldn't mount Desmos' error view",
+                    error
+                );
+                mute = true;
+            }
+
+        glyph(node);
+        return null;
+    }
+
+    /**
+     * The glyph alone, drawn by hand into the same node - what this used to be, and what is
+     * left when there is no view to mount. Idempotent, because gutter() finds its own icon
+     * again every time React rebuilds a row.
+     */
+    function glyph(node) {
+        if (node.querySelector(".dcg-tooltipped-error")) return;
+        ui.el(
+            node,
+            null,
+            ui.el(
+                "div",
+                { class: "dcg-tooltipped-error" },
+                ui.el("i", { class: "dcg-icon-error", "aria-hidden": "true" })
+            )
+        );
+    }
+
+    /**
+     * Take the view down with the row. Desmos' tooltip hangs its bubble off the tap container
+     * rather than off the row, and it is the component's own willUnmount that removes it - a
+     * node pulled out from under a pinned tooltip would leave the bubble on the screen.
+     */
+    function hush(cell) {
+        if (!cell.fault || !cell.fault._mountedDCGView) return;
+        var found = parts();
+        if (!found) return;
+        try {
+            found.DCGView.unmountFromNode(cell.fault);
+        } catch (error) {
+            console.warn("desmos: couldn't unmount Desmos' error view", error);
+        }
     }
 
     // -----------------------------------------------------------------------
