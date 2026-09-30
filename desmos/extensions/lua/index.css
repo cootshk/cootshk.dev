@@ -15,10 +15,11 @@
  *     }
  *
  * an invisible sheet over the whole container - and it is *also* the element Desmos focuses when
- * a note's row is focused. Hiding it outright takes the keyboard away from the row: Escape had
- * nowhere to hand it, so Enter and the arrows did nothing afterwards, while arrowing over the
- * row from elsewhere still worked because that is driven by Desmos' focus state rather than by
- * the DOM.
+ * a note's row is focused. Hiding it outright takes the keyboard away from the row: focusing a
+ * hidden element does nothing, so Tab and a character typed over the selected row - both of
+ * which Desmos answers by focusing it - had nowhere to land, and editor.js never got the
+ * focus it passes on to the code box. Arrowing over the row from elsewhere still worked, being
+ * driven by Desmos' focus state rather than by the DOM.
  *
  * So it is kept, shrunk to a point and made click-through. `pointer-events: none` is the part
  * that matters: at full size and clickable it swallows every click meant for the editor beneath

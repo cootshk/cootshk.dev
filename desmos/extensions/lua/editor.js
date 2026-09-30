@@ -122,10 +122,11 @@
     }
 
     /**
-     * Desmos' own textarea for the row keeps the keyboard whenever the editor does not - that is
-     * what makes Escape, Tab and the arrows work - but it also still holds the note's text. Left
-     * writable, anything typed while the row is focused is spliced into it by Desmos' own note
-     * editing, and scan() then faithfully carries it into the code box.
+     * Desmos' own textarea for the row is where it hands the keyboard when it means to focus
+     * the row - that is what makes Tab and typing over a selected row work - but it also still
+     * holds the note's text. Left writable, anything typed while the row is focused is spliced
+     * into it by Desmos' own note editing, and scan() then faithfully carries it into the code
+     * box.
      *
      * Read-only on the element, not on Desmos' model: the browser refuses text, while focus,
      * caret movement and every key Desmos binds still behave. `keys` below is what a typed
@@ -153,10 +154,28 @@
      *
      * Everything else is left alone, so Enter still makes a line below and Backspace still
      * deletes the row - both Desmos', both already right.
+     *
+     * And the same two keys again, from the other side. Over a row that is selected rather
+     * than being edited - after an Escape, or an arrow from the row above - Desmos answers
+     * Tab and a printable itself, by focusing the row: `move-focus-to-item`, which for a note
+     * is its textarea. There is nothing there for either key to do, so the focus is caught
+     * below and passed on to the editor. The keystroke is still in flight when that happens -
+     * the character lands wherever the keyboard is by the time the browser delivers it - so
+     * the letter that started it arrives in the code by itself.
      */
     function keys(cell, node) {
         if (bound.has(node)) return;
         bound.add(node);
+
+        node.addEventListener("focusin", function (event) {
+            var target = event.target;
+            if (!target || !target.matches) return;
+            if (!target.matches("textarea.dcg-smart-textarea")) return;
+
+            var live = lua.cell(cell.id);
+            if (!live || !live.host) return;
+            enter(live);
+        });
 
         node.addEventListener("keydown", function (event) {
             if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -433,6 +452,13 @@
 
         // Desmos binds arrows, Enter and Backspace to moving around the expression list. The
         // editor needs all of them to mean what they mean in an editor.
+        //
+        // Escape is the one that goes the other way - it leaves the cell, as it leaves an
+        // expression. On the host and not as a Monaco command on purpose: Monaco's own
+        // keybindings are bound on the box inside this, and it stops the event whenever one
+        // of them answers. So an Escape that dismisses the completion list, cancels a rename
+        // or collapses a selection never reaches here, and a cell is only left by an Escape
+        // the editor itself had nothing to do with.
         ["keydown", "keypress", "keyup"].forEach(function (type) {
             host.addEventListener(type, function (event) {
                 event.stopPropagation();
@@ -665,16 +691,25 @@
     }
 
     /**
-     * Escape: give the row to Desmos, so the expression sheet's own keys work on it - Enter for
-     * a new line below, up and down to walk to the neighbouring ones.
+     * Escape: select the row and let go of the keyboard, which is what Escape over an
+     * expression does - and so the expression sheet's own keys work on it afterwards, Enter
+     * for a new line below, up and down to walk to the neighbouring ones, Backspace to delete
+     * the row however full it is.
      *
-     * Desmos keeps focus as state and the views follow it, so `move-focus-to-item` - its own
-     * "focus this row" - is half of it. The other half is DOM focus, and for a note that means
-     * the note's own textarea: its keydown is where Desmos' navigation for a note lives. The row
-     * container will not do, tabIndex or not - its own keydown only handles reorder mode, which
-     * is why Escape used to leave the keyboard nowhere at all.
+     * Desmos' own Escape is a blur and nothing else. The keys for a *selected* row are bound
+     * once, on <html>, and that handler stands down unless nothing at all holds the keyboard:
+     * anything focused inside the expression panel means the row is being edited rather than
+     * selected, and its own input answers for the key instead.
      *
-     * index.css keeps that textarea at a point rather than hiding it, for exactly this.
+     * Which is why this used to go wrong. Handing the keyboard to the note's own textarea -
+     * Desmos' `move-focus-to-item`, and the only DOM focus a note has - put the row in the
+     * editing state, where Backspace goes to a textarea that is readOnly (see guard()) and
+     * holds the source, and so did nothing at all.
+     *
+     * The selection is set first because the editor is ours - see select() - and a cell the
+     * keyboard reached any other way may have left the selection elsewhere. Desmos' focus
+     * location goes with it: the views re-focus whatever it names on the next render, so a
+     * stale one would take the keyboard straight back out of this state.
      */
     function toRow(cell) {
         lua.flush(cell.id);
@@ -684,8 +719,8 @@
             try {
                 controller.dispatch({ type: "set-selected-id", id: cell.id });
                 controller.dispatch({
-                    type: "move-focus-to-item",
-                    id: cell.id
+                    type: "set-focus-location",
+                    location: { type: "unknown" }
                 });
             } catch (error) {
                 console.warn(
@@ -694,21 +729,14 @@
                 );
             }
 
-        var area =
-            cell.node && cell.node.querySelector("textarea.dcg-smart-textarea");
-        if (area) return area.focus();
-
-        // Nothing of Desmos' to hand it to. Its focus state is still right, so at least stop
-        // holding the keyboard here.
         drop(cell);
-        if (cell.node && cell.node.focus) cell.node.focus();
     }
 
     /** Let go of the keyboard, without saying where it should go next. */
     function drop(cell) {
-        if (!cell.box) return;
-        var area = cell.box.querySelector("textarea");
-        if (area) area.blur();
+        var held = document.activeElement;
+        if (!cell.host || !held || !cell.host.contains(held)) return;
+        if (held.blur) held.blur();
     }
 
     /**
