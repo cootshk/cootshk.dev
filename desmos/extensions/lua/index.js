@@ -1001,6 +1001,17 @@
     /**
      * Hand every cell its row. The list virtualizes, so a row we decorated may have been
      * rebuilt since - `editor.attach` is written to be called again on a row it already owns.
+     *
+     * One item can be on the page twice. While a row is being dragged Desmos draws a copy of
+     * it in a `.dcg-drag-container` under the cursor - a second view of the same model, with
+     * the same `expr-id` and the same classes, while the row itself stays where it is. A cell
+     * has one box and it belongs in the row, so the copy gets a stand-in instead; see
+     * `editor.ghost`.
+     *
+     * Handing the copy to attach() is what this used to do, and it was worse than the note
+     * the copy would otherwise be. Each pass moved the cell to whichever of the two it saw
+     * last and the next pass moved it back, so a drag left a trail of empty boxes - each one
+     * a dark bar above the code - for as long as it lasted.
      */
     function paint() {
         if (!lua.editor) return;
@@ -1008,16 +1019,24 @@
             ".dcg-expressionitem.dcg-expressiontext"
         );
         var live = new Set();
+        var held = new Set();
         nodes.forEach(function (node) {
             var id = node.getAttribute("expr-id");
             var cell = cells.get(id);
             if (!cell) return;
+            if (node.closest(".dcg-drag-container")) {
+                held.add(id);
+                lua.editor.ghost(cell, node);
+                return;
+            }
             live.add(id);
             lua.editor.attach(cell, node);
         });
         // A cell whose row is no longer in the document has been scrolled away, not deleted.
+        // A cell with no copy of itself under the cursor is a cell nobody is dragging.
         cells.forEach(function (cell, id) {
             if (!live.has(id) && cell.node) lua.editor.detach(cell);
+            if (!held.has(id)) lua.editor.ghost(cell, null);
         });
     }
 

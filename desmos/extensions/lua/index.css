@@ -175,6 +175,15 @@
     border-radius: inherit;
 }
 
+/* The box in the copy Desmos drags under the cursor - a cell's box with a readOnly editor in
+ * it, so a cell being dragged still looks like a cell. Deaf to the pointer, all of it: the
+ * pointer is holding the row it is drawn in, and a box that took a hover or a click of its own
+ * would be answering for a row that is not there. */
+.cde-lua__ghost,
+.cde-lua__ghost * {
+    pointer-events: none !important;
+}
+
 /* Kept in step with FONT, LINE and PAD in editor.js. Only the fallback needs this now - the
  * editor is told its own font - but the two should still look the same. */
 .cde-lua__plain {

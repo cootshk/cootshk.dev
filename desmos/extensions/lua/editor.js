@@ -47,6 +47,9 @@
     /** expr-id -> Monaco model. Outlives the row, so scrolling costs no undo history. */
     var models = new Map();
 
+    /** expr-id -> the stand-in in the copy Desmos drags, for as long as a drag lasts. */
+    var ghosts = new Map();
+
     /** A cell to focus as soon as its row turns up - the freshly created one. */
     var pending = null;
 
@@ -59,6 +62,7 @@
     lua.editor = {
         init: init,
         attach: attach,
+        ghost: ghost,
         detach: detach,
         refresh: refresh,
         render: render,
@@ -101,6 +105,18 @@
             return;
         }
 
+        // A different row, or the same row rebuilt without what we put in it. Either way the
+        // last box goes before another is made: a cell has one, and two would mean an editor
+        // left running in a node nobody can reach and a dark empty box stacked above the one
+        // being typed in. detach() keeps the model, so neither the text nor its undo history
+        // is in this - only the keyboard, which is put back where it was.
+        var held = !!(
+            cell.host &&
+            document.activeElement &&
+            cell.host.contains(document.activeElement)
+        );
+        if (cell.host || cell.node) detach(cell);
+
         node.setAttribute("data-cde-lua", "");
         keys(cell, node);
         guard(cell, node);
@@ -119,6 +135,110 @@
         mount(cell);
         render(cell);
         take(cell);
+        if (held) enter(cell);
+    }
+
+    /**
+     * The same box again, in the copy of the row Desmos drags under the cursor.
+     *
+     * A row being dragged is on the page twice: the row, which stays where it is, and a second
+     * view of the same item inside `.dcg-drag-container` that follows the pointer. The cell's
+     * own box belongs to the row - it is where the keyboard and the undo history are, and a
+     * box cannot be in two places - so the copy gets a stand-in of its own: another editor
+     * over the same model, readOnly and unreachable. Without it a dragged cell turns back into
+     * the note it is made of for as long as it is held, and into a cell again when dropped.
+     *
+     * Sharing the model is what makes it the same box rather than something that looks like
+     * it: the same text, the same colours, the same error squiggles, all without a copy of
+     * anything that could drift. Monaco is built for several editors over one model, and
+     * disposing one of them leaves the model alone.
+     *
+     * `node` is that copy, or null for "the drag is over" - paint() says so for every cell
+     * that did not have one this pass, so a ghost cannot outlive the container it was drawn
+     * in. Nothing here is written to `cell`: a ghost is not the cell's row, and the two must
+     * never be able to take each other's box.
+     */
+    function ghost(cell, node) {
+        var found = ghosts.get(cell.id);
+        if (found && found.node === node && node.contains(found.host)) return;
+
+        if (found) {
+            ghosts.delete(cell.id);
+            if (found.editor) found.editor.dispose();
+            if (found.host.parentNode)
+                found.host.parentNode.removeChild(found.host);
+        }
+        if (!node) return;
+
+        // Same as a row's: the note's own text goes, the note's own icon stands down.
+        node.setAttribute("data-cde-lua", "");
+
+        var box = ui.el("div", { class: "cde-lua__box" });
+        var host = ui.el("div", { class: "cde-lua cde-lua__ghost" }, box);
+        var anchor = node.querySelector(".dcg-displayTextarea");
+        var parent = anchor ? anchor.parentNode : node;
+        inset(host, anchor);
+        if (anchor && anchor.nextSibling)
+            parent.insertBefore(host, anchor.nextSibling);
+        else parent.appendChild(host);
+
+        // The run button as the row has it this moment - a still of it, cloned, so none of its
+        // listeners and none of the tooltip behind its error form come along.
+        var tab = node.querySelector("span.dcg-tab");
+        var slot = tab && (tab.querySelector(".dcg-tab-interior") || tab);
+        if (slot && cell.icon && !slot.querySelector(".cde-lua__icon"))
+            slot.appendChild(cell.icon.cloneNode(true));
+
+        var kept = { node: node, host: host, editor: null };
+        ghosts.set(cell.id, kept);
+
+        // No Monaco: the row is a textarea, so this is one too, and the two still match.
+        if (!api) {
+            var still = ui.el("textarea", {
+                class: "cde-lua__plain",
+                readonly: "readonly",
+                tabindex: "-1",
+                "aria-hidden": "true",
+                spellcheck: "false",
+                wrap: "off"
+            });
+            still.value = cell.source;
+            still.style.height = tall(cell.source) + "px";
+            box.appendChild(still);
+            return;
+        }
+
+        // Sized before the editor is made rather than after: Monaco measures its container on
+        // the way up, and a box of no height is an editor that draws nothing. The line count
+        // is what both tall() and grown() are counting, so the second is a correction and
+        // rarely a change.
+        box.style.height = tall(cell.source) + "px";
+        kept.editor = api.editor.create(box, {
+            model: model(cell),
+            theme: "vs-dark",
+            // Nothing can be typed, clicked or scrolled in a ghost, so the parts that only
+            // answer to a caret are off. The rest is mount()'s, because the point is to be
+            // indistinguishable from the box it stands in for.
+            readOnly: true,
+            domReadOnly: true,
+            // Monaco hides a readOnly editor's squiggles unless told otherwise - the default
+            // is "editable" - and a cell with an error in it should still have one here.
+            renderValidationDecorations: "on",
+            automaticLayout: true,
+            minimap: { enabled: false },
+            overviewRulerLanes: 0,
+            scrollBeyondLastLine: false,
+            scrollbar: { vertical: "hidden", horizontal: "hidden" },
+            renderLineHighlight: "none",
+            lineNumbers: "on",
+            lineNumbersMinChars: 3,
+            folding: false,
+            wordWrap: "off",
+            fontSize: FONT,
+            lineHeight: LINE,
+            padding: { top: 6, bottom: 6 }
+        });
+        box.style.height = grown(kept.editor) + "px";
     }
 
     /**
@@ -425,6 +545,10 @@
     /** The cell is gone for good. */
     function forget(cell) {
         detach(cell);
+        // paint() sweeps ghosts by walking the cells it knows about, and this one is about to
+        // stop being one of them. Left behind, its editor would still be holding the model
+        // when the timer below disposes it.
+        ghost(cell, null);
         var model = models.get(cell.id);
         if (!model) return;
         // A moment's grace, so delete-then-undo keeps its history.
@@ -560,11 +684,15 @@
     function size(cell) {
         var editor = editors.get(cell.id);
         if (!editor || !cell.box) return;
-        var h = Math.min(
+        cell.box.style.height = grown(editor) + "px";
+    }
+
+    /** How tall a box holding `editor` should be. tall() is the same sum, counted by line. */
+    function grown(editor) {
+        return Math.min(
             MAX_HEIGHT,
             Math.max(LINE, editor.getContentHeight()) + PAD
         );
-        cell.box.style.height = h + "px";
     }
 
     /** The textarea: the way in before Monaco arrives, and the way in if it never does. */
@@ -672,6 +800,46 @@
     }
 
     /**
+     * Tell Desmos something, from a place that may already be inside it telling itself
+     * something.
+     *
+     * Its dispatcher is Flux': a dispatch raised during a dispatch throws rather than queueing
+     * -  "Cannot dispatch in the middle of a dispatch" - and `runAfterDispatch` is the
+     * calculator's own way round it. It runs the callback as the dispatch in progress finishes
+     * and runs it immediately when there is none, so this is the plain thing everywhere else.
+     *
+     * Every dispatch here goes through it, because most of them are raised from a focus event
+     * and focus is something Desmos moves from inside a dispatch. An arrow over a selected row
+     * is the short version: Desmos answers it with `move-focus-to-item`, the note's textarea
+     * takes the keyboard, keys() hands it on to the editor, and the editor saying so - select()
+     * below - lands in the middle of the dispatch that started it.
+     *
+     * Desmos exempts its own focus actions from the rule (the focus tracker absorbs a
+     * `set-focus-location` raised mid-dispatch and replays it afterwards) but nothing else, so
+     * `set-selected-id` and the rest have to wait their turn.
+     *
+     * Actions are dispatched in the order given, and a queue is drained in the order it was
+     * filled, so two calls stay in the order they were made whichever way this goes.
+     */
+    function poke(blame, actions) {
+        var controller = Calc && Calc.controller;
+        if (!controller) return;
+
+        var go = function () {
+            try {
+                actions.forEach(function (action) {
+                    controller.dispatch(action);
+                });
+            } catch (error) {
+                console.warn("desmos: " + blame, error);
+            }
+        };
+
+        if (controller.runAfterDispatch) controller.runAfterDispatch(go);
+        else go();
+    }
+
+    /**
      * Put Desmos' selection on this row - the blue marker down its left edge - without touching
      * where the keyboard is. Clicking into a cell has to do this: the editor is ours, so Desmos
      * has no other way of knowing which row is being worked on, and the marker would otherwise
@@ -681,13 +849,9 @@
      * take the keyboard straight back off the editor.
      */
     function select(cell) {
-        var controller = Calc && Calc.controller;
-        if (!controller) return;
-        try {
-            controller.dispatch({ type: "set-selected-id", id: cell.id });
-        } catch (error) {
-            console.warn("desmos: couldn't select the row", error);
-        }
+        poke("couldn't select the row", [
+            { type: "set-selected-id", id: cell.id }
+        ]);
     }
 
     /**
@@ -714,20 +878,10 @@
     function toRow(cell) {
         lua.flush(cell.id);
 
-        var controller = Calc && Calc.controller;
-        if (controller)
-            try {
-                controller.dispatch({ type: "set-selected-id", id: cell.id });
-                controller.dispatch({
-                    type: "set-focus-location",
-                    location: { type: "unknown" }
-                });
-            } catch (error) {
-                console.warn(
-                    "desmos: couldn't hand the row back to Desmos",
-                    error
-                );
-            }
+        poke("couldn't hand the row back to Desmos", [
+            { type: "set-selected-id", id: cell.id },
+            { type: "set-focus-location", location: { type: "unknown" } }
+        ]);
 
         drop(cell);
     }
@@ -751,14 +905,10 @@
         lua.flush(cell.id);
         drop(cell);
 
-        var controller = Calc && Calc.controller;
-        if (!controller) return;
-        try {
-            controller.dispatch({ type: "set-selected-id", id: cell.id });
-            controller.dispatch({ type: "new-expression" });
-        } catch (error) {
-            console.warn("desmos: couldn't add a line below the cell", error);
-        }
+        poke("couldn't add a line below the cell", [
+            { type: "set-selected-id", id: cell.id },
+            { type: "new-expression" }
+        ]);
     }
 
     /**
@@ -782,17 +932,10 @@
         lua.flush(cell.id);
         drop(cell);
 
-        var controller = Calc && Calc.controller;
-        if (!controller) return;
-        try {
-            controller.dispatch({ type: "set-selected-id", id: cell.id });
-            controller.dispatch({
-                type: "on-special-key-pressed",
-                key: "Backspace"
-            });
-        } catch (error) {
-            console.warn("desmos: couldn't delete the empty cell", error);
-        }
+        poke("couldn't delete the empty cell", [
+            { type: "set-selected-id", id: cell.id },
+            { type: "on-special-key-pressed", key: "Backspace" }
+        ]);
     }
 
     // -----------------------------------------------------------------------
