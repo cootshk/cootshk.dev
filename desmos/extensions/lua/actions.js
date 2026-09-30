@@ -316,7 +316,7 @@
     function latexOf(co, idx) {
         if (!isLatex(co, idx)) return null;
         C.lua_rawgeti(co, idx, 1);
-        var latex = C.lua_tojsstring(co, -1);
+        const latex = C.lua_tojsstring(co, -1);
         C.lua_pop(co, 1);
         return latex;
     }
@@ -380,17 +380,9 @@
 
         var n = C.lua_gettop(co);
         if (takesArguments && n < 2)
-            return fail(
-                co,
-                base +
-                    " takes arguments - it is an action function, so call it with some"
-            );
+            return fail(co, `function ${base} is missing required arguments`);
         if (!takesArguments && n > 1)
-            return fail(
-                co,
-                base +
-                    " takes no arguments - it is an action, not a function of one"
-            );
+            return fail(co, `action ${base} takes no arguments`);
         var parts = [];
         for (var i = 2; i <= n; i++) {
             var arg = lua.bridge.toDesmos(co, i);
@@ -414,10 +406,7 @@
             if (parts.length)
                 return fail(
                     co,
-                    "cannot call " +
-                        base +
-                        " with arguments from inside an action. Desmos substitutes a function's " +
-                        "arguments, and it is not running yet - call it from the cell body instead"
+                    `Unable to call ${base} with arguments from an action.`
                 );
 
             var pairs = updatesOf(base);
@@ -510,13 +499,7 @@
         // are the two ways to ask for the other thing, and both are visible in the source.
         if (recorder.mode === "function") {
             recorder.illegal = latex;
-            return fail(
-                co,
-                'cannot assign "' +
-                    latex +
-                    '" from a function. A function works out a value and changes nothing - to ' +
-                    "change the graph, wrap the body in action(...) or return a function from it"
-            );
+            return fail(co, `cannot assign ${latex} from a function.`);
         }
 
         if (C.lua_isnil(co, idx)) {
