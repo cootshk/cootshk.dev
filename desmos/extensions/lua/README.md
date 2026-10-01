@@ -855,19 +855,27 @@ differs from an expression, whose error has nothing else to do.
 
 ### What autocomplete offers
 
-Unqualified, it is the graph's names, Desmos' own functions, `action` and the `Desmos` members -
-the same index a read goes through, so the list and what a name will actually do cannot disagree.
+Unqualified, it is the graph's names, Desmos' own functions, and everything
+[`definitions.d.lua`](definitions.d.lua) declares - the graph's half out of the same index a read
+goes through, so the list and what a name will actually do cannot disagree.
+
+The static half is not a table in `editor.js`. It is read out of that file at load, which is an
+ordinary Lua Language Server `---@meta` definition file: point LuaLS at it and any editor gives
+the same names, types and documentation. The signature shown in the list is built from the very
+`---@param` and `---@return` annotations the language server reads, so those cannot drift either.
+What is _not_ in it is everything that depends on the graph - the sheet's names, Desmos'
+functions, an item's properties - because a copy of those here would be a copy to go stale.
 
 After a dot it is that dot's members, and only those:
 
-| after                   | you get                                                    |
-| ----------------------- | ---------------------------------------------------------- |
-| `Desmos.`               | `get`, `define`, `sample`, `items`, `settings`, `ticker`   |
-| `Desmos.items.`         | the names the graph defines, which is how an item is found |
-| `Desmos.items.P.`       | everything an item has, with what each one takes           |
-| `...slider.`, `...cdf.` | that nested object's own, from anywhere it is reached      |
-| `Desmos.settings.`      | every setting, and `viewport`                              |
-| `Desmos.ticker.`        | its four                                                   |
+| after                   | you get                                                          |
+| ----------------------- | ---------------------------------------------------------------- |
+| `Desmos.`               | `get`, `define`, `sample`, `type`, `items`, `settings`, `ticker` |
+| `Desmos.items.`         | the names the graph defines, which is how an item is found       |
+| `Desmos.items.P.`       | everything an item has, with what each one takes                 |
+| `...slider.`, `...cdf.` | that nested object's own, from anywhere it is reached            |
+| `Desmos.settings.`      | every setting, and `viewport`                                    |
+| `Desmos.ticker.`        | its four                                                         |
 
 Each entry says what it takes - `true or false`, `one of POINT, OPEN, CROSS`, `read-only` - and
 which kind of item it belongs to, and both come out of the very tables `items.js` checks a write
@@ -1125,12 +1133,13 @@ no longer land.
 
 ## The files
 
-|               |                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| `index.js`    | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
-| `builtins.js` | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
-| `bridge.js`   | the environment a cell runs in, reading the graph, and writing to it                       |
-| `items.js`    | the graph as objects: `Desmos.items`, `Desmos.settings`, `Desmos.ticker`                   |
-| `actions.js`  | actions both ways - recording a body, the markers, and applying updates                    |
-| `runner.js`   | when a cell runs, the loop watchdog, and errors                                            |
-| `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |
+|                     |                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------ |
+| `index.js`          | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
+| `builtins.js`       | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
+| `bridge.js`         | the environment a cell runs in, reading the graph, and writing to it                       |
+| `items.js`          | the graph as objects: `Desmos.items`, `Desmos.settings`, `Desmos.ticker`                   |
+| `actions.js`        | actions both ways - recording a body, the markers, and applying updates                    |
+| `runner.js`         | when a cell runs, the loop watchdog, and errors                                            |
+| `editor.js`         | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |
+| `definitions.d.lua` | what a cell is handed, as LuaLS declarations; the completion list is read from it          |

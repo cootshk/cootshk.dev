@@ -56,6 +56,18 @@
     /** Rows we have already bound keys on, so a re-render does not stack another listener. */
     var bound = new WeakSet();
 
+    /**
+     * Where this file is, so ./definitions.d.lua can be found beside it rather than by spelling
+     * out a path extensions.js already owns. Read now and not later: `document.currentScript` is
+     * this script only while this script is running.
+     */
+    var HERE =
+        (document.currentScript && document.currentScript.src) ||
+        "/desmos/extensions/lua/editor.js";
+
+    /** What ./definitions.d.lua declares. Empty until it has been read; see definitions(). */
+    var declared = [];
+
     var Calc = null;
     var ui = null;
 
@@ -85,6 +97,149 @@
         var shared = window.__desmosExt.monaco;
         if (shared.api()) arrive(shared.api());
         else want();
+
+        // Alongside Monaco rather than after it: the two are wanted at the same moment and
+        // neither waits on the other. A completion asked for before this lands is the graph's
+        // own names and nothing else, which is what it was before there was a file to read.
+        definitions();
+    }
+
+    // -----------------------------------------------------------------------
+    // ./definitions.d.lua
+    // -----------------------------------------------------------------------
+
+    /**
+     * Read the declarations beside this file.
+     *
+     * `__desmosExt.fetch` rather than `fetch`: after the document swap the proxy's bootstrap has
+     * patched the global one, and a path of this site's own handed to it goes to desmos.com.
+     *
+     * A failure costs the static half of the completion list and nothing else - the graph's
+     * names, Desmos' functions and an item's properties are all read live and arrive anyway.
+     */
+    function definitions() {
+        var get = (window.__desmosExt && window.__desmosExt.fetch) || fetch;
+        return get(new URL("definitions.d.lua", HERE).toString())
+            .then(function (res) {
+                if (!res.ok) throw new Error(res.status + " " + res.statusText);
+                return res.text();
+            })
+            .then(function (text) {
+                declared = parse(text);
+            })
+            .catch(function (error) {
+                console.warn(
+                    "desmos: couldn't read Lua's definitions, so autocomplete is the graph's " +
+                        "own names only",
+                    error
+                );
+            });
+    }
+
+    /**
+     * The declarations in a `---@meta` file, as the completion list wants them.
+     *
+     * Two shapes are read and everything else is passed over: `function name(args) end`, and a
+     * `---@type` above `name = nil`. The `---` lines above either are its documentation, and
+     * `---@param` and `---@return` are what the signature shown is built out of - so the detail
+     * in the list cannot disagree with what the language server was told.
+     *
+     * A tag it does not know is skipped rather than guessed at, which is what keeps a `---@class`
+     * or a `---@generic` from meaning anything here.
+     */
+    function parse(source) {
+        var found = [];
+        var doc = [];
+        var params = [];
+        var tail = null;
+
+        source.split("\n").forEach(function (line) {
+            var text = line.trim();
+
+            var tag = /^---@(\w+)\s*(.*)$/.exec(text);
+            if (tag) {
+                if (tag[1] === "param") params.push(tag[2]);
+                else if (tag[1] === "return" || tag[1] === "type")
+                    tail = tag[2];
+                return;
+            }
+            // `---| "a"` continues the `---@alias` above it, which is a tag this does not
+            // know - so its arms are not prose either.
+            if (text.indexOf("---|") === 0) return;
+            if (text.indexOf("---") === 0) {
+                doc.push(text.slice(3));
+                return;
+            }
+
+            var fn = /^function\s+([A-Za-z_][\w.]*)\s*\(([^)]*)\)\s*end$/.exec(
+                text
+            );
+            var value = /^([A-Za-z_][\w.]*)\s*=\s*nil$/.exec(text);
+
+            var one = fn
+                ? declaration(fn[1], doc, params, tail)
+                : value && tail
+                  ? declaration(value[1], doc, null, tail)
+                  : null;
+            if (one) found.push(one);
+
+            // Anything that is not a `---` line ends the block above it, declaration or not -
+            // so a blank line between a comment and the thing it describes separates them,
+            // the way it reads as if it does.
+            doc = [];
+            params = [];
+            tail = null;
+        });
+
+        return found;
+    }
+
+    /** One declaration, or null for a name the completion list has nowhere to offer. */
+    function declaration(path, doc, params, tail) {
+        var dot = path.lastIndexOf(".");
+        var scope = dot === -1 ? null : path.slice(0, dot);
+        var name = dot === -1 ? path : path.slice(dot + 1);
+
+        // A global, or a member of `Desmos`. Anything else declared in there belongs to a type -
+        // `DesmosItems.byId` - and is offered where that type is reached, by items.js, rather
+        // than as a name of its own.
+        if (scope !== null && scope !== "Desmos") return null;
+
+        return {
+            path: path,
+            name: name,
+            scope: scope,
+            params: params,
+            detail: params ? signature(name, params, tail) : word(tail),
+            doc: doc.join("\n").trim()
+        };
+    }
+
+    /**
+     * `get(latex: string): number` - out of the very annotations the language server reads, so
+     * the two cannot drift.
+     *
+     * A `---@param` is `name type` and nothing else, which is why the declarations spell a
+     * function type without spaces in it: `fun(x:number):number`. The description belongs in the
+     * prose above, where there is room for it.
+     */
+    function signature(name, params, returns) {
+        var args = params.map(function (one) {
+            var m = /^(\S+)\s+(\S+)/.exec(one);
+            return m ? m[1] + ": " + m[2] : word(one);
+        });
+        return (
+            name +
+            "(" +
+            args.join(", ") +
+            ")" +
+            (returns ? ": " + word(returns) : "")
+        );
+    }
+
+    /** The type out of a tag body, which may carry a name after it. */
+    function word(text) {
+        return text ? String(text).split(/\s+/)[0] : "";
     }
 
     // -----------------------------------------------------------------------
@@ -1224,57 +1379,8 @@
 
     /** What the graph and the bridge can offer the completion list. */
     function complete() {
-        var BUILTIN = [
-            [
-                "Desmos.get",
-                'Desmos.get("\\\\sin(2)")',
-                "The value of any latex, blocking until it has one."
-            ],
-            [
-                "Desmos.define",
-                'Desmos.define("g(x)", "x^{2}+1")',
-                "Write an expression's latex yourself."
-            ],
-            [
-                "Desmos.sample",
-                'Desmos.sample("g", f, 0, 10, 200)',
-                "Plot a Lua function as sampled points."
-            ],
-            [
-                "Desmos.items",
-                'Desmos.items.P.color = "#aabbcc"',
-                "The sheet's items, by name, by id or by position."
-            ],
-            [
-                "Desmos.settings",
-                "Desmos.settings.showGrid = false",
-                "The graph's own settings, and its viewport."
-            ],
-            [
-                "Desmos.ticker",
-                "Desmos.ticker.playing = true",
-                "The ticker: its handler, its step, and whether it runs."
-            ]
-        ];
-
-        /**
-         * The globals that are not `Desmos`'. Kept apart from BUILTIN because that list is also
-         * what a `Desmos.` is answered with, and these do not go behind one.
-         */
-        var GLOBAL = [
-            [
-                "point",
-                "Desmos.P = point(1, 2)",
-                "A Desmos point. Two coordinates, or three in the 3D calculator."
-            ],
-            [
-                "action",
-                "A = action(function() b = 1 end)",
-                "Mark a body as one that changes the graph. Without it a function " +
-                    "computes a value and nothing else."
-            ]
-        ];
-
+        // `declared` is the module's, not a copy: definitions() fills it in when the file lands,
+        // which may be after this provider is registered. The closure reads it per completion.
         api.languages.registerCompletionItemProvider("lua", {
             // Monaco asks on its own after a letter; a dot has to be asked for, and every one
             // of the lists below is behind one.
@@ -1301,15 +1407,10 @@
                 var member = members(before, range);
                 if (member) return { suggestions: member };
 
-                var items = BUILTIN.concat(GLOBAL).map(function (entry) {
-                    return {
-                        label: entry[0],
-                        kind: api.languages.CompletionItemKind.Function,
-                        detail: entry[1],
-                        documentation: entry[2],
-                        insertText: entry[0],
-                        range: range
-                    };
+                // Everything ./definitions.d.lua declares, written the way a cell would say
+                // it: a global by its own name, and a member of `Desmos` qualified.
+                var items = declared.map(function (one) {
+                    return offer(one, one.path, range);
                 });
 
                 lua.bridge.names().forEach(function (name) {
@@ -1339,6 +1440,21 @@
             }
         });
 
+        /** One declaration as Monaco wants it, inserted as `text`. */
+        function offer(one, text, range) {
+            return {
+                label: text,
+                kind: one.params
+                    ? api.languages.CompletionItemKind.Function
+                    : api.languages.CompletionItemKind.Property,
+                detail: one.detail,
+                // Markdown, so the example in a declaration's comment is rendered as one.
+                documentation: one.doc ? { value: one.doc } : undefined,
+                insertText: text,
+                range: range
+            };
+        }
+
         /**
          * The list for a member access, or null when this is an ordinary name.
          *
@@ -1348,16 +1464,13 @@
          */
         function members(before, range) {
             if (/(^|[^.\w])Desmos\.$/.test(before))
-                return BUILTIN.map(function (entry) {
-                    return {
-                        label: entry[0].slice("Desmos.".length),
-                        kind: api.languages.CompletionItemKind.Property,
-                        detail: entry[1],
-                        documentation: entry[2],
-                        insertText: entry[0].slice("Desmos.".length),
-                        range: range
-                    };
-                });
+                return declared
+                    .filter(function (one) {
+                        return one.scope === "Desmos";
+                    })
+                    .map(function (one) {
+                        return offer(one, one.name, range);
+                    });
 
             // What an item, the settings or the ticker has - out of the very tables items.js
             // checks a write against, so the list and the rules cannot disagree - and the
