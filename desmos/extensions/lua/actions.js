@@ -125,6 +125,7 @@
         /** the two Lua value kinds this file adds */
         pushLatex: pushLatex,
         isLatex: isLatex,
+        isAction: isAction,
         latexOf: latexOf,
         pushAction: pushAction,
 
@@ -163,15 +164,14 @@
      * park on. Arithmetic on it composes latex; a comparison errors, because that would need a
      * number the fire cannot fetch.
      *
-     * A table rather than a userdata: fengari has no lua_newuserdata that carries a JS value
-     * usefully, and a table with a locked metatable is just as closed - `__metatable` means a
-     * cell cannot reach in and rewrite the latex, and `__index` means it cannot read a field that
-     * is not there.
+     * A userdata, so `rawset` cannot reach in and rewrite the latex the way it could on a
+     * table - `rawset` is a thing a cell is given, and a forged fragment is latex going to the
+     * graph with nobody's name on it. fengari's userdata carries a plain JS object, so the
+     * latex rides inside rather than in a slot Lua can see.
      */
     function pushLatex(co, latex) {
-        C.lua_createtable(co, 0, 1);
-        C.lua_pushstring(co, to_luastring(String(latex)));
-        C.lua_rawseti(co, -2, 1);
+        var slot = C.lua_newuserdata(co, 0);
+        slot.latex = String(latex);
         pushLatexMeta(co);
         C.lua_setmetatable(co, -2);
     }
@@ -305,20 +305,27 @@
 
     /** Is the value at `idx` one of our latex fragments? */
     function isLatex(co, idx) {
-        if (C.lua_type(co, idx) !== C.LUA_TTABLE) return false;
-        if (!C.lua_getmetatable(co, idx)) return false;
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(LATEX_META));
+        return wearing(co, idx, LATEX_META);
+    }
+
+    /** And is it one of our callable actions? Desmos.type asks. */
+    function isAction(co, idx) {
+        return wearing(co, idx, ACTION_META);
+    }
+
+    /** A userdata of ours wearing the metatable `key` names, and what it holds - or null. */
+    function wearing(co, idx, key) {
+        if (C.lua_type(co, idx) !== C.LUA_TUSERDATA) return null;
+        if (!C.lua_getmetatable(co, idx)) return null;
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(key));
         var same = C.lua_rawequal(co, -1, -2);
         C.lua_pop(co, 2);
-        return !!same;
+        return same ? C.lua_touserdata(co, idx) : null;
     }
 
     function latexOf(co, idx) {
-        if (!isLatex(co, idx)) return null;
-        C.lua_rawgeti(co, idx, 1);
-        const latex = C.lua_tojsstring(co, -1);
-        C.lua_pop(co, 1);
-        return latex;
+        var slot = isLatex(co, idx);
+        return slot ? slot.latex : null;
     }
 
     // -----------------------------------------------------------------------
@@ -331,11 +338,9 @@
      * outside one it fires on its own.
      */
     function pushAction(co, latex, isFunction) {
-        C.lua_createtable(co, 0, 2);
-        C.lua_pushstring(co, to_luastring(latex));
-        C.lua_rawseti(co, -2, 1);
-        C.lua_pushboolean(co, !!isFunction);
-        C.lua_rawseti(co, -2, 2);
+        var slot = C.lua_newuserdata(co, 0);
+        slot.latex = latex;
+        slot.takesArguments = !!isFunction;
         pushActionMeta(co);
         C.lua_setmetatable(co, -2);
     }
@@ -360,10 +365,11 @@
     }
 
     function actionToString(co) {
-        C.lua_rawgeti(co, 1, 1);
-        var latex = C.lua_tojsstring(co, -1);
-        C.lua_pop(co, 1);
-        C.lua_pushstring(co, to_luastring("action " + latex));
+        var slot = isAction(co, 1);
+        C.lua_pushstring(
+            co,
+            to_luastring("action " + (slot ? slot.latex : "?"))
+        );
         return 1;
     }
 
@@ -372,11 +378,10 @@
      * `X\left(4\right)` and Desmos works out what that means.
      */
     function actionCall(co) {
-        C.lua_rawgeti(co, 1, 1);
-        var base = C.lua_tojsstring(co, -1);
-        C.lua_rawgeti(co, 1, 2);
-        var takesArguments = C.lua_toboolean(co, -1);
-        C.lua_pop(co, 2);
+        var slot = isAction(co, 1);
+        if (!slot) return fail(co, "that is not an action of the graph's");
+        var base = slot.latex;
+        var takesArguments = slot.takesArguments;
 
         var n = C.lua_gettop(co);
         if (takesArguments && n < 2)

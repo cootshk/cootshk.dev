@@ -288,11 +288,15 @@
         });
     }
 
-    /** A helper a parked read was waiting on has reported. */
-    function wake(cell, value, gen) {
+    /**
+     * A helper a parked read was waiting on has reported. The helper itself is handed back
+     * rather than its value, because what the graph answered with is more than the numbers -
+     * bridge.pushRead is what turns it into the polygon or the list it was.
+     */
+    function wake(cell, helper, gen) {
         if (!cell.co || cell.gen !== gen) return;
         cell.parked = false;
-        lua.bridge.pushValue(cell.co, value);
+        lua.bridge.pushRead(cell.co, helper);
         step(cell, 1);
     }
 

@@ -98,6 +98,52 @@ wins**: define `s_{in}` and `sin` means your value again, until you delete it.
 | `log(x, 2)`        | `\log_{2}\left(x\right)` - the base is second               |
 | `math.sin(2)`      | Lua's own, which never asks the graph anything              |
 
+### What a value is
+
+A number is a **Lua number**. Everything a number can already do - arithmetic, a comparison,
+`math.floor`, `string.format` - is most of why a cell is worth writing, and no metamethod gives
+that back to something that is not one.
+
+Everything else the graph answers with is a **Desmos value**: a closed object that remembers the
+latex it was read from and Desmos' own word for what that latex is worth. It indexes, measures
+and walks like what it is, and a function or an action still calls:
+
+```lua
+local g = Desmos.G                  -- a polygon
+#g                                  -- 3
+g[1].x                              -- its first vertex
+for i, v in ipairs(g) do ... end    -- and pairs() too
+tostring(g)                         -- "G", the latex it came from
+Desmos.f(3)                         -- a graph function still calls
+```
+
+`Desmos.type(v)` is a **superset of Lua's `type`**: everything Lua has a word for keeps that word,
+and only what `type` would call `userdata` gets one of ours. It is read from under Lua, so a cell
+that rebinds `type` - as cells do - cannot change what it says.
+
+| value             | `type`                      | `Desmos.type`  |
+| ----------------- | --------------------------- | -------------- |
+| `5`, `"hi"`, `{}` | `number`, `string`, `table` | the same       |
+| a polygon         | `userdata`                  | `polygon`      |
+| a list of points  | `userdata`                  | `point_list`   |
+| `point(1, 2)`     | `userdata`                  | `single_point` |
+| the graph's `f`   | `userdata`                  | `function`     |
+| the graph's `Y`   | `userdata`                  | `action`       |
+| `Desmos.items[1]` | `userdata`                  | `item`         |
+
+The custom words are Desmos' own `expression_type`, lowercased - its vocabulary rather than one
+of ours that would then disagree with the calculator.
+
+These are userdata rather than tables so that `rawget` and `rawset`, which a cell is given,
+cannot reach past the metamethods and leave a forged field where the real value should be.
+
+**Writing one back.** A _shape_ - a polygon, a vector, a 3D segment or triangle - goes back as
+the latex it was read from, because that is the only spelling that keeps it one: written out as
+the numbers it reads as, it would land as a list of points, which is a different thing drawn in
+the same place. Everything else is written out, which is both what it is and a snapshot - so
+`Desmos.k = f(3)` and `Desmos.k = f({1,2,3})` mean the same kind of thing, and a value read once
+does not quietly follow what it was read from.
+
 The list is Desmos' rather than one written down here: it is MathQuill's `autoOperatorNames`, read
 through `Calc.controller.getMathquillConfig` the way `extensions/matrices` does. So a geometry
 graph gets the geometry functions, the names `extensions/matrices` adds come along too, and none
@@ -524,14 +570,29 @@ Desmos.items.P.label = "this is a label!"
 Desmos.items.P.showLabel = true
 ```
 
-An item is found three ways: by the name it defines (`Desmos.items.G`), by its id
-(`Desmos.items["17"]`), or by where it sits on the sheet (`Desmos.items[1]`, and `#Desmos.items`
-for how many there are, so `ipairs` walks the graph). The name is tried first, because a name is
-what a graph is written in; an id is what is left for the things that define no name, which is
-most of what is worth styling - `y=x^{2}`, a circle, an image, a folder.
+An item is found four ways: by the name it defines (`Desmos.items.G`), by where it sits on the
+sheet (`Desmos.items[1]`), by its id (`Desmos.items["17"]`, or `Desmos.items.byId(17)`), or by
+walking the sheet. The name is tried first, because a name is what a graph is written in; the
+rest is what is left for the things that define no name, which is most of what is worth styling -
+`polygon(A,B,C)`, `y=x^{2}`, a circle, an image, a folder.
 
-A handle is the same table every time, so `Desmos.items.P == Desmos.items.P` and one can be kept
-in a local across a run.
+The brackets are the sheet and `byId` is the id, because those are different things: on almost
+every graph `Desmos.items[1]` and the item whose id is 1 are different rows.
+
+```lua
+for i, item in pairs(Desmos.items) do print(i, item) end
+-- 1  A=\operatorname{polygon}\left(\left(1,2\right),\left(3,4\right)\right)
+-- 2  V=\operatorname{vector}\left(\left(0,0\right),\left(1,1\right)\right)
+```
+
+`#Desmos.items` is how many rows there are, `ipairs` and `pairs` both walk them in order, and
+`tostring` of a handle is the item's own latex - a note gives its text and a folder its title.
+Printing one is asked to find out _which row this is_, so that is what it answers.
+
+A handle is the same object every time, so `Desmos.items.P == Desmos.items.P` and one can be
+kept in a local across a run. It is a **userdata**, not a table, so `rawget` and `rawset` cannot
+reach past the metamethods: on a table, `rawset(item, "color", 1)` would put a real field where
+`__index` looks and quietly break that handle for the rest of the page.
 
 Why not the value itself? Because most items have no value to hang it off. A number cannot carry
 a metatable in Lua, `f(x)=x^{2}` is a function and neither can that, and `x^{2}+y^{2}=1` has no
@@ -902,9 +963,14 @@ that field instead of the real table.
 
 ```lua
 setmetatable({}, {__index = f})         -- yours: fine
-setmetatable(Desmos.items.P, {})        -- error: cannot change a protected metatable
+setmetatable(Desmos, {})                -- error: cannot change a protected metatable
 getmetatable(_G).__index = f            -- error: this is a locked metatable, not the real one
+rawset(Desmos.items.P, "color", 1)      -- error: table expected, got userdata
 ```
+
+A handle is a userdata rather than a table, so the `raw*` family refuses it outright - which
+matters because `rawset` is granted (see above) and a raw field on a handle would sit in front
+of the very metamethod that reaches the graph.
 
 That field is one shared, empty, locked table - every object this extension makes answers with
 the same one, it is its own metatable so there is no layer under it, and writing to it errors
@@ -976,8 +1042,9 @@ which looks exactly like someone else editing underneath you. `index.js` reads
 
 - Anything the evaluator has numbers for can be read. A name it has no value for at all - a
   distribution, a name that errors - still reads as `NaN`.
-- A polygon comes back as its points and a colour as its three numbers, so neither goes back as
-  the thing it was: writing one puts a list on the graph, not a polygon.
+- A colour comes back as its three numbers and goes back as a list of three, not as a colour.
+  Shapes do not have this problem - see **What a value is** - but a type with no shape of its own
+  on the way out is still just its numbers.
 - A name the graph defines but the evaluator cannot value reads as `NaN`. A name the graph does
   not define at all reads as `nil`; the two are worth telling apart.
 - A Desmos function called from Lua costs one trip to the evaluator per distinct argument. Pass a

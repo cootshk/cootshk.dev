@@ -18,12 +18,22 @@
 //     Desmos.items.P.color = "#aabbcc"        -- by the name it defines
 //     Desmos.items["4"].hidden = true         -- by its id
 //     Desmos.items[1].label = "first"         -- by where it sits on the sheet
+//     Desmos.items.byId("17").hidden = true   -- by the id Desmos filed it under
 //     Desmos.items.n.slider.max = 20          -- a property the saved graph nests
-//     for i = 1, #Desmos.items do ... end
+//     for i, item in pairs(Desmos.items) do print(i, item) end
 //
-// A handle is an empty table with a per-item metatable; the id rides along as the metamethods'
-// upvalue, and `__metatable` is locked, so a cell cannot lift the id out or reach the closures.
-// Handles are cached, so `Desmos.items.P == Desmos.items.P`.
+// The brackets are the sheet and `byId` is the id, because those are different things: on
+// almost every graph `Desmos.items[1]` and the item whose id is 1 are different rows.
+//
+// A handle is a **userdata** carrying the id, wearing the one metatable every handle here
+// wears. Userdata because a table with everything on its metatable is only closed until
+// somebody reaches past the metamethods - `rawset(item, "color", 1)` puts a real field on it,
+// and __index/__newindex do not fire for a key the table already holds, so that handle would
+// read back its own junk and write nowhere near the graph for as long as the page lasted.
+// `rawget` and `rawset` refuse a userdata outright; `pairs`, `ipairs` and `#` do not.
+//
+// Handles are cached, so `Desmos.items.P == Desmos.items.P`, and `tostring` is the item's own
+// latex - `print(Desmos.items[1])` is asked to find out which row this is.
 //
 // **The property names are the saved graph's.** `pointSize`, `suppressTextOutline`,
 // `parametricDomain` - what `getState()` calls them, nested exactly where it nests them. The
@@ -65,6 +75,9 @@
 
     /** Registry key for the handle cache: item -> the one handle table for it. */
     var HANDLES = "cde.lua.items";
+
+    /** Registry key for the one metatable every handle wears. */
+    var HANDLE_META = "cde.lua.handle";
 
     /** `{ min, max }`, which is the shape of every domain the state has. */
     var BOUNDS = {
@@ -427,7 +440,17 @@
         changed: changed,
 
         /** What comes after a dot, for the editor's completion list. */
-        suggest: suggest
+        suggest: suggest,
+
+        /**
+         * Which kind of handle the value at `idx` is - "item", "settings", "ticker",
+         * "viewport" - or null. bridge.desmosType asks, so `Desmos.type` can name one.
+         */
+        isHandle: function (co, idx) {
+            var slot = held(co, idx);
+            if (!slot) return null;
+            return slot.which || (slot.group ? slot.group : "item");
+        }
     };
 
     // -----------------------------------------------------------------------
@@ -435,13 +458,19 @@
     // -----------------------------------------------------------------------
 
     function push(co) {
-        C.lua_createtable(co, 0, 0);
+        // A userdata for the reason a handle is one: `rawset(Desmos.items, 1, x)` on a table
+        // would put a real field where __index looks, and poison the first row of the sheet for
+        // every cell on the graph. Its own metatable, because __len and __pairs are the
+        // sheet's and mean nothing on one item.
+        C.lua_newuserdata(co, 0);
 
-        C.lua_createtable(co, 0, 4);
+        C.lua_createtable(co, 0, 5);
         C.lua_pushcfunction(co, itemsIndex);
         C.lua_setfield(co, -2, to_luastring("__index"));
         C.lua_pushcfunction(co, itemsNewIndex);
         C.lua_setfield(co, -2, to_luastring("__newindex"));
+        C.lua_pushcfunction(co, itemsPairs);
+        C.lua_setfield(co, -2, to_luastring("__pairs"));
         C.lua_pushcfunction(co, itemsLen);
         C.lua_setfield(co, -2, to_luastring("__len"));
         lua.bridge.sealed(co);
@@ -476,7 +505,17 @@
             return 1;
         }
 
-        var id = find(C.lua_tojsstring(co, 2));
+        var key = C.lua_tojsstring(co, 2);
+
+        // Through __index rather than sat in the table as a field, so the table stays empty and
+        // every assignment to it still reaches __newindex - a field would be quietly
+        // overwritable, because __newindex does not fire for a key the table already has.
+        //
+        // It costs the name `b_{yId}`, which this now answers for before the sheet is asked.
+        // One Desmos name out of a possible few thousand, for a door the brackets cannot be.
+        if (key === "byId") return pushById(co);
+
+        var id = find(key);
         if (id === null) {
             C.lua_pushnil(co);
             return 1;
@@ -485,8 +524,81 @@
         return 1;
     }
 
+    /**
+     * `Desmos.items.byId("200")` - the item Desmos filed under that id, wherever it sits.
+     *
+     * A door of its own, because the brackets are the sheet's: `Desmos.items[1]` is the first
+     * row and not the item whose id is 1, and on almost every graph those are different items.
+     * An id is a string to Desmos; a number is spelled as one here, so an id read off a
+     * `getState()` can be handed over the way it looks.
+     *
+     * nil for an id nothing has, the same as every other lookup here.
+     */
+    function itemsById(co) {
+        var t = C.lua_type(co, 1);
+        if (t !== C.LUA_TNUMBER && t !== C.LUA_TSTRING)
+            return fail(
+                co,
+                "Desmos.items.byId takes an id, as a number or a string"
+            );
+
+        var want =
+            t === C.LUA_TNUMBER
+                ? String(C.lua_tonumber(co, 1))
+                : C.lua_tojsstring(co, 1);
+
+        var list = all();
+        for (var i = 0; i < list.length; i++)
+            if (String(list[i].id) === want) {
+                pushHandle(co, want, null);
+                return 1;
+            }
+
+        C.lua_pushnil(co);
+        return 1;
+    }
+
+    /** One `byId`, kept where the handles are so it is the same function every time. */
+    function pushById(co) {
+        if (cached(co, "f byId")) return 1;
+        C.lua_pushcfunction(co, itemsById);
+        keep(co, "f byId");
+        return 1;
+    }
+
+    /**
+     * __pairs for `Desmos.items`: the sheet in order, as `i, item`.
+     *
+     * The table holds nothing of its own - every lookup is a metamethod - so Lua's rawget-based
+     * traversal finds an empty table, which is the same reason bridge.js gives `_G` a __pairs.
+     * `ipairs` has always walked it, because that one goes through __index; this is what makes
+     * `pairs` say the same thing.
+     *
+     * An iterator rather than a snapshot, so a long sheet does not build a handle for every row
+     * before the loop body has seen the first one.
+     */
+    function itemsPairs(co) {
+        C.lua_pushcfunction(co, itemsNext);
+        C.lua_pushvalue(co, 1);
+        C.lua_pushinteger(co, 0);
+        return 3;
+    }
+
+    function itemsNext(co) {
+        var at = C.lua_tointeger(co, 2) + 1;
+        var list = all();
+        if (at < 1 || at > list.length) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        // An integer, so `for i, item in pairs(...)` counts 1, 2, 3 rather than 1.0, 2.0, 3.0.
+        C.lua_pushinteger(co, at);
+        pushHandle(co, String(list[at - 1].id), null);
+        return 2;
+    }
+
     function itemsLen(co) {
-        C.lua_pushnumber(co, all().length);
+        C.lua_pushinteger(co, all().length);
         return 1;
     }
 
@@ -524,72 +636,174 @@
     // -----------------------------------------------------------------------
 
     /**
-     * The handle for an item, or for one of the objects it nests, made once and kept.
+     * The handle for an item, for one of the objects it nests, or for the graph's own settings,
+     * ticker and viewport. Made once and kept, so `Desmos.items.P == Desmos.items.P` and a
+     * handle can be held in a local across a run.
      *
-     * One table per thing, so `Desmos.items.P == Desmos.items.P` and a handle can be held in a
-     * local across a run. The table itself is empty: everything is on its metatable, and what
-     * it points at is an upvalue of the metamethods rather than a field, so a cell has nothing
-     * to rawget and nothing to overwrite.
+     * **A userdata, not a table.** A table with everything on its metatable is only closed
+     * until somebody reaches past the metamethods. `rawset(item, "color", 1)` puts a real field
+     * on it - and __index and __newindex do not fire for a key the table already holds - so
+     * from then on that handle reads back its own junk and writes nowhere near the graph.
+     * Handles are cached, so it would stay broken for as long as the page lasted. `rawget` and
+     * `rawset` refuse a userdata outright ("table expected"), which is the whole of the fix,
+     * and `pairs`, `ipairs` and `#` all still work through the metamethods below.
      *
-     * The cache holds one small table per thing ever asked about, which is bounded by the graph
-     * and never by how often a cell runs. A handle for an item since deleted answers `id` and
-     * nil to everything else.
+     * **What it points at rides inside it.** fengari's userdata carries a plain JS object, so
+     * the id goes there rather than into a closure - which means one metatable for every handle
+     * this file hands out, instead of a fresh one holding three fresh closures per thing ever
+     * asked about. `which` is set for the three that are not items, `group` for a nested object.
+     *
+     * The cache is bounded by the graph and never by how often a cell runs. A handle for an
+     * item since deleted answers `id` and nil to everything else.
      */
     function pushHandle(co, id, group) {
         var key = group === null ? "i " + id : "g " + id + " " + group;
+        if (cached(co, key)) return;
 
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
-        if (C.lua_isnil(co, -1)) {
-            C.lua_pop(co, 1);
-            C.lua_createtable(co, 0, 8);
-            C.lua_pushvalue(co, -1);
-            C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
-        }
+        var slot = C.lua_newuserdata(co, 0);
+        slot.id = id;
+        slot.group = group;
 
-        C.lua_getfield(co, -1, to_luastring(key));
-        if (!C.lua_isnil(co, -1)) {
-            C.lua_remove(co, -2);
-            return;
-        }
-        C.lua_pop(co, 1);
-
-        C.lua_createtable(co, 0, 0);
-
-        C.lua_createtable(co, 0, 4);
-        if (group === null) {
-            bind(co, [id], handleIndex, "__index");
-            bind(co, [id], handleNewIndex, "__newindex");
-            bind(co, [id], handleToString, "__tostring");
-        } else {
-            bind(co, [id, group], groupIndex, "__index");
-            bind(co, [id, group], groupNewIndex, "__newindex");
-            bind(co, [id, group], groupToString, "__tostring");
-        }
-        lua.bridge.sealed(co);
-        C.lua_setfield(co, -2, to_luastring("__metatable"));
+        pushHandleMeta(co);
         C.lua_setmetatable(co, -2);
 
-        C.lua_pushvalue(co, -1);
-        C.lua_setfield(co, -3, to_luastring(key));
-        C.lua_remove(co, -2);
-    }
-
-    /** One metamethod, with what it points at closed over. */
-    function bind(co, upvalues, fn, name) {
-        upvalues.forEach(function (text) {
-            C.lua_pushstring(co, to_luastring(text));
-        });
-        C.lua_pushcclosure(co, fn, upvalues.length);
-        C.lua_setfield(co, -2, to_luastring(name));
+        keep(co, key);
     }
 
     /**
-     * The handle for the graph's settings, its viewport, or the ticker. One of each, so the
-     * only upvalue is which one it is.
+     * The handle for the graph's settings, its viewport, or the ticker. One of each, and the
+     * same metatable every other handle wears - `which` is what tells them apart.
      */
     function pushOne(co, which) {
         var key = "s " + which;
+        if (cached(co, key)) return;
 
+        var slot = C.lua_newuserdata(co, 0);
+        slot.which = which;
+
+        pushHandleMeta(co);
+        C.lua_setmetatable(co, -2);
+
+        keep(co, key);
+    }
+
+    /** The one metatable, made on first use and kept in the registry. */
+    function pushHandleMeta(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLE_META));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 4);
+        C.lua_pushcfunction(co, handleIndex);
+        C.lua_setfield(co, -2, to_luastring("__index"));
+        C.lua_pushcfunction(co, handleNewIndex);
+        C.lua_setfield(co, -2, to_luastring("__newindex"));
+        C.lua_pushcfunction(co, handleToString);
+        C.lua_setfield(co, -2, to_luastring("__tostring"));
+        lua.bridge.sealed(co);
+        C.lua_setfield(co, -2, to_luastring("__metatable"));
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLE_META));
+    }
+
+    /**
+     * What the handle at `idx` points at.
+     *
+     * Only ever reached through the metatable above, which nothing but this file can attach -
+     * `__metatable` is locked, so a cell cannot lift it off one handle and put it on something
+     * else. The guard is for the shape of the thing rather than for a caller that could exist.
+     */
+    function held(co, idx) {
+        return C.lua_type(co, idx) === C.LUA_TUSERDATA
+            ? C.lua_touserdata(co, idx)
+            : null;
+    }
+
+    /**
+     * A property, as Lua sees it, from whichever of the three a handle stands for.
+     *
+     * An unknown one is nil rather than an error - that is what a table does, and
+     * `if item.label then` has to work - while setting an unknown one *is* an error, because a
+     * name Desmos does not know would silently do nothing.
+     */
+    function handleIndex(co) {
+        var slot = held(co, 1);
+        if (!slot || C.lua_type(co, 2) !== C.LUA_TSTRING) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+
+        var name = C.lua_tojsstring(co, 2);
+        if (slot.which) return readOne(co, slot.which, name);
+        if (slot.group) return readSub(co, slot.id, slot.group, name);
+        return readProp(co, slot.id, name);
+    }
+
+    function handleNewIndex(co) {
+        var slot = held(co, 1);
+        if (!slot) return fail(co, "that is not a handle of this extension's");
+        if (C.lua_type(co, 2) !== C.LUA_TSTRING)
+            return fail(co, "a property is named with a string");
+
+        var name = C.lua_tojsstring(co, 2);
+        if (slot.which) return writeOne(co, slot.which, name, 3);
+        if (slot.group) return writeSub(co, slot.id, slot.group, name, 3);
+        return writeProp(co, slot.id, name, 3);
+    }
+
+    /**
+     * What a handle prints as.
+     *
+     * An item is its own latex, verbatim: `print(Desmos.items[1])` is asked to find out *which
+     * row this is*, and the row is its latex - `A=\operatorname{polygon}\left(\left(1,2\right),
+     * \left(3,4\right)\right)` says in one line what a list of forty properties would have
+     * buried. It is also the one thing about an item this extension never has to guess at.
+     *
+     * An item with no latex says what it does hold instead: a note its text, a folder its
+     * title. An image has neither, so it is named by what it is.
+     */
+    function handleToString(co) {
+        var slot = held(co, 1);
+        C.lua_pushstring(
+            co,
+            to_luastring(
+                !slot
+                    ? "a handle"
+                    : slot.which
+                      ? "the graph's " + slot.which
+                      : slot.group
+                        ? slot.group + " of item " + slot.id
+                        : spell(modelOf(slot.id), slot.id)
+            )
+        );
+        return 1;
+    }
+
+    function spell(model, id) {
+        if (!model) return "item " + id + " (gone)";
+        return (
+            filled(model.latex) ||
+            filled(model.text) ||
+            filled(model.title) ||
+            (model.type || "item") + " " + id
+        );
+    }
+
+    /** A string with something in it, or null - the model spells "not set" as `""`. */
+    function filled(value) {
+        return typeof value === "string" && value !== "" ? value : null;
+    }
+
+    /**
+     * The cache every handle lives in: one table in the registry, so a handle asked for twice
+     * is the same object both times.
+     *
+     * Answers true with the cached value on the stack. Answers false with the *cache* on the
+     * stack, for keep() to put the newly built value into - so a caller is a build between the
+     * two and never has to spell the registry twice.
+     */
+    function cached(co, key) {
         C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(HANDLES));
         if (C.lua_isnil(co, -1)) {
             C.lua_pop(co, 1);
@@ -599,109 +813,19 @@
         }
 
         C.lua_getfield(co, -1, to_luastring(key));
-        if (!C.lua_isnil(co, -1)) {
-            C.lua_remove(co, -2);
-            return;
+        if (C.lua_isnil(co, -1)) {
+            C.lua_pop(co, 1);
+            return false;
         }
-        C.lua_pop(co, 1);
+        C.lua_remove(co, -2);
+        return true;
+    }
 
-        C.lua_createtable(co, 0, 0);
-
-        C.lua_createtable(co, 0, 4);
-        bind(co, [which], oneIndex, "__index");
-        bind(co, [which], oneNewIndex, "__newindex");
-        bind(co, [which], oneToString, "__tostring");
-        lua.bridge.sealed(co);
-        C.lua_setfield(co, -2, to_luastring("__metatable"));
-        C.lua_setmetatable(co, -2);
-
+    /** File what is on top of the cache under `key`, and leave only it behind. */
+    function keep(co, key) {
         C.lua_pushvalue(co, -1);
         C.lua_setfield(co, -3, to_luastring(key));
         C.lua_remove(co, -2);
-    }
-
-    function oneIndex(co) {
-        var which = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
-            C.lua_pushnil(co);
-            return 1;
-        }
-        return readOne(co, which, C.lua_tojsstring(co, 2));
-    }
-
-    function oneNewIndex(co) {
-        var which = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING)
-            return fail(co, "a property is named with a string");
-        return writeOne(co, which, C.lua_tojsstring(co, 2), 3);
-    }
-
-    function oneToString(co) {
-        C.lua_pushstring(
-            co,
-            to_luastring(
-                "the graph's " + C.lua_tojsstring(co, C.lua_upvalueindex(1))
-            )
-        );
-        return 1;
-    }
-
-    function handleIndex(co) {
-        var id = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
-            C.lua_pushnil(co);
-            return 1;
-        }
-        return readProp(co, id, C.lua_tojsstring(co, 2));
-    }
-
-    function handleNewIndex(co) {
-        var id = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING)
-            return fail(co, "an item's property is named with a string");
-        return writeProp(co, id, C.lua_tojsstring(co, 2), 3);
-    }
-
-    function handleToString(co) {
-        var id = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        var model = modelOf(id);
-        C.lua_pushstring(
-            co,
-            to_luastring(
-                "item " + id + " (" + (model ? model.type : "gone") + ")"
-            )
-        );
-        return 1;
-    }
-
-    function groupIndex(co) {
-        var id = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        var group = C.lua_tojsstring(co, C.lua_upvalueindex(2));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING) {
-            C.lua_pushnil(co);
-            return 1;
-        }
-        return readSub(co, id, group, C.lua_tojsstring(co, 2));
-    }
-
-    function groupNewIndex(co) {
-        var id = C.lua_tojsstring(co, C.lua_upvalueindex(1));
-        var group = C.lua_tojsstring(co, C.lua_upvalueindex(2));
-        if (C.lua_type(co, 2) !== C.LUA_TSTRING)
-            return fail(co, "a property is named with a string");
-        return writeSub(co, id, group, C.lua_tojsstring(co, 2), 3);
-    }
-
-    function groupToString(co) {
-        C.lua_pushstring(
-            co,
-            to_luastring(
-                C.lua_tojsstring(co, C.lua_upvalueindex(2)) +
-                    " of item " +
-                    C.lua_tojsstring(co, C.lua_upvalueindex(1))
-            )
-        );
-        return 1;
     }
 
     // -----------------------------------------------------------------------
@@ -1416,6 +1540,18 @@
         // A fixed-length list of numbers: which way is up in the 3D calculator, and how it is
         // turned. Not latex - these really are numbers.
         if (spec.kind === "numbers") {
+            // A list read off the graph is numbers too, and is not a Lua table any more.
+            var answered = lua.bridge.listOf(co, idx);
+            if (answered)
+                return answered.length === spec.length
+                    ? { api: answered, seen: answered }
+                    : {
+                          error:
+                              "it takes " +
+                              spec.length +
+                              " numbers, and this has " +
+                              answered.length
+                      };
             if (t !== C.LUA_TTABLE)
                 return {
                     error: "it takes a list of " + spec.length + " numbers"
@@ -1628,12 +1764,23 @@
         var text = String(before == null ? "" : before);
         if (!/\.$/.test(text)) return null;
 
-        // An item is looked up by the name it defines, so this is the one place the graph's own
-        // names are the whole answer.
+        // An item is looked up by the name it defines, so the graph's own names are most of
+        // this one - and `byId`, which is the door for the items that define none.
         if (/Desmos\.items\.$/.test(text))
-            return lua.bridge.names().map(function (name) {
-                return { name: name, detail: "on the graph", kind: "name" };
-            });
+            return [
+                {
+                    name: "byId",
+                    detail: "byId(id)",
+                    documentation:
+                        "an item by Desmos' own id, wherever it sits. " +
+                        "Desmos.items[1] is the first row, which is a different thing",
+                    kind: "property"
+                }
+            ].concat(
+                lua.bridge.names().map(function (name) {
+                    return { name: name, detail: "on the graph", kind: "name" };
+                })
+            );
 
         if (/Desmos\.settings\.viewport\.$/.test(text)) return listed(VIEWPORT);
         if (/Desmos\.settings\.$/.test(text)) return listed(SETTINGS);

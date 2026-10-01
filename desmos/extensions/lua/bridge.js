@@ -21,10 +21,22 @@
 // a cell to the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's
 // code, and opening one runs it.
 //
-// The objects this file hands over are closed rather than withheld. Each wears a `__metatable`,
-// which is Lua's own lock: `setmetatable` refuses such a table outright and `getmetatable` hands
-// back that field instead of the real one - so a cell gets both functions, as ordinary Lua, and
-// still cannot reach the closures behind an item's properties. See pushSealed.
+// The objects this file hands over are closed rather than withheld. Each is a **userdata**
+// wearing a `__metatable`, which is Lua's own lock: `setmetatable` refuses one outright and
+// `getmetatable` hands back that field instead of the real table - so a cell gets both
+// functions, as ordinary Lua, and still cannot reach what is behind them. See pushSealed.
+// Userdata rather than a table because `rawget` and `rawset` are granted too, and on a table
+// those reach straight past the metamethods: a raw field would sit in front of the very hook
+// that reads the graph, for as long as the page lasted.
+//
+// What the graph answers with keeps its shape. A number is a Lua number - arithmetic, `<`,
+// `math.floor` and `string.format` all have to keep working - and everything else is one of
+// those objects, remembering the latex it was read from and Desmos' own word for what that
+// latex is worth. `__index`, `__len` and `__pairs` mean a list still behaves like one, `__call`
+// means a function and an action still spell `f(3)`, and `Desmos.type` is what reports the
+// word: "polygon" where Lua would only ever have managed "userdata". A shape goes back to the
+// graph as its latex, because written out as the points it reads as it would stop being one.
+// See pushObject and SHAPED.
 //
 // Every cell shares one set of globals and keeps its own locals. The globals live in a table of
 // their own, and both `_G` and a cell's own environment are empty tables in front of it wearing
@@ -72,6 +84,9 @@
     var SAFE = "cde.lua.safe";
     var SEALED = "cde.lua.sealed";
 
+    /** The one metatable every value the graph answers with wears. See pushObject. */
+    var VALUE_META = "cde.lua.value";
+
     /**
      * A Desmos name, as Lua spells it. A Desmos identifier is one letter and an optional
      * subscript, so `a` is `a` and everything after the first letter is the subscript: `abcd`
@@ -115,6 +130,26 @@
             POINTED[name] = true;
         });
 
+    /**
+     * The types that are *more* than the numbers they read as.
+     *
+     * A polygon reads as a list of points, and `\left[\left(1,2\right),\left(3,4\right)\right]`
+     * written back is a list of points - a different thing that happens to be drawn in the same
+     * place, with no fill and no edges. So one of these goes back to the graph as the latex it
+     * was read from, which keeps it what it is.
+     *
+     * Nothing else does. A point *is* `\left(1,2\right)` and a list of numbers *is*
+     * `\left[1,4,9\right]`, so writing those out loses nothing - and a snapshot is what the
+     * cell asked for: `Desmos.k = f(3)` is 9 whether or not `f` moves afterwards, and
+     * `Desmos.k = f({1,2,3})` has to mean the same thing one row down.
+     */
+    var SHAPED = {};
+    "POLYGON VECTOR2D VECTOR3D SEGMENT3D TRIANGLE3D"
+        .split(" ")
+        .forEach(function (name) {
+            SHAPED[name] = true;
+        });
+
     /** A point's coordinates, in order, as Desmos spells them. */
     var COORDS = ["x", "y", "z"];
 
@@ -152,6 +187,13 @@
         init: init,
         pushEnv: pushEnv,
         pushValue: pushValue,
+
+        /** What a settled helper is worth, as Lua sees it. runner.js resumes a park with it. */
+        pushRead: pushRead,
+
+        /** A list the graph answered with, as numbers. items.js takes one where a table goes. */
+        listOf: listOf,
+
         begin: begin,
         finish: finish,
         names: names,
@@ -729,7 +771,10 @@
         if (numbers) {
             var computed = lua.builtins.compute(name, numbers, latex);
             if (computed) {
-                pushValue(co, computed.value);
+                // The latex rides along even though nothing was asked of the graph: it is what
+                // this value *is*, and handing it back puts the call on the graph rather than
+                // the numbers it worked out to.
+                pushShaped(co, computed.value, latex, null);
                 return 1;
             }
         }
@@ -802,7 +847,7 @@
             return 1;
         }
         if (e.ready) {
-            pushValue(co, e.value);
+            pushRead(co, e);
             return 1;
         }
 
@@ -915,9 +960,11 @@
             latex: latex,
             used: ++clock,
             // Filled in by modelOf() and valueOf(): the id Desmos filed this helper's model
-            // under, and the typed constant its value was last built out of.
+            // under, the typed constant its value was last built out of, and Desmos' own word
+            // for what the latex is worth - which is the only place "this is a polygon" exists.
             id: null,
-            typed: null
+            typed: null,
+            dtype: null
         };
         e.take = function () {
             settle(e, valueOf(e));
@@ -1077,6 +1124,8 @@
         // What we last built a value out of. published() compares against it to find the
         // helpers that moved without saying so.
         e.typed = typed;
+        // And what Desmos calls it, which no channel carries and nothing else records.
+        e.dtype = (formula && formula.expression_type) || null;
 
         if (typed && POINTED[formula.expression_type] === true)
             return shaped(typed.value, true);
@@ -1215,7 +1264,7 @@
             wake.forEach(function (parked) {
                 // The generation says which run parked here. A cell that has been re-run
                 // since is on a different thread, and this value is not its to take.
-                lua.bridge.onWake(parked.cell, value, parked.gen);
+                lua.bridge.onWake(parked.cell, e, parked.gen);
             });
 
         // A probe that read this cold asked to come back; this is the answer it waited for.
@@ -1267,6 +1316,309 @@
         return !!v && typeof v === "object" && typeof v.x === "number";
     }
 
+    // -----------------------------------------------------------------------
+    // what the graph answers with
+    // -----------------------------------------------------------------------
+
+    /**
+     * A value the graph answered with, as Lua sees it.
+     *
+     * A **number is a number.** Everything a Lua number can already do - arithmetic, a
+     * comparison, `math.floor`, `string.format` - is the whole reason a cell is worth writing,
+     * and no metamethod can give that back to something that is not one.
+     *
+     * Everything else is a closed **userdata** that remembers two things no Lua value could
+     * carry on its own: the latex it was read from, and Desmos' own word for what that latex is
+     * worth. Those are what make `Desmos.type(p)` able to say "polygon" where Lua would only
+     * ever have said "table", and what let a polygon go back to the graph *as a polygon* rather
+     * than as the list of points it happens to read as.
+     *
+     * Userdata rather than a table for the reason a handle is one: `rawset` and `rawget` reach
+     * past a table's metamethods, and `rawset` is a thing a cell is given. `__index`, `__len`
+     * and `__pairs` mean a list still indexes, measures and walks like a list, and `__call`
+     * means a function and an action still spell `f(3)`.
+     */
+    function pushObject(co, slot) {
+        var u = C.lua_newuserdata(co, 0);
+        for (var field in slot) u[field] = slot[field];
+
+        pushValueMeta(co);
+        C.lua_setmetatable(co, -2);
+    }
+
+    /** The one metatable all of them wear, made on first use and kept in the registry. */
+    function pushValueMeta(co) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(VALUE_META));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+
+        C.lua_createtable(co, 0, 7);
+        C.lua_pushcfunction(co, objectIndex);
+        C.lua_setfield(co, -2, to_luastring("__index"));
+        C.lua_pushcfunction(co, objectNewIndex);
+        C.lua_setfield(co, -2, to_luastring("__newindex"));
+        C.lua_pushcfunction(co, objectLen);
+        C.lua_setfield(co, -2, to_luastring("__len"));
+        C.lua_pushcfunction(co, objectPairs);
+        C.lua_setfield(co, -2, to_luastring("__pairs"));
+        C.lua_pushcfunction(co, objectCall);
+        C.lua_setfield(co, -2, to_luastring("__call"));
+        C.lua_pushcfunction(co, objectToString);
+        C.lua_setfield(co, -2, to_luastring("__tostring"));
+        C.lua_pushcfunction(co, objectEq);
+        C.lua_setfield(co, -2, to_luastring("__eq"));
+        pushSealed(co);
+        C.lua_setfield(co, -2, to_luastring("__metatable"));
+
+        C.lua_pushvalue(co, -1);
+        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(VALUE_META));
+    }
+
+    /**
+     * The value at `idx` if it is one of ours, and null otherwise.
+     *
+     * Matched on the metatable rather than on what the userdata holds, so an item handle - also
+     * a userdata, also of this extension's - is not mistaken for one.
+     */
+    function objectOf(co, idx) {
+        if (C.lua_type(co, idx) !== C.LUA_TUSERDATA) return null;
+        if (!C.lua_getmetatable(co, idx)) return null;
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(VALUE_META));
+        var same = C.lua_rawequal(co, -1, -2);
+        C.lua_pop(co, 2);
+        return same ? C.lua_touserdata(co, idx) : null;
+    }
+
+    /**
+     * A JS value as the Lua one the graph means by it: a number stays a number, a point and a
+     * list become objects. `latex` is what this value *is* on the graph, where there is such a
+     * thing, and is what writing it back puts there.
+     */
+    function pushShaped(co, v, latex, dtype) {
+        if (typeof v === "number") {
+            C.lua_pushnumber(co, v);
+            return;
+        }
+        if (typeof v === "boolean") {
+            C.lua_pushboolean(co, v);
+            return;
+        }
+        if (typeof v === "string") {
+            C.lua_pushstring(co, to_luastring(v));
+            return;
+        }
+        if (v === undefined || v === null) {
+            C.lua_pushnil(co);
+            return;
+        }
+        pushObject(co, {
+            kind: isPoint(v) ? "point" : "list",
+            value: v,
+            latex: latex || null,
+            dtype: dtype || null
+        });
+    }
+
+    /** What a settled helper is worth, as Lua sees it. runner.js hands the helper straight on. */
+    function pushRead(co, e) {
+        pushShaped(co, e.value, e.latex, e.dtype);
+    }
+
+    /**
+     * `p[1]`, `p.x`. A list indexes by position and a point by axis; an element that is itself
+     * a point or a list is an object of its own, with no latex, because there is no latex for
+     * "the second vertex" short of writing the index out.
+     */
+    function objectIndex(co) {
+        var slot = objectOf(co, 1);
+        if (
+            slot &&
+            slot.kind === "point" &&
+            C.lua_type(co, 2) === C.LUA_TSTRING
+        ) {
+            var axis = C.lua_tojsstring(co, 2);
+            if (typeof slot.value[axis] === "number") {
+                C.lua_pushnumber(co, slot.value[axis]);
+                return 1;
+            }
+        }
+        if (
+            slot &&
+            slot.kind === "list" &&
+            C.lua_type(co, 2) === C.LUA_TNUMBER
+        ) {
+            var at = C.lua_tonumber(co, 2);
+            if (at === Math.floor(at) && at >= 1 && at <= slot.value.length) {
+                pushShaped(co, slot.value[at - 1], null, null);
+                return 1;
+            }
+        }
+        C.lua_pushnil(co);
+        return 1;
+    }
+
+    /** What the graph says is the graph's. A cell changes it by assigning the name, not this. */
+    function objectNewIndex(co) {
+        return fail(
+            co,
+            "this is a value the graph answered with, not something to assign into. " +
+                "Assign the name instead, or build a table of your own"
+        );
+    }
+
+    function objectLen(co) {
+        var slot = objectOf(co, 1);
+        C.lua_pushinteger(
+            co,
+            !slot
+                ? 0
+                : slot.kind === "list"
+                  ? slot.value.length
+                  : slot.kind === "point"
+                    ? COORDS.filter(function (axis) {
+                          return typeof slot.value[axis] === "number";
+                      }).length
+                    : 0
+        );
+        return 1;
+    }
+
+    /**
+     * `pairs(p)`: a list by position, a point by axis.
+     *
+     * An iterator rather than a snapshot, and the same reason `Desmos.items` has one - there is
+     * nothing in the userdata for Lua's own `next` to walk.
+     */
+    function objectPairs(co) {
+        C.lua_pushcfunction(co, objectNext);
+        C.lua_pushvalue(co, 1);
+        C.lua_pushinteger(co, 0);
+        return 3;
+    }
+
+    function objectNext(co) {
+        var slot = objectOf(co, 1);
+        if (!slot) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+
+        // A point is walked by axis, so the control Lua hands back is the *name* of the one
+        // before - not a position. Read as a number it would be 0 every time round, and the
+        // loop would hand out `x` for ever.
+        if (slot.kind === "point") {
+            var axes = COORDS.filter(function (axis) {
+                return typeof slot.value[axis] === "number";
+            });
+
+            var was = -1;
+            if (C.lua_type(co, 2) === C.LUA_TSTRING) {
+                was = axes.indexOf(C.lua_tojsstring(co, 2));
+                // A key this point does not have: there is nothing after it.
+                if (was === -1) {
+                    C.lua_pushnil(co);
+                    return 1;
+                }
+            }
+
+            if (was + 1 >= axes.length) {
+                C.lua_pushnil(co);
+                return 1;
+            }
+            C.lua_pushstring(co, to_luastring(axes[was + 1]));
+            C.lua_pushnumber(co, slot.value[axes[was + 1]]);
+            return 2;
+        }
+
+        var at = C.lua_tointeger(co, 2) + 1;
+        if (slot.kind !== "list" || at < 1 || at > slot.value.length) {
+            C.lua_pushnil(co);
+            return 1;
+        }
+        C.lua_pushinteger(co, at);
+        pushShaped(co, slot.value[at - 1], null, null);
+        return 2;
+    }
+
+    /** `f(3)` and `Y()`: the two kinds that are something to run rather than something to read. */
+    function objectCall(co) {
+        var slot = objectOf(co, 1);
+        if (!slot || slot.kind !== "function")
+            return fail(
+                co,
+                "this is a value the graph answered with, not something to call"
+            );
+        return callFn(co, slot.latex);
+    }
+
+    /** The latex it stands for, which is what a cell asked the graph for in the first place. */
+    function objectToString(co) {
+        var slot = objectOf(co, 1);
+        var said =
+            slot && slot.latex
+                ? slot.latex
+                : slot
+                  ? spell(slot.value).latex || "a " + slot.kind
+                  : "a Desmos value";
+        C.lua_pushstring(co, to_luastring(said));
+        return 1;
+    }
+
+    /** Two of them are equal when they are worth the same, not when they are the same object. */
+    function objectEq(co) {
+        var a = objectOf(co, 1);
+        var b = objectOf(co, 2);
+        C.lua_pushboolean(co, !!(a && b && same(a.value, b.value)));
+        return 1;
+    }
+
+    /**
+     * `Desmos.type(v)` - a superset of Lua's own `type`.
+     *
+     * Everything Lua has a word for keeps that word, so this answers "number", "string",
+     * "table", "function", "boolean" and "nil" exactly as `type` does. Only where `type` would
+     * have said "userdata" - which is every object this extension hands out, and nothing else -
+     * does it say something of its own: what Desmos calls the value, lowercased, so a polygon is
+     * "polygon" and a list of points is "point_list".
+     *
+     * Read with lua_typename rather than by calling Lua's `type`, which *is* the builtin by
+     * definition and is reached from under Lua - so a cell that rebinds `type`, as cells do,
+     * cannot change what this says.
+     */
+    function desmosType(co) {
+        if (C.lua_gettop(co) < 1) return fail(co, "Desmos.type takes a value");
+
+        var native = luaType(co, 1);
+        if (native !== "userdata") {
+            C.lua_pushstring(co, to_luastring(native));
+            return 1;
+        }
+
+        C.lua_pushstring(co, to_luastring(ours(co, 1)));
+        return 1;
+    }
+
+    /** What one of this extension's own objects is, in a word. */
+    function ours(co, idx) {
+        var slot = objectOf(co, idx);
+        if (slot) {
+            // Desmos' own word wherever there is one: SINGLE_POINT, POINT_LIST, POLYGON,
+            // VECTOR2D. Lowercased, and nothing else changed - it is Desmos' vocabulary and not
+            // ours to tidy into something that would then disagree with the calculator.
+            if (slot.dtype) return String(slot.dtype).toLowerCase();
+            return slot.kind;
+        }
+        if (lua.actions) {
+            if (lua.actions.isLatex(co, idx)) return "latex";
+            if (lua.actions.isAction(co, idx)) return "action";
+        }
+        if (lua.items && lua.items.isHandle) {
+            var handle = lua.items.isHandle(co, idx);
+            if (handle) return handle;
+        }
+        return "userdata";
+    }
+
     /** A JS value onto a Lua stack. Numbers, points, lists of either, and nothing else yet. */
     function pushValue(co, v) {
         if (typeof v === "number") {
@@ -1302,6 +1654,53 @@
         C.lua_pushnil(co);
     }
 
+    /**
+     * A JS value as latex, for one of the graph's own that has no latex to go back as - an
+     * element taken out of a list. The same spellings toDesmos writes for a Lua table.
+     */
+    function spell(v) {
+        if (typeof v === "number") {
+            var written = num(v);
+            return written === null
+                ? { error: "it is not a number" }
+                : { latex: written };
+        }
+        if (isPoint(v)) {
+            var axes = [];
+            for (var i = 0; i < COORDS.length; i++) {
+                if (typeof v[COORDS[i]] !== "number") break;
+                var one = num(v[COORDS[i]]);
+                if (one === null)
+                    return {
+                        error: "a point needs numbers for its coordinates"
+                    };
+                axes.push(one);
+            }
+            return axes.length >= 2
+                ? { latex: "\\left(" + axes.join(",") + "\\right)" }
+                : { error: "a point needs at least two coordinates" };
+        }
+        if (Array.isArray(v)) {
+            var parts = [];
+            for (var j = 0; j < v.length; j++) {
+                var inner = spell(v[j]);
+                if (inner.error)
+                    return { error: "in the list, " + inner.error };
+                parts.push(inner.latex);
+            }
+            return { latex: "\\left[" + parts.join(",") + "\\right]" };
+        }
+        return { error: "there is no Desmos value for that" };
+    }
+
+    /** A graph list of numbers at `idx`, or null. items.js takes one where it takes a table. */
+    function listOf(co, idx) {
+        var object = objectOf(co, idx);
+        return object && object.kind === "list" && object.value.every(isNumber)
+            ? object.value.slice()
+            : null;
+    }
+
     /** `a` -> `a`, `abcd` and `a_bcd` -> `a_{bcd}`, anything else -> null. */
     function toLatex(name) {
         var m = NAME.exec(name);
@@ -1320,10 +1719,15 @@
     // calling a function the graph defines
     // -----------------------------------------------------------------------
 
-    /** A Lua function standing for a Desmos one. The latex rides along as its upvalue. */
+    /**
+     * A Desmos function, as something a cell can call.
+     *
+     * An object rather than a bare Lua closure, so `Desmos.type(f)` can say "function" about
+     * the graph's `f` the same way it says "polygon" about a polygon, and so `tostring(f)` is
+     * the name it stands for. `__call` is what makes it still spell `f(3)`.
+     */
     function pushCall(co, latex) {
-        C.lua_pushstring(co, to_luastring(latex));
-        C.lua_pushcclosure(co, callFn, 1);
+        pushObject(co, { kind: "function", latex: latex });
     }
 
     /**
@@ -1336,14 +1740,13 @@
      * and a Lua list becomes one - so `f({1, 2, 3})` is a single trip that comes back a list.
      * That is the way to do it in bulk.
      */
-    function callFn(co) {
-        var base = C.lua_tojsstring(co, C.lua_upvalueindex(1));
+    function callFn(co, base) {
         var n = C.lua_gettop(co);
 
         // No arguments is a call, not a mistake: `a\\left(\\right)=1` is a function of none, and
         // `a()` is how both Desmos and Lua spell calling it.
         var parts = [];
-        for (var i = 1; i <= n; i++) {
+        for (var i = 2; i <= n; i++) {
             var arg = toDesmos(co, i);
             if (arg.error)
                 return fail(
@@ -1492,6 +1895,8 @@
         C.lua_setfield(co, -2, to_luastring("define"));
         C.lua_pushcfunction(co, desmosSample);
         C.lua_setfield(co, -2, to_luastring("sample"));
+        C.lua_pushcfunction(co, desmosType);
+        C.lua_setfield(co, -2, to_luastring("type"));
 
         // The graph itself, as objects. A value has no colour and a number cannot carry a
         // metatable, so an item is a second thing to reach for - and so are the graph's
@@ -1629,6 +2034,14 @@
     function toJS(co, idx) {
         if (lua.actions && lua.actions.isLatex(co, idx)) return undefined;
 
+        // A list the graph answered with is numbers like any other, so `total(L)` is still
+        // arithmetic here rather than a round trip to the worker.
+        var object = objectOf(co, idx);
+        if (object)
+            return object.kind === "list" && object.value.every(isNumber)
+                ? object.value.slice()
+                : undefined;
+
         var t = C.lua_type(co, idx);
         if (t === C.LUA_TNUMBER) return C.lua_tonumber(co, idx);
         if (t !== C.LUA_TTABLE) return undefined;
@@ -1654,6 +2067,21 @@
         // A fragment from inside an action body is already the answer.
         if (lua.actions && lua.actions.isLatex(co, idx))
             return { latex: lua.actions.latexOf(co, idx) };
+
+        // A value the graph answered with. A shape goes back as the latex it was read from,
+        // because that is the only spelling that keeps it one - see SHAPED. Everything else is
+        // written out, which is both what it is and a snapshot, so a value read once does not
+        // quietly follow the thing it was read from afterwards.
+        var object = objectOf(co, idx);
+        if (object) {
+            if (object.kind === "function")
+                return {
+                    error: "that is a function of the graph's. Call it - f(3) - and assign what it gives back"
+                };
+            if (object.latex && SHAPED[object.dtype])
+                return { latex: object.latex };
+            return spell(object.value);
+        }
 
         if (t === C.LUA_TNUMBER) {
             var s = num(C.lua_tonumber(co, idx));
@@ -1712,7 +2140,9 @@
                         error: "the list has a value that is not a number"
                     };
                 parts.push(v);
-            } else if (inner === C.LUA_TTABLE) {
+            } else if (inner === C.LUA_TTABLE || inner === C.LUA_TUSERDATA) {
+                // A table of this cell's own, or a point the graph answered with - `point(1,2)`
+                // is the second now, and a list of them is the ordinary way to build a path.
                 var point = toDesmos(co, C.lua_absindex(co, -1));
                 C.lua_pop(co, 1);
                 if (point.error)
@@ -1888,11 +2318,11 @@
      * `point(1, 2)`, which is `\left(1,2\right)` on the graph - and `point(1, 2, 3)` in the 3D
      * calculator.
      *
-     * It hands back the table a point already is, `{x = 1, y = 2}`, rather than a value of its
-     * own: that is the spelling toDesmos reads and the spelling a point read *off* the graph
-     * arrives in, so `point(1, 2).x` is 1 and a point can be taken apart and put back together
-     * without either end knowing which door it came through. What this adds is the name, the
-     * arity check, and saying which coordinate is wrong where one is.
+     * It hands back the same kind of object a point read *off* the graph arrives in, so
+     * `point(1, 2).x` is 1, `Desmos.type` says "single_point" about both, and a point can be
+     * taken apart and put back together without either end knowing which door it came through.
+     * What this adds is the name, the arity check, and saying which coordinate is wrong where
+     * one is.
      */
     function luaPoint(co) {
         var n = C.lua_gettop(co);
@@ -1903,7 +2333,11 @@
                     n
             );
 
-        for (var i = 1; i <= n; i++)
+        var axes = [];
+        var numbers = {};
+        var known = true;
+
+        for (var i = 1; i <= n; i++) {
             if (!isCoord(co, i))
                 return fail(
                     co,
@@ -1913,11 +2347,35 @@
                         luaType(co, i)
                 );
 
-        C.lua_createtable(co, 0, n);
-        for (var j = 1; j <= n; j++) {
-            C.lua_pushvalue(co, j);
-            C.lua_setfield(co, -2, to_luastring(COORDS[j - 1]));
+            var one = coord(co, i);
+            if (one === null)
+                return fail(
+                    co,
+                    'point needs a real number for "' + COORDS[i - 1] + '"'
+                );
+            axes.push(one);
+
+            if (C.lua_type(co, i) === C.LUA_TNUMBER)
+                numbers[COORDS[i - 1]] = C.lua_tonumber(co, i);
+            else known = false;
         }
+
+        var latex = "\\left(" + axes.join(",") + "\\right)";
+
+        // Inside an action body a coordinate can be a name nothing has a number for yet, and a
+        // point built out of one is a formula rather than a value - so it is the same fragment
+        // every other half-known thing in a body is, and Desmos works it out at fire time.
+        if (!known) {
+            lua.actions.pushLatex(co, latex);
+            return 1;
+        }
+
+        pushObject(co, {
+            kind: "point",
+            value: numbers,
+            latex: latex,
+            dtype: "SINGLE_POINT"
+        });
         return 1;
     }
 
