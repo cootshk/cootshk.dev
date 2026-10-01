@@ -139,14 +139,19 @@
 
     var DEG = Math.PI / 180;
 
-    /** Is the graph in degrees? Trig is the only thing that cares. */
+    /**
+     * Is the graph in degrees? Trig is the only thing that cares.
+     *
+     * `controller.graphSettings` and not `Calc.graphSettings`: the second is not a property of
+     * the API object at all, so it read undefined on every graph and every angle here was a
+     * radian - `sin(90)` on a degree-mode graph came back 0.894 rather than 1. ./items.js and
+     * ./index.js both reach the settings the same way.
+     */
     function degrees() {
         try {
-            return !!(
-                Calc &&
-                Calc.graphSettings &&
-                Calc.graphSettings.degreeMode
-            );
+            var settings =
+                Calc && Calc.controller && Calc.controller.graphSettings;
+            return !!(settings && settings.degreeMode);
         } catch (error) {
             return false;
         }

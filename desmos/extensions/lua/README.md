@@ -568,9 +568,15 @@ n.slider.min = -5
 n.slider.max = 25
 n.slider.isPlaying = true
 
-n.cdf = { show = true, min = 1, max = 2 }   -- or all at once
-n.cdf = nil                                  -- and nil takes it off
+n.slider = { max = 25 }                     -- the same write; min is left alone
+n.cdf = { show = true, min = 1, max = 2 }   -- or several at once
+n.cdf = nil                                 -- and nil takes it off
 ```
+
+A table sets the parts it names and leaves the rest where they are - it is not a replacement of
+the object - so the two spellings above are one write. They take the same doors, they are both
+skipped when they would change nothing, and they both say so for a name the object does not
+have.
 
 - `slider`: `min`, `max`, `step`, `hardMin`, `hardMax`, `isPlaying`, `loopMode`,
   `animationPeriod`, `playDirection`
@@ -929,8 +935,8 @@ one loads fine - it is a Lua comment, and now that is all it is.
 
 The standard library is seeded into a cell's environment _before_ that environment's metatable
 goes on, which is what keeps it out of the shared globals: set afterwards it would go through
-`__newindex` and be published to every cell on the graph. `test.js` checks that a cell cannot
-reach `js`, `debug` or `load` by name, through `_G`, or by walking `pairs(_G)`.
+`__newindex` and be published to every cell on the graph. A cell cannot reach `js`, `debug` or
+`load` by name, through `_G`, or by walking `pairs(_G)`.
 
 ## Loops
 
@@ -957,15 +963,14 @@ It is cheaper, and it is wrong twice:
   value into the cell's text visibly disappearing.
 
 One editor per cell has neither, because nothing is ever re-derived: the Monaco model _is_ the
-text. `test.js` asserts that shape so it does not come back as an optimisation.
+text. Keep that shape; the optimisation is not worth what it costs.
 
 The value bug underneath the second one is worth knowing separately, because it will bite
 anything else that reads the graph back: **`getState()` is a frame stale.** `setExpression` sets
 an item model's `text` immediately, but `getState()` reads `cachedViewState`, which Desmos
 rebuilds once a frame. Read back inside the frame you wrote in, it reports the _previous_ text -
 which looks exactly like someone else editing underneath you. `index.js` reads
-`Calc.controller.getAllItemModels()` instead, and there is a test that fails if that is ever
-swapped back.
+`Calc.controller.getAllItemModels()` instead, and it must keep doing so.
 
 ## Limits
 
@@ -1044,22 +1049,12 @@ swapped back.
   model outlives the row, so scrolling costs no undo history, and the number of live editors is
   bounded by what is on screen rather than by how many cells the graph has.
 
-## Tests
+## After a Desmos deploy
 
-```
-node desmos/extensions/lua/test.js            # the Lua half, offline
-node desmos/extensions/lua/patches.test.js    # do the + menu patches still match?
-```
-
-`test.js` runs index.js, builtins.js, bridge.js, items.js, actions.js and runner.js against the real VM out of
-`cdn/fengari-web.js` and a stub `Calc` that reports values on a timer - so the pause-and-resume
-path is exercised rather than assumed. No browser, nothing to install.
-
-`patches.test.js` fetches the live Desmos bundle and applies the patches with the loader's own
-`canonicalizeMatch`, checking each lands as often as it claims and that the result still parses.
-Worth running after a Desmos deploy: a patch that matches nothing drops the whole extension for
-that load, which here means a graph's cells show as raw notes. The Patch Helper tab is the
-interactive version, and where to go when this says something has moved.
+A patch that matches nothing drops the whole extension for that load, which here means a graph's
+cells show as raw notes. The Patch Helper tab is where to go when something has moved: it applies
+each pattern against the live bundle with the loader's own `canonicalizeMatch` and says which ones
+no longer land.
 
 ## The files
 
@@ -1072,4 +1067,3 @@ interactive version, and where to go when this says something has moved.
 | `actions.js`  | actions both ways - recording a body, the markers, and applying updates                    |
 | `runner.js`   | when a cell runs, the loop watchdog, and errors                                            |
 | `editor.js`   | Monaco - one editor per cell - the gutter button, and the textarea it falls back to        |
-| `test.js`     | the above; not loaded in the browser                                                       |

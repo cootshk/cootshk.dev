@@ -826,18 +826,7 @@
         var props = shape(which);
         var spec = props[name];
         if (!spec) return fail(co, missing(which, name, settableIn(props)));
-        if (!spec.kind)
-            return fail(
-                co,
-                which === "viewport"
-                    ? '"' +
-                          name +
-                          '" can be read and not set: Desmos moves the viewport with ' +
-                          "setMathBounds, which is two dimensional"
-                    : '"' +
-                          name +
-                          '" is what the graph is, not something to set'
-            );
+        if (!spec.kind) return fail(co, readOnly(which, name));
 
         var stop = sealed(co, name);
         if (stop !== null) return stop;
@@ -884,6 +873,26 @@
                     '": it takes a table of ' +
                     settableIn(props).join(", ")
             );
+
+        // The same check writeGroup() makes, for the same reason: the loop below walks the
+        // property list, so a name that is not on it is a key nothing ever looks at. A
+        // read-only one is named separately - `zmin` is real, and the reason it cannot be set
+        // is worth saying rather than offering `zmax` as a near miss.
+        var odd = stray(co, idx, props);
+        if (odd)
+            return fail(
+                co,
+                odd.name === undefined
+                    ? 'cannot set "' +
+                          which +
+                          '": a property is named with a string, not a ' +
+                          odd.type
+                    : missing(which, odd.name, settableIn(props))
+            );
+
+        var fixed = stray(co, idx, settableSet(props));
+        if (fixed && fixed.name !== undefined)
+            return fail(co, readOnly(which, fixed.name));
 
         var names = settableIn(props);
         var touched = [];
@@ -1042,7 +1051,12 @@
         });
     }
 
-    /** `item.slider.max = 20`. */
+    /**
+     * `item.slider.max = 20`: the whole-object write with one name in it.
+     *
+     * Not a path of its own. The two spellings have to mean the same thing, so there is one
+     * place that writes a nested object and this is the shorter way of reaching it.
+     */
     function writeSub(co, id, group, name, idx) {
         var g = GROUPS[group];
         var spec = g.props[name];
@@ -1051,8 +1065,8 @@
         var stop = sealed(co, group + "." + name);
         if (stop !== null) return stop;
 
-        var model = modelOf(id);
-        if (!model) return fail(co, "that item is not on the graph any more");
+        if (!modelOf(id))
+            return fail(co, "that item is not on the graph any more");
 
         var given = coerce(co, spec, idx);
         if (given.error)
@@ -1061,22 +1075,7 @@
                 'cannot set "' + group + "." + name + '": ' + given.error
             );
 
-        var held = model[group];
-        if (alike(propertyOf(held, spec, name, id), given.seen)) return 0;
-
-        var key = dep(id, group + "." + name);
-        return apply(co, name, key, given.seen, function () {
-            var patch = merged(held, name, given.api);
-
-            // The slider's bounds are one setting as far as the API is concerned, and going
-            // through it is what sets hardMin/hardMax - a bound without those does nothing.
-            if (spec.bounds)
-                return lua.setItem(id, "sliderBounds", bounds(patch));
-            // `playing` is what *starts* an animation; `isPlaying` on the model would only be
-            // a note that one was running.
-            if (spec.api) return lua.setItem(id, spec.api, given.api);
-            lua.setItem(id, group, patch, !g.api);
-        });
+        return writeParts(co, id, group, [[name, given]]);
     }
 
     /** `item.slider = { max = 20 }`, or `item.cdf = nil`. */
@@ -1099,10 +1098,26 @@
                     ", or nil to take it off"
             );
 
-        var held = modelOf(id)[group];
-        var patch = merged(held, null, null);
-        var touched = [];
+        // A name the group does not have is the mistake it is anywhere else, and this is the
+        // only place that can see one: the loop below walks the *property list*, so it only
+        // ever finds names that are already right. `item.slider = { maximum = 20 }` used to be
+        // a table with nothing recognisable in it, which is to say a line that did nothing and
+        // said nothing - while `item.slider.maximum = 20` named the typo.
+        var odd = stray(co, idx, g.props);
+        if (odd)
+            return fail(
+                co,
+                odd.name !== undefined
+                    ? missing(group, odd.name, Object.keys(g.props))
+                    : 'cannot set "' +
+                          group +
+                          '": a property is named with a string, not a ' +
+                          odd.type
+            );
 
+        // In the order the group declares rather than the order the table happens to hold, so
+        // which of two bad values is reported does not depend on Lua's hashing.
+        var touched = [];
         var names = Object.keys(g.props);
         for (var i = 0; i < names.length; i++) {
             rawfield(co, idx, names[i]);
@@ -1122,19 +1137,116 @@
                         '": ' +
                         given.error
                 );
-            patch[names[i]] = given.api;
-            touched.push([names[i], given.seen]);
+            touched.push([names[i], given]);
         }
-        if (!touched.length) return 0;
+
+        return writeParts(co, id, group, touched);
+    }
+
+    /**
+     * The first key of the table at `idx` that `props` does not have: `{ name }` for a string
+     * key, `{ type }` for one that is not a string at all, and null when every key is a
+     * property.
+     *
+     * Walked raw, for the reason rawfield() is raw: a cell can put a metatable on the table it
+     * hands over, and this runs in places arbitrary Lua must not. `lua_next` reads the table
+     * itself, so a `__index` has nothing to say here.
+     *
+     * The key is only read as a string once it is known to be one - converting a number key in
+     * place is what the manual warns `next` about.
+     */
+    function stray(co, idx, props) {
+        var at = C.lua_absindex(co, idx);
+        var found = null;
+
+        C.lua_pushnil(co);
+        while (C.lua_next(co, at)) {
+            if (found === null) {
+                if (C.lua_type(co, -2) !== C.LUA_TSTRING)
+                    found = {
+                        type: F.to_jsstring(
+                            C.lua_typename(co, C.lua_type(co, -2))
+                        )
+                    };
+                else {
+                    var name = C.lua_tojsstring(co, -2);
+                    if (!props[name]) found = { name: name };
+                }
+            }
+            C.lua_pop(co, 1);
+        }
+        return found;
+    }
+
+    /**
+     * Set some of a nested object's parts. Both spellings end up here, which is the point:
+     * `item.slider.max = 20` and `item.slider = { max = 20 }` are one write and cannot drift.
+     *
+     * **What is not named is not touched.** The patch starts as a copy of what the item has, so
+     * setting `max` leaves `min`, its hard bound and the loop mode exactly as they were - a
+     * table is a change to the parts it mentions, not a replacement of the object.
+     *
+     * **A part that would change nothing is dropped first.** A cell re-runs whenever anything
+     * it read moves, so a cell that asserts a slider bound has nothing to say on almost every
+     * run - and each write below costs a parse and a repaint, which for a cell on a ticker is
+     * the graph writing to itself as fast as it can go. The whole-object spelling used to write
+     * every time.
+     *
+     * **Three doors, and the property list says which.**
+     *
+     *   - `min`, `max` and `step` are `sliderBounds`, which is what sets `hardMin`/`hardMax` as
+     *     it goes - and a bound without those does nothing at all. They go together, because
+     *     that is the shape the API takes.
+     *   - `isPlaying` is `playing`, which *starts* an animation where the model's own field
+     *     would only be a note that one was running.
+     *   - everything else is the model, which is what the saved state is built from.
+     *
+     * The model write is made only when a part actually needs it, so a bounds-only write is
+     * still the single setExpression it always was; and it goes first, so the two API calls
+     * have the last word on the fields they own.
+     */
+    function writeParts(co, id, group, touched) {
+        var g = GROUPS[group];
+        var held = (modelOf(id) || {})[group];
+
+        var moving = touched.filter(function (one) {
+            var spec = g.props[one[0]];
+            return !alike(propertyOf(held, spec, one[0], id), one[1].seen);
+        });
+        if (!moving.length) return 0;
+
+        var patch = merged(held, null, null);
+        moving.forEach(function (one) {
+            patch[one[0]] = one[1].api;
+        });
+
+        var onModel = moving.some(function (one) {
+            var spec = g.props[one[0]];
+            return !spec.bounds && !spec.api;
+        });
+        var bounded = moving.some(function (one) {
+            return !!g.props[one[0]].bounds;
+        });
 
         try {
-            lua.setItem(id, group, patch, !g.api);
+            if (onModel) lua.setItem(id, group, patch, !g.api);
+            if (bounded) lua.setItem(id, "sliderBounds", bounds(patch));
+            moving.forEach(function (one) {
+                var api = g.props[one[0]].api;
+                if (api) lua.setItem(id, api, patch[one[0]]);
+            });
         } catch (error) {
-            return fail(co, 'could not set "' + group + '": ' + why(error));
+            return fail(
+                co,
+                'could not set "' +
+                    (moving.length === 1 ? group + "." + moving[0][0] : group) +
+                    '": ' +
+                    why(error)
+            );
         }
 
-        touched.forEach(function (one) {
-            told(dep(id, group + "." + one[0]), one[1]);
+        moving.forEach(function (one) {
+            told(dep(id, group + "." + one[0]), one[1].seen);
         });
         told(dep(id, group), undefined);
         return 0;
@@ -1406,6 +1518,25 @@
         return Object.keys(props).filter(function (name) {
             return !!props[name].kind;
         });
+    }
+
+    /** Why a property of the graph's own cannot be set. */
+    function readOnly(which, name) {
+        return which === "viewport"
+            ? '"' +
+                  name +
+                  '" can be read and not set: Desmos moves the viewport with ' +
+                  "setMathBounds, which is two dimensional"
+            : '"' + name + '" is what the graph is, not something to set';
+    }
+
+    /** The same list as an object, which is the shape stray() asks about. */
+    function settableSet(props) {
+        var out = {};
+        settableIn(props).forEach(function (name) {
+            out[name] = true;
+        });
+        return out;
     }
 
     /**

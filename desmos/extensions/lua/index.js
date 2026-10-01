@@ -462,7 +462,7 @@
      *   - **triggerRender** updates the views, so the rows show what they now say.
      *
      * Each is asked for only if it is there. A build that moved one costs that much and not the
-     * rest; ./patches.test.js is where a rename would be noticed.
+     * rest rather than the whole extension.
      */
     var parsing = null;
 
@@ -585,7 +585,11 @@
                     timer: null
                 };
                 cells.set(item.id, cell);
-                written.set(item.id, item.text);
+                // `source` and not `item.text`: a note whose text is undefined is a cell whose
+                // source is "", and flush() compares the two. Filed apart, the first flush
+                // writes an empty string back over an empty note - one setExpression, and one
+                // undo step, for a change nobody made.
+                written.set(item.id, source);
                 // A cell can arrive off the graph already broken; say so straight away, rather
                 // than only once somebody types in it.
                 if (lua.runner) lua.runner.check(cell);
@@ -596,7 +600,7 @@
                 // editor so the box catches up without losing its undo history.
                 if (source !== cell.source) {
                     cell.source = source;
-                    written.set(item.id, item.text);
+                    written.set(item.id, source);
                     if (lua.editor) lua.editor.refresh(cell);
                     if (lua.runner) lua.runner.edited(cell);
                 }

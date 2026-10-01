@@ -999,7 +999,14 @@
         markers(cell, problem);
     }
 
-    /** A squiggle under the line the error names, when there is an editor to put one in. */
+    /**
+     * A squiggle under the line the error names, when there is an editor to put one in.
+     *
+     * A line past the end of the text is no line at all. `cell.error` outlives the run that
+     * made it - it is still there while the next edit is being typed - so deleting the lines
+     * below an error leaves it pointing past them, and `getLineMaxColumn` *throws* on a line
+     * the model does not have, out of the content-change handler that brought us here.
+     */
     function markers(cell, problem) {
         if (!api) return;
         var found = models.get(cell.id);
@@ -1007,7 +1014,8 @@
         if (!problem) return api.editor.setModelMarkers(found, "cde-lua", []);
 
         var line = lua.runner.line(cell, problem);
-        if (!line) return api.editor.setModelMarkers(found, "cde-lua", []);
+        if (!line || line > found.getLineCount())
+            return api.editor.setModelMarkers(found, "cde-lua", []);
         api.editor.setModelMarkers(found, "cde-lua", [
             {
                 severity: api.MarkerSeverity.Error,
