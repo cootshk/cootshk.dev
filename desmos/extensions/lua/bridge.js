@@ -329,11 +329,7 @@
     }
 
     function sealedNewIndex(co) {
-        return fail(
-            co,
-            "this is a locked metatable, not the real one. What this extension hands a cell " +
-                "keeps its own behaviour, and there is nothing here to rewrite"
-        );
+        return fail(co, "Attempted to set new field on sealed (Desmos) value");
     }
 
     function sealedToString(co) {
@@ -1459,11 +1455,7 @@
 
     /** What the graph says is the graph's. A cell changes it by assigning the name, not this. */
     function objectNewIndex(co) {
-        return fail(
-            co,
-            "this is a value the graph answered with, not something to assign into. " +
-                "Assign the name instead, or build a table of your own"
-        );
+        return fail(co, "Attempted to add a new property to a Desmos object");
     }
 
     function objectLen(co) {
@@ -1546,7 +1538,7 @@
         if (!slot || slot.kind !== "function")
             return fail(
                 co,
-                "this is a value the graph answered with, not something to call"
+                `expected type function, got ${slot?.kind || "nil"}`
             );
         return callFn(co, slot.latex);
     }
@@ -1586,7 +1578,10 @@
      * cannot change what this says.
      */
     function desmosType(co) {
-        if (C.lua_gettop(co) < 1) return fail(co, "Desmos.type takes a value");
+        if (C.lua_gettop(co) < 1) {
+            C.lua_pushstring(co, to_luastring("nil"));
+            return 1;
+        }
 
         var native = luaType(co, 1);
         if (native !== "userdata") {
@@ -1862,7 +1857,7 @@
         var rhs = toDesmos(co, idx);
         if (rhs.error) {
             if (strict)
-                return fail(co, 'cannot export "' + latex + '": ' + rhs.error);
+                return fail(co, `cannot export latex "${latex}": ${rhs.error}`);
             current.exports.delete(key(latex));
             return false;
         }
@@ -1935,7 +1930,7 @@
         var lhs = C.lua_tojsstring(co, 1);
         var rhs = C.lua_tojsstring(co, 2);
         if (!lhs || !rhs)
-            return fail(co, "Desmos.define needs a left and a right side");
+            return fail(co, "Desmos.define needs both a left and right side");
         if (!current) return 0;
         current.exports.set(key(lhs), {
             latex: lhs + "=" + rhs,
@@ -1956,9 +1951,9 @@
         var n = C.lua_isnil(co, 5) ? 200 : Math.floor(C.lua_tonumber(co, 5));
 
         var base = toLatex(name || "");
-        if (base === null) return fail(co, "Desmos.sample needs a name");
+        if (base === null) return fail(co, "Desmos.sample expects a name");
         if (!isFinite(from) || !isFinite(to))
-            return fail(co, "Desmos.sample needs a range");
+            return fail(co, "Desmos.sample expects a range");
         if (!(n > 1) || n > 10000)
             return fail(co, "Desmos.sample needs 2..10000 points");
         if (!current) return 0;
@@ -2007,12 +2002,7 @@
         var name = C.lua_tojsstring(co, 2);
         var latex = toLatex(name);
         if (latex === null)
-            return fail(
-                co,
-                'cannot export "' +
-                    name +
-                    '": a Desmos name is a letter and an optional subscript, like k or a1'
-            );
+            return fail(co, `cannot export "${name}" as a Desmos name.`);
         if (lua.actions && lua.actions.recording()) {
             lua.actions.write(co, latex, 3);
             return 0;
@@ -2076,7 +2066,7 @@
         if (object) {
             if (object.kind === "function")
                 return {
-                    error: "that is a function of the graph's. Call it - f(3) - and assign what it gives back"
+                    error: "received a function (did you call it?)"
                 };
             if (object.latex && SHAPED[object.dtype])
                 return { latex: object.latex };
@@ -2091,14 +2081,11 @@
             return { latex: C.lua_toboolean(co, idx) ? "1" : "0" };
         if (t === C.LUA_TFUNCTION)
             return {
-                error:
-                    "a function is not a value. Assign it to a name of its own - " +
-                    "`function X(n) ... end`, or `X = action(function() ... end)` for an " +
-                    "action - and use that name where it goes"
+                error: "attempted to assign a function. Did you mean to wrap it in action()?"
             };
         if (t === C.LUA_TSTRING)
             return {
-                error: "a string is not a value. Use Desmos.define(name, latex) for raw latex"
+                error: "cannot assign a string. Try Desmos.define instead"
             };
         if (t !== C.LUA_TTABLE) return { error: "it is a " + luaType(co, idx) };
 
@@ -2121,7 +2108,7 @@
                     return v === null;
                 })
             )
-                return { error: "a point needs numbers for its coordinates" };
+                return { error: "points require numeric coordinates" };
             return { latex: "\\left(" + axes.join(",") + "\\right)" };
         }
         C.lua_pop(co, 3);
@@ -2137,7 +2124,7 @@
                 C.lua_pop(co, 1);
                 if (v === null)
                     return {
-                        error: "the list has a value that is not a number"
+                        error: "list contains a non-numeric value"
                     };
                 parts.push(v);
             } else if (inner === C.LUA_TTABLE || inner === C.LUA_TUSERDATA) {
@@ -2152,16 +2139,13 @@
                 // down as latex Desmos would read as something else entirely.
                 if (point.latex.indexOf("\\left(") !== 0)
                     return {
-                        error: "a list cannot hold a list, only numbers or points"
+                        error: "list contains another list"
                     };
                 parts.push(point.latex);
             } else {
                 C.lua_pop(co, 1);
                 return {
-                    error:
-                        "a list of " +
-                        luaType(co, idx) +
-                        " has nothing to become"
+                    error: `cannot coerce a list of type ${luaType(co, idx)}.`
                 };
             }
         }
@@ -2171,7 +2155,7 @@
         if (!parts.length) {
             if (bare(co, idx)) return { latex: "\\left[\\right]" };
             return {
-                error: "this table has nothing a Desmos value could be made of"
+                error: "table cannot be represented in Desmos"
             };
         }
         return { latex: "\\left[" + parts.join(",") + "\\right]" };
@@ -2327,11 +2311,7 @@
     function luaPoint(co) {
         var n = C.lua_gettop(co);
         if (n !== 2 && n !== 3)
-            return fail(
-                co,
-                "point takes two coordinates, or three in the 3D calculator - not " +
-                    n
-            );
+            return fail(co, "point takes 2 or 3 values, got " + n);
 
         var axes = [];
         var numbers = {};
@@ -2341,18 +2321,12 @@
             if (!isCoord(co, i))
                 return fail(
                     co,
-                    'point needs a number for "' +
-                        COORDS[i - 1] +
-                        '", not a ' +
-                        luaType(co, i)
+                    `'expected number for value "${COORDS[i - 1]}", got ${luaType(co, i)}`
                 );
 
             var one = coord(co, i);
             if (one === null)
-                return fail(
-                    co,
-                    'point needs a real number for "' + COORDS[i - 1] + '"'
-                );
+                return fail(co, `expected real number, got "${COORDS[i - 1]}"`);
             axes.push(one);
 
             if (C.lua_type(co, i) === C.LUA_TNUMBER)
