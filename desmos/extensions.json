@@ -19,7 +19,8 @@
         "core": {
             "name": "Core",
             "description": "Core patches used to load extensions.",
-            "forceEnabled": true
+            "forceEnabled": true,
+            "css": true
         },
         "desmodder": {
             "name": "DesModder",

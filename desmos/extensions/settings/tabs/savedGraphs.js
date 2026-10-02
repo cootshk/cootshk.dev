@@ -19,7 +19,7 @@
     // in scope here the same way `mode` and `MODES` are. This file only writes them.
 
     /** What the upload button says whenever it is not busy. */
-    var UPLOAD_LABEL = "Upload Graph";
+    var UPLOAD_LABEL = "Open Graph";
 
     /** How long to wait out a burst of graph edits before redrawing the thumbnail. */
     var THUMBNAIL_DELAY = 400;
