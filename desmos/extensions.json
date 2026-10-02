@@ -50,11 +50,6 @@
             ],
             "css": true
         },
-        "matrices": {
-            "name": "Matrices",
-            "description": "Enables the use of matrices outside the Matrix Calculator.",
-            "supports": ["graphing", "3d", "geometry"]
-        },
         "monospace": {
             "name": "Monospace",
             "description": "Changes the font of notes and folder labels to monospace.",
