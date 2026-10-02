@@ -425,7 +425,7 @@
             Calc = calc;
         },
 
-        /** Push the `Desmos.items` table. Called from bridge.buildDesmos. */
+        /** Push the `Desmos.items` table. Called from bridge.pushNatives, for ./init.lua. */
         push: push,
 
         /** And `Desmos.settings` and `Desmos.ticker`, which are one object each. */
@@ -1480,8 +1480,7 @@
             // nil is "off" rather than an error: `item.hidden = nil` is how Lua spells clearing
             // a field, and there is nothing else it could mean here.
             if (t === C.LUA_TNIL) return { api: false, seen: false };
-            if (t !== C.LUA_TBOOLEAN)
-                return { error: "it takes true or false" };
+            if (t !== C.LUA_TBOOLEAN) return { error: "expected a boolean" };
             var on = !!C.lua_toboolean(co, idx);
             return { api: on, seen: on };
         }
@@ -1494,14 +1493,14 @@
                 var written = String(C.lua_tonumber(co, idx));
                 return { api: written, seen: written };
             }
-            if (t !== C.LUA_TSTRING) return { error: "it takes a string" };
+            if (t !== C.LUA_TSTRING) return { error: "expected a string" };
             var text = C.lua_tojsstring(co, idx);
             return { api: text, seen: text === "" ? undefined : text };
         }
 
         if (spec.kind === "color") {
             if (t !== C.LUA_TSTRING)
-                return { error: 'it takes a colour, like "#aabbcc" or "red"' };
+                return { error: 'expected a color ("#aabbcc", "red")' };
             var hex = colorOf(C.lua_tojsstring(co, idx));
             return { api: hex, seen: hex };
         }
@@ -1509,9 +1508,9 @@
         // A duration in milliseconds, or which way an animation runs. A real number, and one
         // of the few: everything else that looks like one is latex - see below.
         if (spec.kind === "count") {
-            if (t !== C.LUA_TNUMBER) return { error: "it takes a number" };
+            if (t !== C.LUA_TNUMBER) return { error: "expected a number" };
             var count = C.lua_tonumber(co, idx);
-            if (!isFinite(count)) return { error: "it takes a number" };
+            if (!isFinite(count)) return { error: "expected a number" };
             return { api: count, seen: count };
         }
 
@@ -1523,7 +1522,7 @@
             if (t === C.LUA_TNUMBER) {
                 var v = C.lua_tonumber(co, idx);
                 var written = isFinite(v) ? lua.bridge.num(v) : null;
-                if (written === null) return { error: "it takes a number" };
+                if (written === null) return { error: "expected a number" };
                 return { api: written, seen: v };
             }
             // A string is latex outright, which is the point: `2a` is a legal width.
@@ -1534,7 +1533,7 @@
                     seen: raw === "" ? undefined : numberish(raw)
                 };
             }
-            return { error: "it takes a number, or latex as a string" };
+            return { error: "expected a number or a latex string" };
         }
 
         // A fixed-length list of numbers: which way is up in the 3D calculator, and how it is
@@ -1546,24 +1545,16 @@
                 return answered.length === spec.length
                     ? { api: answered, seen: answered }
                     : {
-                          error:
-                              "it takes " +
-                              spec.length +
-                              " numbers, and this has " +
-                              answered.length
+                          error: `expected ${spec.length} numbers, got ${answered.length}`
                       };
             if (t !== C.LUA_TTABLE)
                 return {
-                    error: "it takes a list of " + spec.length + " numbers"
+                    error: `expected ${spec.length} numbers`
                 };
             var n = C.lua_rawlen(co, idx);
             if (n !== spec.length)
                 return {
-                    error:
-                        "it takes " +
-                        spec.length +
-                        " numbers, and this has " +
-                        n
+                    error: `expected ${spec.length} numbers, got ${n}`
                 };
             var list = [];
             for (var at = 1; at <= n; at++) {
@@ -1572,7 +1563,7 @@
                 var one = number ? C.lua_tonumber(co, -1) : 0;
                 C.lua_pop(co, 1);
                 if (!number || !isFinite(one))
-                    return { error: "every one of them has to be a number" };
+                    return { error: "list contains non-numeric elements" };
                 list.push(one);
             }
             return { api: list, seen: list };
@@ -1584,13 +1575,13 @@
         if (spec.numbers && t === C.LUA_TNUMBER) {
             var size = C.lua_tonumber(co, idx);
             var spelled = isFinite(size) ? lua.bridge.num(size) : null;
-            if (spelled === null) return { error: "it takes a number" };
+            if (spelled === null) return { error: "expected a number" };
             return { api: spelled, seen: size };
         }
         if (t !== C.LUA_TSTRING)
             return {
                 error:
-                    "it takes one of " +
+                    "expected one of " +
                     words.join(", ") +
                     (spec.numbers ? ", or a number" : "")
             };
@@ -1659,11 +1650,8 @@
     /** Why a property of the graph's own cannot be set. */
     function readOnly(which, name) {
         return which === "viewport"
-            ? '"' +
-                  name +
-                  '" can be read and not set: Desmos moves the viewport with ' +
-                  "setMathBounds, which is two dimensional"
-            : '"' + name + '" is what the graph is, not something to set';
+            ? 'The viewport cannot be set directly. Try "setMathBounds" instead.'
+            : `Unable to set "${name}".`;
     }
 
     /** The same list as an object, which is the shape stray() asks about. */
@@ -1691,16 +1679,7 @@
             );
         if (names.length <= 12)
             return what + ' has no "' + name + '". It has ' + names.join(", ");
-        return (
-            what +
-            ' has no "' +
-            name +
-            '". Its properties are the ones the saved graph has: ' +
-            names.slice(0, 8).join(", ") +
-            ", and " +
-            (names.length - 8) +
-            " more - extensions/lua/README.md lists them"
-        );
+        return `${what} has no "${name}".`;
     }
 
     /** The one name within two edits of this one, if there is exactly one place to look. */
@@ -1771,9 +1750,7 @@
                 {
                     name: "byId",
                     detail: "byId(id)",
-                    documentation:
-                        "an item by Desmos' own id, wherever it sits. " +
-                        "Desmos.items[1] is the first row, which is a different thing",
+                    documentation: "gets a line by internal ID number",
                     kind: "property"
                 }
             ].concat(
@@ -1817,14 +1794,12 @@
     /** What a property will take, in words, out of the same spec the write is checked against. */
     function takes(spec) {
         if (!spec.kind) return "read-only";
-        if (spec.kind === "flag") return "true or false";
-        if (spec.kind === "text") return "a string";
-        if (spec.kind === "color")
-            return 'a colour: "#aabbcc", or one of Desmos\' own by name';
-        if (spec.kind === "number") return "a number, or latex as a string";
-        if (spec.kind === "count") return "a number";
-        if (spec.kind === "numbers")
-            return "a list of " + spec.length + " numbers";
+        if (spec.kind === "flag") return "boolean";
+        if (spec.kind === "text") return "string";
+        if (spec.kind === "color") return "color";
+        if (spec.kind === "number") return "number | latex string";
+        if (spec.kind === "count") return "number";
+        if (spec.kind === "numbers") return "number[]";
         if (spec.kind === "group")
             return "a group: " + Object.keys(grouped(spec.group)).join(", ");
         return (

@@ -293,8 +293,7 @@
         }
         return fail(
             co,
-            "this is a Desmos value, not a number - the graph has not been asked for it yet, " +
-                "so it cannot be compared inside an action. Read it in the cell body instead"
+            "[lua internal] Desmos value (not number) has not yet been cached."
         );
     }
 
@@ -379,7 +378,7 @@
      */
     function actionCall(co) {
         var slot = isAction(co, 1);
-        if (!slot) return fail(co, "that is not an action of the graph's");
+        if (!slot) return fail(co, "that is not an action on the graph");
         var base = slot.latex;
         var takesArguments = slot.takesArguments;
 
@@ -553,13 +552,7 @@
 
     /** The one-target-once rule, said the same way wherever it is broken. */
     function duplicated(co, name) {
-        return fail(
-            co,
-            'this action updates "' +
-                name +
-                '" more than once. A Desmos action assigns each variable at most once, ' +
-                "because every update happens at the same moment"
-        );
+        return fail(co, `Attempted to update ${name} twice in one action.`);
     }
 
     /**

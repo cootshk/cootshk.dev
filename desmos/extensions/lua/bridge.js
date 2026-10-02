@@ -16,10 +16,18 @@
 // be re-run from the top once the value lands.
 //
 // A cell reaches the graph and nothing else. What it is handed is a list written down in
-// pushSafe() below - `math`, `string`, `table`, the safe half of the base library, and `Desmos`
-// - and the list is the whole of it: fengari's `js` is never granted, so there is no route from
-// a cell to the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's
-// code, and opening one runs it.
+// ./init.lua - `math`, `string`, `table`, the safe half of the base library, and `Desmos` - and
+// the list is the whole of it: fengari's `js` is never granted, so there is no route from a cell
+// to the DOM, to `fetch`, or to anything else on this origin. A graph is somebody else's code,
+// and opening one runs it.
+//
+// That file is the other half of this one. Everything that is table-and-metatable assembly - the
+// whitelist, `_G`, `Desmos`, the metatable a cell's environment wears, the one every value the
+// graph answers with wears - is Lua, loaded and run once when the graph opens; see boot(). What
+// is left here is what only JavaScript can do, which is every function those metatables point
+// at. ./init.lua runs *outside* the sandbox it describes, with the real globals as its
+// environment, because a whitelist has to be able to read the names it is deciding not to pass
+// on; nothing it builds with is reachable from a cell afterwards.
 //
 // The objects this file hands over are closed rather than withheld. Each is a **userdata**
 // wearing a `__metatable`, which is Lua's own lock: `setmetatable` refuses one outright and
@@ -83,6 +91,9 @@
     var DESMOS = "cde.lua.desmos";
     var SAFE = "cde.lua.safe";
     var SEALED = "cde.lua.sealed";
+
+    /** ./init.lua's env(): one fresh environment table per run. See pushEnv. */
+    var ENV = "cde.lua.env";
 
     /** The one metatable every value the graph answers with wears. See pushObject. */
     var VALUE_META = "cde.lua.value";
@@ -185,6 +196,10 @@
 
     lua.bridge = {
         init: init,
+
+        /** Run ./init.lua. ./index.js calls this once, last, when the graph opens. */
+        boot: boot,
+
         pushEnv: pushEnv,
         pushValue: pushValue,
 
@@ -238,31 +253,153 @@
                 "desmos: Calc.HelperExpression is missing, so Lua cells cannot read the graph"
             );
 
-        // The shared globals. Not any cell's environment - those sit in front of this one - so
-        // that every read and write still goes through a metamethod.
-        C.lua_createtable(L, 0, 0);
-        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(STORE));
-
         // Somewhere to anchor running threads, so they are not collected mid-yield.
         C.lua_createtable(L, 0, 0);
         C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(THREADS));
 
-        // And _G itself, once, so every cell is handed the same table.
-        C.lua_pushnil(L);
-        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
+        // Everything a cell is handed - the shared globals, `_G`, `Desmos`, the standard
+        // library, the two metatables - is ./init.lua's, and boot() is what files it here.
+        // Emptied rather than left alone, so a second init() on a page that never got round to
+        // booting cannot leave the last load's tables behind.
+        [STORE, GLOBALS, DESMOS, SAFE, ENV, VALUE_META].forEach(function (key) {
+            C.lua_pushnil(L);
+            C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(key));
+        });
+    }
 
-        // Likewise `Desmos`, which used to be a fresh table per cell. One table, because
-        // `Desmos` and `_G.Desmos` have to be the same object - a cell that reaches the second
-        // one is asking for the first - and because a single object is a single place to look
-        // when a builtin has to behave differently inside an action body.
-        C.lua_pushnil(L);
-        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
+    // -----------------------------------------------------------------------
+    // ./init.lua
+    // -----------------------------------------------------------------------
 
-        // And the standard library, which every cell is seeded from and every `_G` lookup falls
-        // back to. Built on first use, for the same reason the two above are: `Desmos` and
-        // `action` want ./items.js and ./actions.js to have registered themselves first.
-        C.lua_pushnil(L);
-        C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
+    /**
+     * Load and run ./init.lua, and file what it hands back.
+     *
+     * Deliberately last, after ./items.js and ./actions.js have had their init() - the natives
+     * table below asks both of them for objects, and `Desmos.items` is one of them.
+     *
+     * **Outside the sandbox.** The chunk is loaded with no environment of its own, so it runs
+     * with the real globals: `load`, `debug`, `io` and `js` are all in reach of the file whose
+     * job is to decide which of them a cell gets. It is the one chunk on the page that is not a
+     * cell, it is this extension's own code rather than a graph's, and nothing it builds with
+     * survives it - see ./init.lua.
+     */
+    function boot(source) {
+        if (typeof source !== "string" || !source)
+            throw new Error("extensions/lua: init.lua was not loaded");
+
+        if (
+            lauxlib.luaL_loadbuffer(
+                L,
+                to_luastring(source),
+                null,
+                to_luastring("@lua:init")
+            ) !== C.LUA_OK
+        ) {
+            var broken = C.lua_tojsstring(L, -1);
+            C.lua_pop(L, 1);
+            throw new Error("extensions/lua: init.lua " + broken);
+        }
+
+        pushNatives(L);
+        if (C.lua_pcall(L, 1, 1, 0) !== C.LUA_OK) {
+            var why = describe(L);
+            C.lua_pop(L, 1);
+            throw new Error("extensions/lua: init.lua " + why);
+        }
+
+        // The one table it returns, taken apart into the registry keys the rest of this file
+        // reads. In this order because nothing here looks at anything else; the chunk has
+        // already wired them to each other.
+        [
+            ["store", STORE],
+            ["globals", GLOBALS],
+            ["safe", SAFE],
+            ["desmos", DESMOS],
+            ["env", ENV],
+            ["value", VALUE_META]
+        ].forEach(function (pair) {
+            C.lua_getfield(L, -1, to_luastring(pair[0]));
+            if (C.lua_isnil(L, -1))
+                throw new Error(
+                    "extensions/lua: init.lua returned no " + pair[0]
+                );
+            C.lua_setfield(L, C.LUA_REGISTRYINDEX, to_luastring(pair[1]));
+        });
+        C.lua_pop(L, 1);
+    }
+
+    /**
+     * The one argument ./init.lua is handed: every function it installs as a metamethod, and the
+     * three handles ./items.js makes.
+     *
+     * All of these are C functions, and that is the division of labour - a metamethod here
+     * reaches the graph, parks a coroutine on a name the evaluator has not priced yet, or
+     * composes latex, and none of that is expressible in Lua. Which function goes where is.
+     */
+    function pushNatives(co) {
+        C.lua_createtable(co, 0, 24);
+
+        function give(name, fn) {
+            C.lua_pushcfunction(co, fn);
+            C.lua_setfield(co, -2, to_luastring(name));
+        }
+
+        // The lock itself, which is made here rather than there: ./items.js and ./actions.js
+        // both ask for it through `lua.bridge.sealed` while this very table is being built.
+        pushSealed(co);
+        C.lua_setfield(co, -2, to_luastring("sealed"));
+
+        give("index", envIndex);
+        give("newindex", envNewIndex);
+
+        give("desmosIndex", desmosIndex);
+        give("desmosNewIndex", desmosNewIndex);
+        give("get", desmosGet);
+        give("define", desmosDefine);
+        give("sample", desmosSample);
+        give("typeOf", desmosType);
+
+        give("point", luaPoint);
+        give("print", luaPrint);
+        give("warn", luaWarn);
+
+        give("valueIndex", objectIndex);
+        give("valueNewIndex", objectNewIndex);
+        give("valueLen", objectLen);
+        give("valuePairs", objectPairs);
+        give("valueCall", objectCall);
+        give("valueToString", objectToString);
+        give("valueEq", objectEq);
+
+        // `action(f)` hands `f` straight back and remembers it: the one way a cell says out loud
+        // that a body is meant to change the graph rather than work out a value. See
+        // ./actions.js, which is also where the rest of that rule lives.
+        if (lua.actions) {
+            lua.actions.pushBuiltin(co);
+            C.lua_setfield(co, -2, to_luastring("action"));
+        }
+
+        // The graph itself, as objects. A value has no colour and a number cannot carry a
+        // metatable, so an item is a second thing to reach for - and so are the graph's settings
+        // and its ticker, which are not values at all. See ./items.js.
+        if (lua.items) {
+            lua.items.push(co);
+            C.lua_setfield(co, -2, to_luastring("items"));
+            lua.items.pushSettings(co);
+            C.lua_setfield(co, -2, to_luastring("settings"));
+            lua.items.pushTicker(co);
+            C.lua_setfield(co, -2, to_luastring("ticker"));
+        }
+    }
+
+    /** One of ./init.lua's tables, by registry key. Pushed; throws if the boot never happened. */
+    function registry(co, key, what) {
+        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(key));
+        if (!C.lua_isnil(co, -1)) return;
+        C.lua_pop(co, 1);
+        throw new Error(
+            "extensions/lua: " + what + " is missing - init.lua never ran"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -270,27 +407,23 @@
     // -----------------------------------------------------------------------
 
     /**
-     * Push the environment table for a chunk. Empty apart from the standard library, with a
-     * metatable, so *every* global read and write in the cell comes through us - which is what
-     * makes both "cell 2 sees what cell 1 defined" and "cell 2 re-runs when cell 1 changes it"
-     * fall out of the same hook.
+     * Push the environment table for a chunk: ./init.lua's env(), called.
      *
-     * One table per chunk rather than _G itself, so the standard library is a rawget and a cell
-     * that shadows one of those names - `print = 1` - has shadowed its own copy rather than
-     * everyone's. Everything else about the table is shared, because everything else goes
-     * through the metatable.
+     * A fresh table per run - empty apart from a copy of the standard library, wearing the
+     * metatable that makes every global read and write in the cell come through us. That shape
+     * and the reasons for it are written down where it is built; this is only the call.
      *
-     * The order here matters. Everything seeded goes in *before* the metatable does, so it lands
-     * in this table and nowhere else. Setting any of it afterwards would go through __newindex
-     * into the shared globals instead, publishing the standard library to every cell on the
-     * graph and spinning the writing cell against its own write until the loop guard stopped it.
+     * Called rather than inlined because the *policy* is Lua's. It runs on `co`, which has the
+     * cell's chunk on it and has not been resumed yet, and it runs before the watchdog hook goes
+     * on - so a count hook cannot yield out of the middle of building an environment.
      */
     function pushEnv(co) {
-        C.lua_createtable(co, 0, 16);
-        seed(co);
-
-        pushMeta(co);
-        C.lua_setmetatable(co, -2);
+        registry(co, ENV, "the environment factory");
+        if (C.lua_pcall(co, 0, 1, 0) !== C.LUA_OK) {
+            var why = describe(co);
+            C.lua_pop(co, 1);
+            throw new Error("extensions/lua: init.lua's env() " + why);
+        }
     }
 
     /**
@@ -337,141 +470,21 @@
         return 1;
     }
 
-    /** The metatable behind a cell's environment and behind _G. The same one, deliberately. */
-    function pushMeta(co) {
-        C.lua_createtable(co, 0, 4);
-        C.lua_pushcfunction(co, envIndex);
-        C.lua_setfield(co, -2, to_luastring("__index"));
-        C.lua_pushcfunction(co, envNewIndex);
-        C.lua_setfield(co, -2, to_luastring("__newindex"));
-        C.lua_pushcfunction(co, envPairs);
-        C.lua_setfield(co, -2, to_luastring("__pairs"));
-        // Not readable from Lua, so a cell cannot lift our functions out of it.
-        pushSealed(co);
-        C.lua_setfield(co, -2, to_luastring("__metatable"));
-    }
-
-    /**
-     * The standard library a cell starts with. Set before the metatable is on, so none of it is
-     * seen by __newindex - see pushEnv.
-     *
-     * What is left out is left out on purpose. `debug` reaches upvalues and the registry and so
-     * escapes any sandbox at all; `load`, `require` and `dofile` build an environment of their
-     * own; `io`, `os.execute` and `package` are not this page's to offer. And `js` - fengari's
-     * bridge to the page, and so to the DOM, `fetch` and every other global on this origin - is
-     * offered to nothing and nobody. A cell reaches Desmos, and that is the whole of it.
-     *
-     * The `raw*` family is in, and it is the one thing here that can be held wrong end up. A
-     * `rawset` into `_G` lands in the empty table in front of the shared globals, where it
-     * shadows the store for `_G.x` and is invisible to a bare `x` next door; a `rawset` into
-     * `Desmos` replaces a function for every cell on the graph. Neither reaches past Desmos, so
-     * neither is the sandbox's business - they are the sharp edge of a sharp tool, and reaching
-     * for `rawset` is how you say you wanted one.
-     */
-    function seed(co) {
-        pushSafe(co);
-
-        // Copied in rather than reached through, because the cell's environment is what the
-        // chunk's own globals rawget against - and a rawset there is how `print = 1` stays the
-        // cell's business instead of going out to everyone. `js` is not in the shared table for
-        // the same reason the other way round: it must reach one cell and no other.
-        drain(co);
-    }
-
     /**
      * The standard library, as one table every cell is seeded from *and* every `_G` lookup falls
      * back to. One table, because those two have to agree: `_G.print` being nil where `print` is
      * a function made `_G` look like an empty table, which is what it literally is - the values
      * live in the cell's own environment, and a lookup through the metatable never saw them.
      *
-     * Built once and kept in the registry. Everything in it is shared between cells on purpose:
-     * `math` is `math` everywhere, and a cell that rewrites its own `print` has rewritten the
-     * copy in its environment rather than this.
+     * Built by ./init.lua, which is where what is in it and what is left out are written down.
      */
     function pushSafe(co) {
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
-        if (!C.lua_isnil(co, -1)) return;
-        C.lua_pop(co, 1);
-
-        var safe = [
-            "assert",
-            "error",
-            "getmetatable",
-            "ipairs",
-            "next",
-            "pairs",
-            "pcall",
-            "xpcall",
-            "rawequal",
-            "rawget",
-            "rawlen",
-            "rawset",
-            "select",
-            "setmetatable",
-            "tonumber",
-            "tostring",
-            "type",
-            "unpack",
-            "math",
-            "string",
-            "table",
-            "coroutine",
-            "utf8"
-        ];
-
-        C.lua_createtable(co, 0, 24);
-
-        C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
-        safe.forEach(function (name) {
-            var key = to_luastring(name);
-            C.lua_getfield(co, -1, key);
-            if (C.lua_isnil(co, -1)) {
-                C.lua_pop(co, 1);
-                return;
-            }
-            C.lua_setfield(co, -3, key);
-        });
-        C.lua_pop(co, 1);
-
-        // `_G` is the shared view rather than the real globals table: a cell writing _G.x is
-        // talking to the other cells and to the graph, not to the page. Same metatable as the
-        // cell's own environment, so `x = 1` and `_G.x = 1` are one mechanism.
-        pushGlobals(co);
-        C.lua_setfield(co, -2, to_luastring("_G"));
-
-        C.lua_pushcfunction(co, luaPoint);
-        C.lua_setfield(co, -2, to_luastring("point"));
-
-        C.lua_pushcfunction(co, luaPrint);
-        C.lua_setfield(co, -2, to_luastring("print"));
-        C.lua_pushcfunction(co, luaWarn);
-        C.lua_setfield(co, -2, to_luastring("warn"));
-
-        // `action(f)` hands `f` straight back and remembers it: the one way a cell says out loud
-        // that a body is meant to change the graph rather than work out a value. See
-        // ./actions.js, which is also where the rest of that rule lives.
-        if (lua.actions) {
-            lua.actions.pushBuiltin(co);
-            C.lua_setfield(co, -2, to_luastring("action"));
-        }
-
-        pushDesmos(co);
-        C.lua_setfield(co, -2, to_luastring("Desmos"));
-
-        C.lua_pushvalue(co, -1);
-        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(SAFE));
+        registry(co, SAFE, "the standard library");
     }
 
-    /** The one `Desmos`, made on first use and kept in the registry. See init(). */
+    /** The one `Desmos`. See ./init.lua. */
     function pushDesmos(co) {
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
-        if (!C.lua_isnil(co, -1)) return;
-        C.lua_pop(co, 1);
-
-        buildDesmos(co);
-
-        C.lua_pushvalue(co, -1);
-        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(DESMOS));
+        registry(co, DESMOS, "the Desmos table");
     }
 
     /**
@@ -494,70 +507,7 @@
      * `Desmos.a` is 2. See desmosIndex.
      */
     function pushGlobals(co) {
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
-        if (!C.lua_isnil(co, -1)) return;
-        C.lua_pop(co, 1);
-
-        C.lua_createtable(co, 0, 0);
-        pushMeta(co);
-        C.lua_setmetatable(co, -2);
-
-        C.lua_pushvalue(co, -1);
-        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(GLOBALS));
-    }
-
-    /**
-     * __pairs, for both a cell's environment and _G.
-     *
-     * Without it `for k, v in pairs(_G)` finds nothing, because `_G` holds nothing: the values
-     * are behind __index, and a rawget-based traversal never reaches a metamethod. So a snapshot
-     * is built and Lua's own `next` walks that instead.
-     *
-     * In the order a lookup would find them, so the snapshot says the same thing indexing does:
-     * the standard library, then the shared globals every cell writes to, then what has been
-     * rawset into `_G`, then whatever this table holds itself - the seeded copies.
-     *
-     * **The graph is not in it.** `_G.a` answers for a name the sheet defines, and this does not
-     * enumerate one: there is no list of them that is a list of *globals*, and asking for each
-     * value is a read that can park the cell half way through a loop. The names are still there
-     * to be asked for; what is not offered is discovering them this way.
-     */
-    function envPairs(co) {
-        C.lua_createtable(co, 0, 32);
-
-        pushSafe(co);
-        drain(co);
-
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(STORE));
-        drain(co);
-
-        pushGlobals(co);
-        drain(co);
-
-        C.lua_pushvalue(co, 1);
-        drain(co);
-
-        // `next` over a plain table, which is what pairs would have returned had this one held
-        // anything. Taken from the real globals rather than written here: it is the same
-        // function the cell's own `next` is.
-        C.lua_rawgeti(co, C.LUA_REGISTRYINDEX, C.LUA_RIDX_GLOBALS);
-        C.lua_getfield(co, -1, to_luastring("next"));
-        C.lua_remove(co, -2);
-        C.lua_insert(co, -2);
-        C.lua_pushnil(co);
-        return 3;
-    }
-
-    /** Copy every pair of the table on top into the one below it, and pop the source. */
-    function drain(co) {
-        C.lua_pushnil(co);
-        while (C.lua_next(co, -2)) {
-            // dest, src, key, value -> dest, src, key, key, value
-            C.lua_pushvalue(co, -2);
-            C.lua_insert(co, -2);
-            C.lua_rawset(co, -5);
-        }
-        C.lua_pop(co, 1);
+        registry(co, GLOBALS, "_G");
     }
 
     // -----------------------------------------------------------------------
@@ -1342,32 +1292,9 @@
         C.lua_setmetatable(co, -2);
     }
 
-    /** The one metatable all of them wear, made on first use and kept in the registry. */
+    /** The one metatable all of them wear. Built by ./init.lua out of the functions below. */
     function pushValueMeta(co) {
-        C.lua_getfield(co, C.LUA_REGISTRYINDEX, to_luastring(VALUE_META));
-        if (!C.lua_isnil(co, -1)) return;
-        C.lua_pop(co, 1);
-
-        C.lua_createtable(co, 0, 7);
-        C.lua_pushcfunction(co, objectIndex);
-        C.lua_setfield(co, -2, to_luastring("__index"));
-        C.lua_pushcfunction(co, objectNewIndex);
-        C.lua_setfield(co, -2, to_luastring("__newindex"));
-        C.lua_pushcfunction(co, objectLen);
-        C.lua_setfield(co, -2, to_luastring("__len"));
-        C.lua_pushcfunction(co, objectPairs);
-        C.lua_setfield(co, -2, to_luastring("__pairs"));
-        C.lua_pushcfunction(co, objectCall);
-        C.lua_setfield(co, -2, to_luastring("__call"));
-        C.lua_pushcfunction(co, objectToString);
-        C.lua_setfield(co, -2, to_luastring("__tostring"));
-        C.lua_pushcfunction(co, objectEq);
-        C.lua_setfield(co, -2, to_luastring("__eq"));
-        pushSealed(co);
-        C.lua_setfield(co, -2, to_luastring("__metatable"));
-
-        C.lua_pushvalue(co, -1);
-        C.lua_setfield(co, C.LUA_REGISTRYINDEX, to_luastring(VALUE_META));
+        registry(co, VALUE_META, "the value metatable");
     }
 
     /**
@@ -1878,41 +1805,6 @@
             plot: false
         });
         return true;
-    }
-
-    /** The `Desmos` table itself: reads like a global, writes reach the graph. */
-    function buildDesmos(co) {
-        C.lua_createtable(co, 0, 8);
-
-        C.lua_pushcfunction(co, desmosGet);
-        C.lua_setfield(co, -2, to_luastring("get"));
-        C.lua_pushcfunction(co, desmosDefine);
-        C.lua_setfield(co, -2, to_luastring("define"));
-        C.lua_pushcfunction(co, desmosSample);
-        C.lua_setfield(co, -2, to_luastring("sample"));
-        C.lua_pushcfunction(co, desmosType);
-        C.lua_setfield(co, -2, to_luastring("type"));
-
-        // The graph itself, as objects. A value has no colour and a number cannot carry a
-        // metatable, so an item is a second thing to reach for - and so are the graph's
-        // settings and its ticker, which are not values at all. See ./items.js.
-        if (lua.items) {
-            lua.items.push(co);
-            C.lua_setfield(co, -2, to_luastring("items"));
-            lua.items.pushSettings(co);
-            C.lua_setfield(co, -2, to_luastring("settings"));
-            lua.items.pushTicker(co);
-            C.lua_setfield(co, -2, to_luastring("ticker"));
-        }
-
-        C.lua_createtable(co, 0, 3);
-        C.lua_pushcfunction(co, desmosIndex);
-        C.lua_setfield(co, -2, to_luastring("__index"));
-        C.lua_pushcfunction(co, desmosNewIndex);
-        C.lua_setfield(co, -2, to_luastring("__newindex"));
-        pushSealed(co);
-        C.lua_setfield(co, -2, to_luastring("__metatable"));
-        C.lua_setmetatable(co, -2);
     }
 
     /** Desmos.get("\\sin(2)") - any latex, not just a name. The escape hatch. */

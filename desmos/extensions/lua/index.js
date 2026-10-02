@@ -5,10 +5,14 @@
 // assigning to `Desmos`, which writes real expressions into a hidden folder.
 //
 // This file owns the boring half: what a cell *is*, where its text lives, and when that text
-// is written back to the graph. The other three are bridge.js (the Lua side of the bridge),
+// is written back to the graph. The others are bridge.js (the Lua side of the bridge),
 // runner.js (when a cell runs and what happens when it goes wrong) and editor.js (the box you
 // type into). They hang themselves off `Extensions.lua`, which is why this file is first in
 // the manifest's `file` list.
+//
+// init.lua is the one that is not a script: it is Lua, fetched by setup() below and run once by
+// bridge.boot() when the graph opens, and it builds the tables a cell is handed - the whitelist,
+// `_G`, `Desmos`, and the metatables behind them.
 //
 // A cell is one of Desmos' own notes with a `lua: true` flag on it, and `text` is the Lua
 // source, verbatim.
@@ -104,6 +108,15 @@
     var written = new Map();
 
     var Calc = null;
+
+    /**
+     * Where this file is, so ./init.lua can be found beside it rather than by spelling out a
+     * path extensions.js already owns. Read now and not later: `document.currentScript` is this
+     * script only while this script is running. ./editor.js does the same for its definitions.
+     */
+    var HERE =
+        (document.currentScript && document.currentScript.src) ||
+        "/desmos/extensions/lua/index.js";
 
     var lua = (window.Extensions && window.Extensions.lua) || {};
 
@@ -225,7 +238,32 @@
             /** Every cell on the graph, by expression id. Live - do not hold onto it. */
             cells: cells,
 
-            ready: function (calc) {
+            /**
+             * Read ./init.lua, which is the Lua half of the bridge: the table a cell is handed,
+             * `_G`, `Desmos`, and the metatables behind them. Here rather than in ready() so
+             * that it has landed before the first cell can run - the loader awaits every setup()
+             * before the page swaps, and ready() is well after that.
+             *
+             * `ctx.fetch` rather than `fetch`: the proxy's bootstrap patches the global one, and
+             * a path of this site's own handed to it goes to desmos.com.
+             *
+             * Not a failure worth swallowing. Without it there is no environment to run a cell
+             * in, so ready() says so once, at the console, rather than every cell dying of it.
+             */
+            setup: function (ctx) {
+                var get = ctx.fetch || fetch;
+                return get(new URL("init.lua", HERE).toString())
+                    .then(function (res) {
+                        if (!res.ok)
+                            throw new Error(res.status + " " + res.statusText);
+                        return res.text();
+                    })
+                    .then(function (text) {
+                        return { init: text };
+                    });
+            },
+
+            ready: function (calc, data) {
                 Calc = calc;
 
                 // An extension with `patches` is registered as a copy of the object handed to
@@ -242,6 +280,19 @@
                 if (lua.items) lua.items.init(calc);
                 if (lua.actions) lua.actions.init(calc);
                 if (lua.editor) lua.editor.init(calc);
+
+                // Last, and after the four above: ./init.lua asks ./items.js and ./actions.js
+                // for the objects it hangs off `Desmos`, and both want their init() first. It is
+                // also what every cell's environment comes out of, so nothing may run before it.
+                try {
+                    lua.bridge.boot(data && data.init);
+                } catch (error) {
+                    console.error(
+                        "desmos: Lua cells cannot run - init.lua did not",
+                        error
+                    );
+                    return;
+                }
 
                 scan();
                 Calc.observeEvent(WATCH, scan);

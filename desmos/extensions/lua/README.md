@@ -1012,6 +1012,25 @@ goes on, which is what keeps it out of the shared globals: set afterwards it wou
 `__newindex` and be published to every cell on the graph. A cell cannot reach `js`, `debug` or
 `load` by name, through `_G`, or by walking `pairs(_G)`.
 
+### Where that is written down
+
+All of it is in `init.lua`, which is Lua rather than JavaScript and is run once when the graph
+opens. It is table-and-metatable assembly - the whitelist, `_G`, `Desmos`, the metatable a cell's
+environment wears, the one every value the graph answers with wears - and Lua spells that in a
+line where fengari's C API spells it in six. `bridge.js` keeps what only it can do: every
+function those metatables point at, because each of them parks a coroutine on a name the
+evaluator has not priced yet, composes latex, or writes an export.
+
+**It runs outside the sandbox it builds.** The chunk is loaded with the real globals as its
+environment, so `load`, `debug`, `io` and `js` are all in reach of the file whose job is to decide
+which of them a cell gets - which is the only way a whitelist can be written as one. It is this
+extension's own code and not a graph's, it runs before any cell can, and nothing it builds with
+survives it: a cell gets the tables it returns, and the locals that made them go with the chunk.
+
+The loader fetches it in `setup()`, which the page awaits before Desmos starts, so it has landed
+before the first cell runs. If it does not arrive, no cell runs at all and the rows stay the
+notes they are - which is exactly what the extension being off looks like.
+
 ## Loops
 
 A cell that never finishes does not take the tab with it - it yields every few million
@@ -1137,7 +1156,8 @@ no longer land.
 | ------------------- | ------------------------------------------------------------------------------------------ |
 | `index.js`          | what a cell is, where its text lives, when it is written back, and the `lua` trigger       |
 | `builtins.js`       | Desmos' own functions: the list, how each is spelled, and how one over numbers is computed |
-| `bridge.js`         | the environment a cell runs in, reading the graph, and writing to it                       |
+| `bridge.js`         | reading the graph and writing to it - every metamethod `init.lua` installs                |
+| `init.lua`          | the tables a cell is handed: the whitelist, `_G`, `Desmos`, and the metatables            |
 | `items.js`          | the graph as objects: `Desmos.items`, `Desmos.settings`, `Desmos.ticker`                   |
 | `actions.js`        | actions both ways - recording a body, the markers, and applying updates                    |
 | `runner.js`         | when a cell runs, the loop watchdog, and errors                                            |
