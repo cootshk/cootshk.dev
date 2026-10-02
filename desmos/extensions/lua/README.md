@@ -409,6 +409,8 @@ Two consequences follow from it:
   spells out is reported there, before anything can be clicked; one that only shows up during a
   fire - because the action that ran this one moves the same name - stops the body where it
   happened and applies _nothing_. A half-moved graph is not a state anything gets to observe.
+  The same holds for an item's properties, which an action body may also set: see
+  [Setting one from an action](#setting-one-from-an-action).
 - **a value the graph has not produced yet cannot be branched on.** Rare, because the probe
   warms what a body reads before anything can fire, but it still holds for a value that depends
   on the action's own argument. See below.
@@ -708,19 +710,44 @@ far as Desmos is concerned, and handing its parser a JavaScript number throws; `
 spells one for us and the model has nobody to do it, so `items.js` does it for both. The two
 real numbers are `slider.animationPeriod`, in milliseconds, and `slider.playDirection`.
 
-### An action cannot set one
+### Setting one from an action
 
 ```lua
-Paint = action(function() Desmos.items.W.color = "blue" end)   -- not an action
+Paint = action(function()
+    Desmos.items.W.color = "blue"
+    Desmos.items.W.label = "hit"
+    hits = hits + 1
+end)
 ```
 
-An action is something Desmos runs on the graph, and a property of an item is not part of one -
-so a body that sets one has nothing to update and is not exported. Asking for it with `action`
-does not change that: the marker would have nothing to carry. Nothing is painted on the way to
-finding that out, either - defining a function must not change the graph.
+An action body may set a property, and it follows the same three rules an assignment does, for
+the same reasons:
 
-It is still an ordinary Lua function, and calling `Paint()` from a cell body does set the
-colour. What cannot happen is a button on the sheet firing it.
+- **the write is recorded, not made.** A body is run once when it is *defined*, to find out what
+  it is and to warm what it reads, and that run must not change the graph - so nothing is
+  painted until something fires. For the same reason a read inside a body sees the graph
+  everybody else still sees.
+- **the recorded writes land in one go**, when the action fires, just after its updates. So a
+  button or a ticker can move a value and restyle the item showing it in one step, at full
+  speed. "Just after" rather than "during": the Lua runs inside Desmos' own dispatch, and half
+  of what `setExpression` takes would be a dispatch inside that one, so the writes go on a
+  timer the way a cell's own writes already do. Nothing is observable in the gap - it is over
+  before the frame that would paint either half.
+- **a property can only be set once per action.** `Desmos.items.W.label` twice in one body is
+  the error `a = 1` twice in one body is, and it is reported where it is written rather than on
+  the first click. The two nested spellings are one write, so `s.slider.max = 20` and
+  `s.slider = { max = 30 }` in the same action are a duplicate too.
+
+A **function** still cannot. A property is not latex, so there is nowhere in an exported Desmos
+function to put one:
+
+```lua
+function Paint() Desmos.items.W.color = "blue" end   -- not exported
+```
+
+That is not an error - the body stays an ordinary Lua function, and calling `Paint()` from a
+cell body sets the colour where it was called. What it is not is something the sheet can hold.
+Say `action(...)`, or hand one back, and it becomes something a button can fire.
 
 ## Settings and the ticker
 

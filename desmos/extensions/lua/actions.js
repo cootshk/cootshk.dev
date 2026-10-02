@@ -43,6 +43,20 @@
 // rerolled every fire, and `b = f(a)` puts what `f(a)` is worth into `b` rather than a
 // definition that would follow `f` around afterwards.
 //
+// An action body may also set an item's properties - `Desmos.items.P.color`, a label, a slider
+// bound - and those follow the same three rules, for the same reason. A property write from
+// inside a body is *recorded* rather than made, so defining the body paints nothing and the
+// graph a read sees is still the pre-action one; the recorded writes land when the action fires,
+// after the updates; and the same property twice in one action is the duplicate error an
+// assignment twice is. See property() below and items.js' commit(), which is the one door every
+// property write goes through.
+//
+// A property is not latex and is nowhere in the update map Desmos applies - it is somebody's
+// real item being restyled - so it cannot be written down as part of a Desmos function either.
+// A *function* body that sets one is therefore not exportable, and property() says so. Unlike
+// an assignment that is not an error: the body stays a plain Lua function the cell next door
+// can call, and calling one outside an action writes where it was asked for.
+//
 // How a Lua body gets to run inside a fire at all: the action a cell exports is a marker,
 //
 //     X\left(n\right) = \left(L_{ua3}\to n\right)
@@ -82,8 +96,15 @@
     var live = new Map();
 
     /**
-     * The recording in progress, or null: `{ updates: Map, probe, mode }`, where `updates` maps
-     * a Desmos name to the latex it is to become.
+     * The recording in progress, or null: `{ updates: Map, props: Map, probe, mode }`, where
+     * `updates` maps a Desmos name to the latex it is to become. `props` is the set of item and
+     * setting properties the body has named - keyed the way items.js keys a dependency,
+     * `@<id>.color` - and is only what the duplicate rule counts; `writes` is the writes
+     * themselves, in order, one per thing the body did rather than one per property it touched.
+     *
+     * Updates and properties are kept apart because they land through different doors: an update
+     * is folded into the map Desmos is about to apply, and a property write is made here.
+     * Nothing else about them differs, the duplicate rule included.
      *
      * `mode` is which kind of body is running. `"action"` collects an assignment; `"function"`
      * refuses one, because a function computes a value and changes nothing. A body that hands
@@ -134,6 +155,9 @@
         export: exportFunction,
         release: release,
         apply: apply,
+
+        /** items.js calls this from commit(), for a property write inside a body */
+        property: property,
 
         /** ./index.js calls these: the patch, and running an action from a cell */
         updates: updates,
@@ -556,6 +580,59 @@
     }
 
     /**
+     * `item.color = "blue"` from inside a body: recorded rather than made.
+     *
+     * items.js has already worked out what the write is and checked the value - a bad colour is
+     * the cell's mistake and is worth saying where it was written, not on the first click - and
+     * hands over `run`, which makes it and answers null or why it could not. `keys` are what the
+     * write touches, in items.js' dependency spelling, and are what the duplicate rule counts; a
+     * write that would change nothing passes a null `run` and still counts, because what the rule
+     * is about is the body naming a property twice rather than the graph's luck in holding the
+     * value already.
+     *
+     * The answer is what items.js should return from the metamethod: 0 for recorded, and
+     * whatever fail() gives otherwise.
+     *
+     * A function body is refused. A property is not latex, so there is nowhere in an exported
+     * Desmos function to put one - but unlike an assignment that is not the cell's mistake, so
+     * no `illegal` is set and the body is simply never written down. It stays a Lua function, and
+     * calling one outside an action writes where it was called. See exportFunction.
+     */
+    function property(co, name, keys, run) {
+        if (!recorder) return null;
+
+        if (recorder.mode === "function")
+            return fail(
+                co,
+                `cannot set "${name}" from a function - a property is not something a ` +
+                    "function can be written down as. Set it from an action, or from the cell " +
+                    "body."
+            );
+
+        var taken = keys.some(function (one) {
+            return recorder.props.has(one);
+        });
+        if (taken) {
+            // The same allowance record() makes, for the same reason: a probe may have guessed
+            // its way past a comparison and walked both arms of one `if`.
+            if (recorder.probe) {
+                recorder.duplicate = recorder.duplicate || name;
+                return 0;
+            }
+            return duplicated(co, name);
+        }
+
+        // One write can touch several properties - `item.slider = { min = 0, max = 10 }` is one
+        // setExpression - so the keys go in the map the rule reads and the write itself goes in
+        // the list, once, in the order the body made them.
+        keys.forEach(function (one) {
+            recorder.props.set(one, name);
+        });
+        if (run) recorder.writes.push({ name: name, run: run });
+        return 0;
+    }
+
+    /**
      * Run the Lua function at `idx` as a body and return what it recorded.
      *
      * `args` are pushed as its parameters. A plain lua_pcall rather than a resume: a body must
@@ -572,6 +649,8 @@
         var outer = recorder;
         recorder = {
             updates: new Map(),
+            props: new Map(),
+            writes: [],
             probe: !!opts.probe,
             symbolic: !!opts.symbolic,
             mode: opts.mode === "function" ? "function" : "action"
@@ -589,7 +668,7 @@
             // trip over is silence. See exportFunction.
             var illegal = recorder.illegal || null;
             recorder = outer;
-            return { error: why(co), illegal: illegal };
+            return { error: why(co), illegal: illegal, writes: [] };
         }
 
         // What it handed back decides what it *is* - see exportFunction. A function means an
@@ -598,6 +677,7 @@
         var gave = C.lua_type(co, -1);
         var result = {
             updates: null,
+            writes: null,
             gave: gave,
             latex: null,
             blind: !!recorder.blind,
@@ -614,7 +694,7 @@
                 var bad = why(co);
                 if (!opts.probe) {
                     recorder = outer;
-                    return { error: bad };
+                    return { error: bad, writes: [] };
                 }
                 // A probe is discovery. It already knows what this is - a function was handed
                 // back - and it ran the inner only to find out what that one reads.
@@ -632,6 +712,7 @@
         }
 
         result.updates = recorder.updates;
+        result.writes = recorder.writes;
         result.blind = !!recorder.blind;
         result.duplicate = recorder.duplicate || null;
         result.illegal = recorder.illegal || null;
@@ -1137,12 +1218,44 @@
         // A target nothing defines at all: not an item, and not a statement any cell publishes.
         // Desmos calls this an update rule with an undefined left-hand side, and so do we.
         if (missing)
-            broke(
+            return broke(
                 slot,
                 'this action updates "' +
                     missing +
                     '", which nothing defines - give it a value first'
             );
+
+        // The property writes the body recorded, now that everything else about this fire is
+        // known to be sound. Queued rather than made here; see paint().
+        paint(slot, result.writes);
+    }
+
+    /**
+     * Make an action's recorded property writes, just after the fire rather than inside it.
+     *
+     * We are called from the middle of Desmos' own dispatch - that is the whole point of the
+     * patch, and what lets a body's updates join the ones about to be applied. A property is
+     * not one of those updates, though: half of them go through `Calc.setExpression`, which
+     * dispatches, and dispatching inside a dispatch is the one thing Desmos' dispatcher will
+     * not have. So the writes go on a timer, which is where ./index.js already puts the parse
+     * and the render a cell's own writes owe.
+     *
+     * Nothing is observable in the gap. Desmos applies the updates in `map` when merge()
+     * returns and finishes its dispatch; this runs before the frame that would paint either of
+     * them, so the value and the restyle land together as far as anything can see - which is
+     * what matters for a ticker setting a colour every step.
+     *
+     * A write that fails is this body's error like any other, and the rest are still made: one
+     * bad colour is not a reason to leave the other half of a restyle undone.
+     */
+    function paint(slot, writes) {
+        if (!writes || !writes.length) return;
+        setTimeout(function () {
+            writes.forEach(function (one) {
+                var bad = one.run();
+                if (bad) broke(slot, bad);
+            });
+        }, 0);
     }
 
     /**

@@ -59,6 +59,17 @@
 // so it is saved with the graph. The write is skipped when it would change nothing, which is
 // what keeps a cell that re-runs often from doing anything at all most of the time.
 //
+// Writing from inside an **action** works the way assigning a Desmos value from inside one
+// works, and for the same reasons: the write is recorded rather than made, the recorded writes
+// land in one go when the action fires, and the same property twice in one action is an error.
+//
+//     Hit = action(function() Desmos.items.P.color = "red"; s = s + 1 end)
+//
+// So a button or a ticker restyles the graph as it steps it, and defining the body paints
+// nothing - a body is probed when it is *defined*, and until it fires the graph a read sees is
+// the one everybody else sees. commit() below is the one door all of that goes through, and
+// actions.js' property() is the other half.
+//
 // `Desmos.settings` and `Desmos.ticker` cover the other two things DesModder's text mode hangs
 // `@{ }` off, with one wrinkle of their own: Desmos has rules about its settings that it keeps
 // by *declining* - it will not lock the viewport while the zoom buttons show - so a setting is
@@ -952,22 +963,18 @@
         if (!spec) return fail(co, missing(which, name, settableIn(props)));
         if (!spec.kind) return fail(co, readOnly(which, name));
 
-        var stop = sealed(co, name);
-        if (stop !== null) return stop;
-
         if (spec.kind === "group") return writeWhole(co, spec.group, idx);
 
         var given = coerce(co, spec, idx);
         if (given.error)
             return fail(co, 'cannot set "' + name + '": ' + given.error);
-        if (alike(propertyOf(holder(which), spec, name, null), given.seen))
-            return 0;
 
         return apply(
             co,
             name,
             "@" + which + "." + name,
             given.seen,
+            alike(propertyOf(holder(which), spec, name, null), given.seen),
             function () {
                 if (which === "ticker") return lua.setTicker(name, given.api);
                 if (which === "viewport") return moveCorner(spec, given.api);
@@ -1037,32 +1044,38 @@
         }
         if (!touched.length) return 0;
 
-        try {
-            if (which === "viewport") {
-                var corners = corner(null);
-                touched.forEach(function (one) {
-                    corners[props[one[0]].corner] = one[1].api;
-                });
-                lua.setBounds(corners);
-            } else {
-                touched.forEach(function (one) {
-                    var spec = props[one[0]];
-                    lua.setSetting(
-                        one[0],
-                        one[1].api,
-                        !!spec.direct,
-                        spec.at || one[0]
-                    );
-                });
-            }
-        } catch (error) {
-            return fail(co, 'could not set "' + which + '": ' + why(error));
-        }
-
-        touched.forEach(function (one) {
-            told("@" + which + "." + one[0], one[1].seen);
+        var keys = touched.map(function (one) {
+            return "@" + which + "." + one[0];
         });
-        return 0;
+
+        return commit(co, which, keys, false, function () {
+            try {
+                if (which === "viewport") {
+                    var corners = corner(null);
+                    touched.forEach(function (one) {
+                        corners[props[one[0]].corner] = one[1].api;
+                    });
+                    lua.setBounds(corners);
+                } else {
+                    touched.forEach(function (one) {
+                        var spec = props[one[0]];
+                        lua.setSetting(
+                            one[0],
+                            one[1].api,
+                            !!spec.direct,
+                            spec.at || one[0]
+                        );
+                    });
+                }
+            } catch (error) {
+                return 'could not set "' + which + '": ' + why(error);
+            }
+
+            touched.forEach(function (one) {
+                told("@" + which + "." + one[0], one[1].seen);
+            });
+            return null;
+        });
     }
 
     /** Move one edge of the viewport, leaving the other three where they are. */
@@ -1141,9 +1154,9 @@
      * `function f() end` case here, nothing that has to be quietly skipped, and a property
      * Desmos does not recognise is dropped on the floor by setExpression without a word.
      *
-     * A write that would change nothing is not made at all. That is most of what keeps a cell
-     * which asserts a style from doing any work: it re-runs whenever anything it reads moves,
-     * and almost every one of those runs has nothing to say.
+     * A write that would change nothing is not made at all, and a write from inside an action
+     * body is recorded rather than made - both of those are commit(), which every path here
+     * ends at.
      */
     function writeProp(co, id, name, idx) {
         var spec = PROPS[name];
@@ -1153,9 +1166,6 @@
                 co,
                 '"' + name + '" is what the item is, not something to set'
             );
-
-        var stop = sealed(co, name);
-        if (stop !== null) return stop;
 
         var model = modelOf(id);
         if (!model) return fail(co, "that item is not on the graph any more");
@@ -1168,11 +1178,17 @@
         var given = coerce(co, spec, idx);
         if (given.error)
             return fail(co, 'cannot set "' + name + '": ' + given.error);
-        if (alike(propertyOf(model, spec, name, id), given.seen)) return 0;
 
-        return apply(co, name, dep(id, name), given.seen, function () {
-            lua.setItem(id, name, given.api, !!spec.direct);
-        });
+        return apply(
+            co,
+            name,
+            dep(id, name),
+            given.seen,
+            alike(propertyOf(model, spec, name, id), given.seen),
+            function () {
+                lua.setItem(id, name, given.api, !!spec.direct);
+            }
+        );
     }
 
     /**
@@ -1185,9 +1201,6 @@
         var g = GROUPS[group];
         var spec = g.props[name];
         if (!spec) return fail(co, missing(group, name, Object.keys(g.props)));
-
-        var stop = sealed(co, group + "." + name);
-        if (stop !== null) return stop;
 
         if (!modelOf(id))
             return fail(co, "that item is not on the graph any more");
@@ -1208,9 +1221,16 @@
         var t = C.lua_type(co, idx);
 
         if (t === C.LUA_TNIL)
-            return apply(co, group, dep(id, group), undefined, function () {
-                lua.setItem(id, group, undefined, true);
-            });
+            return apply(
+                co,
+                group,
+                dep(id, group),
+                undefined,
+                (modelOf(id) || {})[group] === undefined,
+                function () {
+                    lua.setItem(id, group, undefined, true);
+                }
+            );
 
         if (t !== C.LUA_TTABLE)
             return fail(
@@ -1331,49 +1351,79 @@
      */
     function writeParts(co, id, group, touched) {
         var g = GROUPS[group];
-        var held = (modelOf(id) || {})[group];
 
-        var moving = touched.filter(function (one) {
-            var spec = g.props[one[0]];
-            return !alike(propertyOf(held, spec, one[0], id), one[1].seen);
-        });
-        if (!moving.length) return 0;
-
-        var patch = merged(held, null, null);
-        moving.forEach(function (one) {
-            patch[one[0]] = one[1].api;
-        });
-
-        var onModel = moving.some(function (one) {
-            var spec = g.props[one[0]];
-            return !spec.bounds && !spec.api;
-        });
-        var bounded = moving.some(function (one) {
-            return !!g.props[one[0]].bounds;
-        });
-
-        try {
-            if (onModel) lua.setItem(id, group, patch, !g.api);
-            if (bounded) lua.setItem(id, "sliderBounds", bounds(patch));
-            moving.forEach(function (one) {
-                var api = g.props[one[0]].api;
-                if (api) lua.setItem(id, api, patch[one[0]]);
+        /** The parts of `touched` that `held` does not already hold. */
+        function moves(held) {
+            return touched.filter(function (one) {
+                var spec = g.props[one[0]];
+                return !alike(propertyOf(held, spec, one[0], id), one[1].seen);
             });
-        } catch (error) {
-            return fail(
-                co,
-                'could not set "' +
-                    (moving.length === 1 ? group + "." + moving[0][0] : group) +
-                    '": ' +
-                    why(error)
-            );
         }
 
-        moving.forEach(function (one) {
-            told(dep(id, group + "." + one[0]), one[1].seen);
+        var label = touched.length === 1 ? group + "." + touched[0][0] : group;
+        var keys = touched.map(function (one) {
+            return dep(id, group + "." + one[0]);
         });
-        told(dep(id, group), undefined);
-        return 0;
+
+        // The object is read again inside the write rather than captured out here, because
+        // from inside an action the write is made a moment after the body said it - and what
+        // happens in that moment is Desmos applying the action's own updates, which for a
+        // slider widens the bounds to fit the value that landed. A patch built from the object
+        // as it was would put the old ones back. Out here is only the question of whether
+        // there is anything to do at all, which is asked of the state the body saw.
+        return commit(
+            co,
+            label,
+            keys,
+            !moves(holdsOf(id, group)).length,
+            function () {
+                var held = holdsOf(id, group);
+                var moving = moves(held);
+                if (!moving.length) return null;
+
+                var patch = merged(held, null, null);
+                moving.forEach(function (one) {
+                    patch[one[0]] = one[1].api;
+                });
+
+                var onModel = moving.some(function (one) {
+                    var spec = g.props[one[0]];
+                    return !spec.bounds && !spec.api;
+                });
+                var bounded = moving.some(function (one) {
+                    return !!g.props[one[0]].bounds;
+                });
+
+                try {
+                    if (onModel) lua.setItem(id, group, patch, !g.api);
+                    if (bounded) lua.setItem(id, "sliderBounds", bounds(patch));
+                    moving.forEach(function (one) {
+                        var api = g.props[one[0]].api;
+                        if (api) lua.setItem(id, api, patch[one[0]]);
+                    });
+                } catch (error) {
+                    return (
+                        'could not set "' +
+                        (moving.length === 1
+                            ? group + "." + moving[0][0]
+                            : group) +
+                        '": ' +
+                        why(error)
+                    );
+                }
+
+                moving.forEach(function (one) {
+                    told(dep(id, group + "." + one[0]), one[1].seen);
+                });
+                told(dep(id, group), undefined);
+                return null;
+            }
+        );
+    }
+
+    /** The nested object `group` of item `id`, as it stands right now. */
+    function holdsOf(id, group) {
+        return (modelOf(id) || {})[group];
     }
 
     /** A copy of a nested object with one field changed, since setting one replaces it whole. */
@@ -1401,26 +1451,27 @@
      * the echo guard in index.js means the change event this caused is the one scan() is
      * certain not to see.
      */
-    function apply(co, name, key, seen, write, check) {
-        try {
-            write();
-        } catch (error) {
-            return fail(co, 'could not set "' + name + '": ' + why(error));
-        }
-        if (check) {
-            var still = check();
-            if (!alike(still, seen))
-                return fail(
-                    co,
-                    'Desmos would not set "' +
+    function apply(co, name, key, seen, same, write, check) {
+        return commit(co, name, [key], same, function () {
+            try {
+                write();
+            } catch (error) {
+                return 'could not set "' + name + '": ' + why(error);
+            }
+            if (check) {
+                var still = check();
+                if (!alike(still, seen))
+                    return (
+                        'Desmos would not set "' +
                         name +
                         '" - it is still ' +
                         show(still) +
                         ". There is usually a reason at the console"
-                );
-        }
-        told(key, seen);
-        return 0;
+                    );
+            }
+            told(key, seen);
+            return null;
+        });
     }
 
     /** A value in an error message. */
@@ -1438,21 +1489,28 @@
     }
 
     /**
-     * Whether this write is allowed to happen at all.
+     * The one door every write in this file goes through: make it, or hand it to the action
+     * being recorded.
      *
-     * An action is something Desmos runs on the graph, and a property of an item is not part of
-     * one - so a body that sets one has nothing an action could carry, and a function being
-     * written down as latex has nowhere to put it either. It is caught here, during the probe,
-     * which is before anything is painted: defining a body must not change the graph.
+     * Inside an action body it is recorded rather than made, so defining the body paints nothing
+     * - a function is probed when it is *defined*, and that must leave the graph alone - and the
+     * writes land in one go when the action fires, after its updates. actions.js' property()
+     * holds the whole of that, the once-per-action rule included.
+     *
+     * `name` is what to call this in a message, `keys` are the dependency keys it touches, and
+     * `same` says it would change nothing as the graph stands. Outside an action that is simply
+     * a write not worth making, and is most of what keeps a cell which asserts a style from doing
+     * any work - it re-runs whenever anything it reads moves, and almost every one of those runs
+     * has nothing to say. Inside one it is still *recorded*, because the once-per-action rule is
+     * about the body naming a property twice rather than about the graph's luck in holding the
+     * value already.
      */
-    function sealed(co, name) {
-        if (!lua.actions || !lua.actions.recording()) return null;
-        return fail(
-            co,
-            `Cannot set "${name}" from a body being exported - a property is not part of an ` +
-                "action, and not something a function can be written down as. Set it from the " +
-                "cell body instead."
-        );
+    function commit(co, name, keys, same, run) {
+        if (lua.actions && lua.actions.recording())
+            return lua.actions.property(co, name, keys, same ? null : run);
+        if (same) return 0;
+        var bad = run();
+        return bad === null ? 0 : fail(co, bad);
     }
 
     /**
