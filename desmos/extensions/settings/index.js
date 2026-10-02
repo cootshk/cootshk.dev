@@ -21,6 +21,11 @@
     // own main() hook, shared out: a tab whose work outlives the modal - the saved theme,
     // which is applied whether or not anyone opens the tab - does it from there.
     //
+    // `opening` is called when the modal is opened - strictly, when any tab of ours is drawn,
+    // which is the first thing that happens - so a tab with something slow to fetch can start
+    // fetching it while its heading is still being read. tabs/themes.js gets its editor that
+    // way. It is called again every time, so it has to be cheap the second time round.
+    //
     // `id` takes over a tab Desmos already has rather than adding one: it is the id Desmos
     // itself uses, so the heading and the label are already there and only the body is ours.
     // That is how Saved Graphs works - "my-graphs" is a tab nobody can use logged out, and
@@ -122,6 +127,24 @@
         );
     }
 
+    /**
+     * The modal is open: a tab of ours has just been drawn, and every other one is a click
+     * away. One that wants a head start on something slow takes it here.
+     */
+    function opening() {
+        tabs().forEach(function (tab) {
+            if (!tab.opening) return;
+            try {
+                tab.opening();
+            } catch (error) {
+                console.warn(
+                    'desmos: the "' + tab.key + "\" tab couldn't get ready",
+                    error
+                );
+            }
+        });
+    }
+
     extension({
         id: "settings",
 
@@ -216,7 +239,10 @@
         main() {
             var ui = window.__desmosExt.ui;
             tabs().forEach(function (tab) {
-                ui.slot(tabId(tab), tab.render);
+                ui.slot(tabId(tab), function (root, controller) {
+                    opening();
+                    return tab.render(root, controller);
+                });
                 if (tab.main) tab.main();
             });
         }

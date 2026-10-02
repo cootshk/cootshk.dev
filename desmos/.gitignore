@@ -1,0 +1,7 @@
+# Contain references to internal Desmos symbols
+*.test.js
+test.js
+
+# Desmos itself
+desmos*.js
+!desmos.js

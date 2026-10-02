@@ -4,18 +4,12 @@
         "beta3d": {
             "name": "Beta3D",
             "description": "Enables beta features in the 3D calculator.",
-            "supports": [
-                "3d"
-            ]
+            "supports": ["3d"]
         },
         "betterKeypad": {
             "name": "Better Keypad",
             "description": "Adds Greek letter, copy/paste and selection keys to the on-screen keypad.",
-            "supports": [
-                "graphing",
-                "3d",
-                "geometry"
-            ],
+            "supports": ["graphing", "3d", "geometry"],
             "css": true
         },
         "bottomExpressions": {
@@ -30,32 +24,36 @@
         "desmodder": {
             "name": "DesModder",
             "description": "Loads the DesModder browser extension.",
-            "supports": [
-                "graphing",
-                "3d",
-                "geometry"
-            ]
+            "supports": ["graphing", "3d", "geometry"]
         },
         "desmosMd": {
             "name": "Desmos Markdown",
             "description": "Adds markdown support to notes in the calculator.",
-            "supports": [
-                "graphing"
-            ],
+            "supports": ["graphing"],
             "css": true
         },
         "limitlessLists": {
             "name": "Limitless Lists",
             "description": "Raises the 10,000 element cap on lists to 100,000,000."
         },
+        "lua": {
+            "name": "Lua",
+            "description": "Embed Lua into your graphs!",
+            "file": [
+                "index.js",
+                "builtins.js",
+                "bridge.js",
+                "items.js",
+                "actions.js",
+                "runner.js",
+                "editor.js"
+            ],
+            "css": true
+        },
         "matrices": {
             "name": "Matrices",
             "description": "Enables the use of matrices outside the Matrix Calculator.",
-            "supports": [
-                "graphing",
-                "3d",
-                "geometry"
-            ]
+            "supports": ["graphing", "3d", "geometry"]
         },
         "monospace": {
             "name": "Monospace",
@@ -90,15 +88,8 @@
         "shapes": {
             "name": "Shapes",
             "description": "Enables the use of shapes outside the Geometry Calculator.",
-            "supports": [
-                "graphing",
-                "3d"
-            ]
+            "supports": ["graphing", "3d"]
         }
     },
-    "defaultExtensions": [
-        "core",
-        "desmodder",
-        "settings"
-    ]
+    "defaultExtensions": ["core", "desmodder", "settings"]
 }
