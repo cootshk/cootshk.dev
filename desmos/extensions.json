@@ -33,6 +33,11 @@
             "supports": ["graphing"],
             "css": true
         },
+        "massiveMatrices": {
+            "name": "Massive Matrices",
+            "description": "Allows matrices to be larger than 32x32. Also allows some extra matrix functions.",
+            "supports": ["graphing", "3d", "geometry"]
+        },
         "limitlessLists": {
             "name": "Limitless Lists",
             "description": "Raises the 10,000 element cap on lists to 100,000,000."
