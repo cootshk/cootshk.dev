@@ -17,6 +17,7 @@
     "why": "https://www.youtube.com/watch?v=VPpIjhtgGj0",
     "y": "https://www.youtube.com/watch?v=VPpIjhtgGj0",
     "linux": "https://www.youtube.com/watch?v=MS-aLOm-6Vc",
+    "lemon": "https://youtu.be/NyLUU3O4zW8",
     ".*\\.": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
