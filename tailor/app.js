@@ -547,13 +547,205 @@ async function getVineflowerDecompiler() {
     return vfDecompilePromise;
 }
 
-async function getClassBytes(mod, className) {
-    if (!mod.zip || !mod.classEntries?.length) return null;
-    if (!mod.classLookup) {
-        mod.classLookup = Object.fromEntries(
-            mod.classEntries.map((item) => [item.name, item.entry])
-        );
+// Name -> { zip, entry } for every class the decompiler may resolve: the mod's
+// own classes first, then each classpath jar layered on top (a later jar wins).
+function ensureClassLookup(mod) {
+    if (mod.classLookup) return mod.classLookup;
+    const lookup = new Map();
+    for (const item of mod.classEntries || []) {
+        lookup.set(item.name, { zip: mod.zip, entry: item.entry, jar: null });
     }
+    for (const jar of mod.classpathJars || []) {
+        for (const item of jar.classEntries) {
+            lookup.set(item.name, {
+                zip: jar.zip,
+                entry: item.entry,
+                jar: jar.filename
+            });
+        }
+    }
+    mod.classLookup = lookup;
+    return lookup;
+}
+
+// Every class the panel can open — the mod's own plus the classpath jars —
+// each listed once, with the entry of whichever source actually provides it.
+function allClassEntries(mod) {
+    return [...ensureClassLookup(mod)].map(([name, src]) => ({
+        name,
+        entry: src.entry
+    }));
+}
+
+// macOS-Finder-style tags: one colour per class source, in classpath order.
+// Past seven sources the colours stop being tellable apart, so tagging is
+// dropped entirely rather than reused.
+const CLASS_TAG_COLORS = [
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "black"
+];
+
+// The ordered class sources — the mod itself, then each classpath jar. Tags
+// only appear once there is something on the classpath to tell apart.
+function classSources(mod) {
+    const jars = mod.classpathJars || [];
+    const sources = [
+        {
+            key: "",
+            label: mod.filename || mod.fmj?.id || "this mod",
+            own: true,
+            classEntries: mod.classEntries || []
+        },
+        ...jars.map((jar) => ({
+            key: jar.filename,
+            label: jar.filename,
+            own: false,
+            classEntries: jar.classEntries
+        }))
+    ];
+    const tagged = jars.length > 0 && sources.length <= CLASS_TAG_COLORS.length;
+    return sources.map((src, i) => ({
+        ...src,
+        color: tagged ? CLASS_TAG_COLORS[i] : null
+    }));
+}
+
+// Class name -> the one source that holds it, or null when several do. Only an
+// unambiguous class gets a tag; a duplicate is left untagged.
+function classTagOwners(mod, sources = classSources(mod)) {
+    const owners = new Map();
+    for (const src of sources) {
+        for (const item of src.classEntries) {
+            owners.set(item.name, owners.has(item.name) ? null : src);
+        }
+    }
+    return owners;
+}
+
+function tagDot(color) {
+    // The dot sits inside the row, ahead of the label, so it is carried along
+    // by the normal indent. An untagged row simply starts with its label: a
+    // row's leftmost mark is at the same offset either way.
+    return color ? `<span class="tag-dot tag-dot-${color}"></span>` : "";
+}
+
+function ensureClassResources(mod) {
+    if (!mod.classResources) {
+        mod.classResources = [...ensureClassLookup(mod).keys()];
+    }
+    return mod.classResources;
+}
+
+// Drop everything derived from the class set after the classpath changes.
+function invalidateClassIndexes(mod) {
+    mod.classLookup = null;
+    mod.classResources = null;
+    mod.classBytesCache?.clear();
+    mod.classBySlash = null;
+    mod.classByDotted = null;
+    mod.classBySimple = null;
+}
+
+// Add a library jar to the decompiler classpath. Classes that are already on
+// the classpath are overwritten by the new jar; their names are returned so the
+// caller can warn about them.
+async function addClasspathJar(mod, file) {
+    const buffer = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buffer);
+    const classEntries = Object.keys(zip.files)
+        .filter((n) => n.endsWith(".class"))
+        .map((entry) => ({ entry, name: entry.slice(0, -6) }));
+    return addClasspathSource(mod, file.name, zip, classEntries);
+}
+
+// A bundled (jar-in-jar) mod is already parsed, so its zip and class list are
+// reused as-is rather than read off disk again.
+function addBundledModToClasspath(mod, bundled) {
+    if (!bundled?.zip || !bundled.classEntries?.length) {
+        throw new Error("no .class files found");
+    }
+    return addClasspathSource(
+        mod,
+        bundled.filename,
+        bundled.zip,
+        bundled.classEntries
+    );
+}
+
+function addClasspathSource(mod, filename, zip, classEntries) {
+    if (!classEntries.length) {
+        throw new Error("no .class files found");
+    }
+
+    mod.classpathJars ??= [];
+    // Re-adding the same jar replaces it rather than clashing with itself.
+    mod.classpathJars = mod.classpathJars.filter(
+        (jar) => jar.filename !== filename
+    );
+    invalidateClassIndexes(mod);
+
+    const lookup = ensureClassLookup(mod);
+    const overwritten = classEntries
+        .filter((item) => lookup.has(item.name))
+        .map((item) => item.name);
+
+    mod.classpathJars.push({ filename, zip, classEntries });
+    invalidateClassIndexes(mod);
+
+    return { added: classEntries.length, overwritten };
+}
+
+// Warn about overwrites and bring the panel up to date. Shared by the file
+// picker and the per-bundled-jar buttons.
+function applyClasspathAddition(panel, mod, filename, result, status) {
+    if (result.overwritten.length) {
+        alert(formatOverwriteWarning(filename, result.overwritten));
+    }
+    renderClasspathList(panel, mod);
+    updateClassTreeSources(panel, mod);
+    $(".class-tree", panel)?.classList.remove("hidden");
+    if (status) {
+        status.textContent = `Added ${result.added} classes from ${filename} to the classpath${
+            result.overwritten.length
+                ? ` (${result.overwritten.length} overwritten)`
+                : ""
+        }.`;
+    }
+}
+
+function removeClasspathJar(mod, filename) {
+    if (!mod.classpathJars?.length) return false;
+    const before = mod.classpathJars.length;
+    mod.classpathJars = mod.classpathJars.filter(
+        (jar) => jar.filename !== filename
+    );
+    if (mod.classpathJars.length === before) return false;
+    invalidateClassIndexes(mod);
+    return true;
+}
+
+function formatOverwriteWarning(filename, overwritten) {
+    const SHOWN = 10;
+    const names = overwritten
+        .slice(0, SHOWN)
+        .map((n) => n.replace(/\//g, "."))
+        .join("\n");
+    const more =
+        overwritten.length > SHOWN
+            ? `\n…and ${overwritten.length - SHOWN} more`
+            : "";
+    const plural = overwritten.length === 1 ? "class was" : "classes were";
+    return `Warning: ${overwritten.length} duplicate ${plural} overwritten by ${filename}:\n\n${names}${more}`;
+}
+
+async function getClassBytes(mod, className) {
+    if (!mod.zip) return null;
+    const lookup = ensureClassLookup(mod);
     if (!mod.classBytesCache) {
         mod.classBytesCache = new Map();
     }
@@ -562,9 +754,9 @@ async function getClassBytes(mod, className) {
         return mod.classBytesCache.get(className);
     }
 
-    const entry = mod.classLookup[className];
-    if (!entry) return null;
-    const file = mod.zip.file(entry);
+    const source = lookup.get(className);
+    if (!source) return null;
+    const file = source.zip.file(source.entry);
     if (!file) return null;
     const bytes = await file.async("uint8array");
     mod.classBytesCache.set(className, bytes);
@@ -577,11 +769,8 @@ async function getClassBytes(mod, className) {
 
 async function decompileClassInMod(mod, className) {
     const decompile = await getVineflowerDecompiler();
-    if (!mod.classResources) {
-        mod.classResources = mod.classEntries.map((item) => item.name);
-    }
     const result = await decompile([className], {
-        resources: mod.classResources,
+        resources: ensureClassResources(mod),
         source: (name) => getClassBytes(mod, name),
         options: {
             banner: "// Decompiled with Tailor using Vineflower\n\n"
@@ -673,6 +862,13 @@ function renderMod(mod) {
     $("#input-section").style.display = "none";
     const results = $("#results-section");
     results.classList.remove("hidden");
+
+    // No classes of its own means no Class Decompiler card, so there is no
+    // explorer for a bundled jar to be added to: the CSS hides those buttons.
+    document.body.classList.toggle(
+        "no-class-explorer",
+        !mod.classEntries?.length
+    );
 
     const fmj = mod.fmj;
     const modrinthInfo = modrinthLookup[mod.sha1];
@@ -817,6 +1013,7 @@ function renderMod(mod) {
     // Setup expand toggles and buttons
     setupJarToggles();
     setupViewFullButtons();
+    setupBundledClasspathButtons();
     setupDecompilerButtons();
     setupCollapsibles();
     updateModrinthButtons();
@@ -878,6 +1075,11 @@ function renderJarItem(mod, index, depth = 0) {
         </div>
         <div class="jar-item-actions">
           <a class="btn-icon btn-modrinth-sm ${modrinthUrl ? "" : "hidden"}" href="${modrinthUrl || "#"}" target="_blank" rel="noopener" data-sha1="${mod.sha1}" title="View on Modrinth" onclick="event.stopPropagation()">${iconSvg("modrinth")}</a>
+          ${
+              mod.classEntries?.length
+                  ? `<button class="btn-icon btn-add-bundled-classpath" data-mod-sha1="${mod.sha1}" title="Add to classpath" onclick="event.stopPropagation()">${iconSvg("package")}</button>`
+                  : ""
+          }
           <button class="btn-icon btn-view-full" data-mod-sha1="${mod.sha1}" title="View full details" onclick="event.stopPropagation()">${iconSvg("maximize")}</button>
           <span class="jar-item-version">${esc(fmj.version || "?")}</span>
         </div>
@@ -959,6 +1161,7 @@ function clearModResources(mod) {
     mod.classBytesCache = null;
     mod.classLookup = null;
     mod.classResources = null;
+    mod.classpathJars = null;
     mod.zip = null;
     mod.classEntries = null;
     if (mod.jars?.length) {
@@ -978,6 +1181,41 @@ function setupViewFullButtons() {
                 modStack.push(targetMod);
                 renderMod(targetMod);
                 window.scrollTo({ top: 0, behavior: "smooth" });
+            }
+        });
+    });
+}
+
+// "Add to classpath" on a bundled jar: puts that jar on the classpath of the
+// mod currently being browsed, so its classes show up in the explorer above.
+function setupBundledClasspathButtons() {
+    $$(".btn-add-bundled-classpath").forEach((btn) => {
+        if (btn.dataset.bound) return;
+        btn.dataset.bound = "1";
+        btn.addEventListener("click", () => {
+            const mod = modStack[modStack.length - 1];
+            // Hidden by .no-class-explorer when there is no panel; the guard
+            // just keeps the handler honest.
+            const panel = $(".decompiler-panel");
+            if (!mod || !panel) return;
+            const status = $(".decompiler-status", panel);
+            const bundled = findModBySha1(modStack[0], btn.dataset.modSha1);
+            if (!bundled) return;
+
+            try {
+                const result = addBundledModToClasspath(mod, bundled);
+                applyClasspathAddition(
+                    panel,
+                    mod,
+                    bundled.filename,
+                    result,
+                    status
+                );
+            } catch (err) {
+                if (status) {
+                    status.textContent = `Could not add ${bundled.filename}: ${err.message}`;
+                }
+                console.error(err);
             }
         });
     });
@@ -1137,59 +1375,55 @@ function renderDecompilerPanel(mod) {
           </select>
         </label>
         <button class="btn btn-secondary btn-export-sources" data-mod-sha1="${mod.sha1}">${iconSvg("archive")} export sources (.zip)</button>
+        <button class="btn btn-secondary btn-add-classpath" data-mod-sha1="${mod.sha1}">${iconSvg("package")} add jar to classpath</button>
+        <input type="file" class="classpath-input" accept=".jar,.zip" multiple hidden>
       </div>
+      <div class="classpath-list hidden"></div>
       <div class="decompiler-status">Click "explore classes" to browse .class files.</div>
-      <div class="class-tree hidden">${renderClassTree(mod.classEntries, activeMinecraftVersion)}</div>
+      <div class="class-tree hidden">${renderClassTree(mod, activeMinecraftVersion)}</div>
       <pre class="decompiler-output hidden"><code class="decompiler-code"></code></pre>
     </div>
   `;
 }
 
-function renderClassTree(classEntries, minecraftVersion) {
-    const root = { dirs: {}, files: [] };
-    const sorted = [...classEntries].sort((a, b) =>
-        a.entry.localeCompare(b.entry)
-    );
-
-    for (const item of sorted) {
-        const parts = item.entry.split("/");
-        let node = root;
-        for (let i = 0; i < parts.length - 1; i++) {
-            const part = parts[i];
-            if (!node.dirs[part]) {
-                node.dirs[part] = { dirs: {}, files: [] };
-            }
-            node = node.dirs[part];
-        }
-        node.files.push(item);
+function renderClasspathList(panel, mod) {
+    const list = $(".classpath-list", panel);
+    if (!list) return;
+    const jars = mod.classpathJars || [];
+    if (!jars.length) {
+        list.classList.add("hidden");
+        list.innerHTML = "";
+        return;
     }
-
-    const renderNode = (node) => {
-        const dirNames = Object.keys(node.dirs).sort((a, b) =>
-            a.localeCompare(b)
-        );
-        const folders = dirNames
-            .map(
-                (name) => `
-      <details class="class-tree-folder" open>
-        <summary>${esc(name)}</summary>
-        ${renderNode(node.dirs[name])}
-      </details>
+    list.classList.remove("hidden");
+    const sources = classSources(mod);
+    const untagged = sources.length > CLASS_TAG_COLORS.length;
+    list.innerHTML = `<span class="classpath-label">Classpath</span>${sources
+        .map(
+            (src) => `
+      <span class="classpath-chip${src.own ? " classpath-chip-own" : ""}">
+        ${tagDot(src.color)}
+        <span class="classpath-chip-name">${esc(src.label)}</span>
+        <span class="classpath-chip-count">${src.classEntries.length}</span>
+        ${
+            src.own
+                ? ""
+                : `<button class="classpath-remove" type="button" data-classpath-jar="${esc(src.key)}"
+                aria-label="Remove ${esc(src.label)} from the classpath" title="Remove from classpath">&times;</button>`
+        }
+      </span>
     `
-            )
-            .join("");
-        const files = node.files
-            .map(
-                (file) => `
-      <button class="class-tree-file" type="button" data-class-name="${esc(file.name)}" data-class-entry="${esc(file.entry)}">${esc(file.entry.split("/").pop())}</button>
-    `
-            )
-            .join("");
-        return `<div class="class-tree-children">${folders}${files}</div>`;
-    };
+        )
+        .join("")}${
+        untagged
+            ? `<span class="classpath-note">too many jars to colour-tag</span>`
+            : ""
+    }`;
+}
 
+function renderClassTree(mod, minecraftVersion) {
     return `
-    ${renderNode(root)}
+    <div class="class-tree-sources">${renderClassTreeSources(mod)}</div>
     <div class="class-tree-minecraft">
       <div class="class-tree-minecraft-title">
         Minecraft sources (${esc(minecraftVersion || "select version")})
@@ -1201,8 +1435,75 @@ function renderClassTree(classEntries, minecraftVersion) {
   `;
 }
 
-function getClassCacheKey(modSha1, classEntry) {
-    return `${classEntry}-${modSha1}:text`;
+// One merged tree over the mod and every classpath jar, tagged by source.
+function renderClassTreeSources(mod) {
+    return renderClassNodes(allClassEntries(mod), classTagOwners(mod));
+}
+
+// Replace just the class listing, keeping the visited-Minecraft-sources list.
+function updateClassTreeSources(panel, mod) {
+    const sources = $(".class-tree-sources", panel);
+    if (sources) sources.innerHTML = renderClassTreeSources(mod);
+}
+
+function renderClassNodes(classEntries, owners = new Map()) {
+    const newNode = () => ({ dirs: new Map(), files: [], owners: new Set() });
+    const root = newNode();
+    const sorted = [...classEntries].sort((a, b) =>
+        a.entry.localeCompare(b.entry)
+    );
+
+    for (const item of sorted) {
+        const owner = owners.get(item.name) || null;
+        const parts = item.entry.split("/");
+        let node = root;
+        node.owners.add(owner);
+        for (let i = 0; i < parts.length - 1; i++) {
+            const part = parts[i];
+            if (!node.dirs.has(part)) node.dirs.set(part, newNode());
+            node = node.dirs.get(part);
+            node.owners.add(owner);
+        }
+        node.files.push({ ...item, owner });
+    }
+
+    // A folder is tagged only when everything under it comes from one source.
+    const folderColor = (node) =>
+        (node.owners.size === 1 ? [...node.owners][0]?.color : null) || null;
+
+    const renderNode = (node) => {
+        const dirNames = [...node.dirs.keys()].sort((a, b) =>
+            a.localeCompare(b)
+        );
+        const folders = dirNames
+            .map((name) => {
+                const child = node.dirs.get(name);
+                return `
+      <details class="class-tree-folder" open>
+        <summary>${tagDot(folderColor(child))}${esc(name)}</summary>
+        ${renderNode(child)}
+      </details>
+    `;
+            })
+            .join("");
+        const files = node.files
+            .map(
+                (file) => `
+      <button class="class-tree-file" type="button" data-class-name="${esc(file.name)}" data-class-entry="${esc(file.entry)}">${tagDot(file.owner?.color || null)}${esc(file.entry.split("/").pop())}</button>
+    `
+            )
+            .join("");
+        return `<div class="class-tree-children">${folders}${files}</div>`;
+    };
+
+    return renderNode(root);
+}
+
+function getClassCacheKey(mod, classEntry) {
+    // Classpath jars change what the decompiler can resolve, so output cached
+    // under a different classpath must not be reused.
+    const cp = (mod.classpathJars || []).map((j) => j.filename).join("+");
+    return `${classEntry}-${mod.sha1}${cp ? `-cp:${cp}` : ""}:text`;
 }
 
 function readClassCache(key) {
@@ -1241,7 +1542,7 @@ function ensureModClassIndexes(mod) {
     mod.classByDotted = new Map();
     mod.classBySimple = new Map();
 
-    for (const entry of mod.classEntries || []) {
+    for (const entry of allClassEntries(mod)) {
         const slash = entry.name;
         const dotted = slash.replace(/\//g, ".");
         const simple = dotted.split(".").pop();
@@ -1618,7 +1919,7 @@ async function openClassInPanel(panel, mod, className, status) {
 
     const output = $(".decompiler-output", panel);
     const code = $(".decompiler-code", panel);
-    const cacheKey = getClassCacheKey(mod.sha1, classEntry.entry);
+    const cacheKey = getClassCacheKey(mod, classEntry.entry);
     const cached = readClassCache(cacheKey);
 
     panel.dataset.viewKind = "mod";
@@ -1676,17 +1977,22 @@ function triggerDownload(blob, filename) {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-// Decompile every top-level class in the mod jar, remap net.minecraft references
-// to the selected mappings, and download the sources as a .zip.
+// Decompile every top-level class the class tree lists — the mod's own classes
+// plus every classpath jar — remap net.minecraft references to the selected
+// mappings, and download the sources as a .zip.
 async function exportAllSources(mod, panel, status, btn) {
     // Top-level classes only — Vineflower nests inner classes into their outer file.
-    const entries = (mod.classEntries || []).filter(
+    const entries = allClassEntries(mod).filter(
         (e) => !e.name.split("/").pop().includes("$")
     );
     if (!entries.length) {
         status.textContent = "No classes to export.";
         return;
     }
+    const jarCount = mod.classpathJars?.length || 0;
+    const jarNote = jarCount
+        ? ` (including ${jarCount} classpath jar${jarCount === 1 ? "" : "s"})`
+        : "";
 
     const version = panel.dataset.mcVersion;
     const namespace = panel.dataset.mcNamespace;
@@ -1694,12 +2000,11 @@ async function exportAllSources(mod, panel, status, btn) {
     const total = entries.length;
 
     btn.disabled = true;
-    status.textContent = `Preparing to decompile ${total} classes…`;
+    status.textContent = `Preparing to decompile ${total} classes${jarNote}…`;
     try {
         const decompile = await getVineflowerDecompiler();
         const mc = remap ? await getMcModule().catch(() => null) : null;
-        if (!mod.classResources)
-            mod.classResources = mod.classEntries.map((i) => i.name);
+        const resources = ensureClassResources(mod);
 
         const zip = new JSZip();
         let done = 0,
@@ -1716,7 +2021,7 @@ async function exportAllSources(mod, panel, status, btn) {
                 result = await decompile(
                     batch.map((e) => e.name),
                     {
-                        resources: mod.classResources,
+                        resources,
                         source: (n) => getClassBytes(mod, n),
                         options: {
                             banner: "// Decompiled with Tailor using Vineflower\n\n"
@@ -1762,7 +2067,7 @@ async function exportAllSources(mod, panel, status, btn) {
             "_"
         );
         triggerDownload(blob, `${base}-sources${nsTag}.zip`);
-        status.textContent = `Exported ${done} classes${failed ? ` (${failed} failed)` : ""} to ${base}-sources${nsTag}.zip.`;
+        status.textContent = `Exported ${done} classes${jarNote}${failed ? `, ${failed} failed,` : ""} to ${base}-sources${nsTag}.zip.`;
     } catch (err) {
         status.textContent = `Export failed: ${err.message}`;
         console.error(err);
@@ -1784,6 +2089,9 @@ function setupDecompilerButtons() {
         const mcSelect = $(".decompiler-mc-select", panel);
         const mappingSelect = $(".decompiler-mapping-select", panel);
         const exportBtn = $(".btn-export-sources", panel);
+        const classpathBtn = $(".btn-add-classpath", panel);
+        const classpathInput = $(".classpath-input", panel);
+        const classpathList = $(".classpath-list", panel);
 
         exploreBtn.addEventListener("click", () => {
             tree.classList.toggle("hidden");
@@ -1792,6 +2100,57 @@ function setupDecompilerButtons() {
         exportBtn?.addEventListener("click", async () => {
             const mod = findModInStackBySha1(exportBtn.dataset.modSha1);
             if (mod) await exportAllSources(mod, panel, status, exportBtn);
+        });
+
+        // The panel is re-rendered on every navigation; restore any jars the
+        // mod already has on its classpath.
+        if (classpathBtn) {
+            const boundMod = findModInStackBySha1(classpathBtn.dataset.modSha1);
+            if (boundMod) renderClasspathList(panel, boundMod);
+        }
+
+        classpathBtn?.addEventListener("click", () => classpathInput?.click());
+
+        classpathInput?.addEventListener("change", async () => {
+            const files = [...(classpathInput.files || [])];
+            classpathInput.value = ""; // allow re-picking the same file
+            const mod = findModInStackBySha1(classpathBtn.dataset.modSha1);
+            if (!mod || !files.length) return;
+
+            classpathBtn.disabled = true;
+            try {
+                for (const file of files) {
+                    status.textContent = `Adding ${file.name} to the classpath…`;
+                    try {
+                        const result = await addClasspathJar(mod, file);
+                        applyClasspathAddition(
+                            panel,
+                            mod,
+                            file.name,
+                            result,
+                            status
+                        );
+                    } catch (err) {
+                        status.textContent = `Could not add ${file.name}: ${err.message}`;
+                        console.error(err);
+                    }
+                }
+            } finally {
+                classpathBtn.disabled = false;
+            }
+        });
+
+        classpathList?.addEventListener("click", (e) => {
+            const removeBtn = e.target.closest(".classpath-remove");
+            if (!removeBtn) return;
+            const mod = findModInStackBySha1(classpathBtn.dataset.modSha1);
+            if (!mod) return;
+            const filename = removeBtn.dataset.classpathJar;
+            if (removeClasspathJar(mod, filename)) {
+                renderClasspathList(panel, mod);
+                updateClassTreeSources(panel, mod);
+                status.textContent = `Removed ${filename} from the classpath.`;
+            }
         });
 
         mcSelect?.addEventListener("change", () => {
@@ -2159,6 +2518,7 @@ function resetView() {
     }
     $("#results-section").classList.add("hidden");
     $("#input-section").style.display = "";
+    document.body.classList.remove("no-class-explorer");
     fileInput.value = "";
     modStack = [];
     modrinthLookup = {};

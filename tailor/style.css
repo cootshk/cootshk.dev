@@ -17,6 +17,13 @@
   --orange: #f6ad55;
   --blue: #7eb8da;
   --purple: #c4a7e7;
+  --tag-red: #eb6f6f;
+  --tag-orange: #f6ad55;
+  --tag-yellow: #ebd07c;
+  --tag-green: #5ad17e;
+  --tag-blue: #7eb8da;
+  --tag-purple: #c4a7e7;
+  --tag-black: #15131f;
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 2px 8px rgba(0,0,0,0.3);
@@ -732,6 +739,71 @@ body {
   color: var(--text-muted);
 }
 
+.classpath-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.classpath-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.classpath-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  padding: 4px 6px 4px 10px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.classpath-chip-name {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.classpath-chip-count,
+.classpath-note {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.classpath-chip-own {
+  padding-right: 10px;
+}
+
+.classpath-note {
+  font-style: italic;
+}
+
+.classpath-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.classpath-remove:hover {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
 .decompiler-status {
   font-size: 0.82rem;
   color: var(--text-secondary);
@@ -765,14 +837,39 @@ body {
   background: var(--bg-input);
 }
 
+/* Finder-style source tags: one colour per jar on the classpath. */
+.tag-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: baseline;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.tag-dot-red { background: var(--tag-red); }
+.tag-dot-orange { background: var(--tag-orange); }
+.tag-dot-yellow { background: var(--tag-yellow); }
+.tag-dot-green { background: var(--tag-green); }
+.tag-dot-blue { background: var(--tag-blue); }
+.tag-dot-purple { background: var(--tag-purple); }
+.tag-dot-black {
+  background: var(--tag-black);
+  box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
 .class-tree-children {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.class-tree-folder {
-  margin-left: 12px;
+/* Indent a folder's contents rather than the folder itself, so files are
+   nested under their folder exactly like subfolders are. */
+.class-tree-folder > .class-tree-children {
+  padding-left: 12px;
 }
 
 .class-tree-folder > summary {
@@ -803,7 +900,9 @@ body {
   color: var(--text-primary);
   cursor: pointer;
   border-radius: 6px;
-  padding: 4px 8px;
+  /* Matches the folder summary padding so files, folders and their tag dots
+     all line up in the same column at a given depth. */
+  padding: 4px 6px;
   font-size: 0.8rem;
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
@@ -1129,6 +1228,12 @@ body {
 }
 
 .btn-icon svg { width: 14px; height: 14px; }
+
+/* A mod with no classes of its own has no class explorer, so there is nowhere
+   to add a bundled jar's classpath entry. */
+body.no-class-explorer .btn-add-bundled-classpath {
+  display: none;
+}
 
 .btn-modrinth-sm {
   color: var(--accent);
