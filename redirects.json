@@ -19,6 +19,9 @@
     "linux": "https://www.youtube.com/watch?v=MS-aLOm-6Vc",
     "lemon": "https://youtu.be/NyLUU3O4zW8",
     "dolphin": "https://github.com/danielmiessler/SecLists/pull/155",
+    "desmos\/physicsem": "https://www.desmos.com/gallery/dabe531b-d4cc-423e-8538-89e6b0a8e18c",
+    "desmos\/random": "https://www.desmos.com/gallery/b41ddc41-ef9f-4f23-a162-617ad5e45721",
+    "desmos\/": "/desmos#$1",
     ".*\\.": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     ".*": "https://www.youtube.com/watch?v=pX7nsPPWYy0"
 }
