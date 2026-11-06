@@ -48,7 +48,7 @@
             },
             // Opening a saved or example graph that belongs to another calculator.
             {
-                match: /case"fetch-and-open-graph":\{let (\i)=this\.graphsController\.graphCache\.getGraph\(\i\.graphId\);if\(!\1\)break;/,
+                match: /case"fetch-and-open-graph":\{let (\i)=this\.graphsController\.graphCache\.getGraph\(\i\.graphId\);if\(!\1(?:\|\|[^;]*)?\)break;/,
                 replace:
                     "$&if($1.product!==this.product)" +
                     "return void $self.open($1.product,$1.hash);",
@@ -83,6 +83,12 @@
             {
                 match: /this\.bugsnagClient\.(\i)/,
                 replace: "this.bugsnagClient?.$1"
+            },
+            // disable other analytics
+            {
+                match: /if\(!\i\)return;(let \i=\["trackEvent)/,
+                replace: "if(true)return;$1",
+                count: 1
             }
         ],
 
